@@ -7,6 +7,16 @@ from twilio.rest import Client
 from apscheduler.schedulers.background import BackgroundScheduler
 from contextlib import asynccontextmanager
 
+# Core Credentials
+TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+CLAUDE_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+FROM_WHATSAPP = "whatsapp:+14155238886"
+TO_WHATSAPP = "whatsapp:+919963214141"
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "agent_memory.db")
+
 def init_db_tables():
     """Ensures all required tracking tables exist on boot (crucial for cloud deployments)."""
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -69,15 +79,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Core Credentials
-TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-CLAUDE_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-FROM_WHATSAPP = "whatsapp:+14155238886"
-TO_WHATSAPP = "whatsapp:+919963214141"
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "agent_memory.db")
 # ==========================================
 # 1. DATABASE STATE UTILITIES
 # ==========================================
