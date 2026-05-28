@@ -7,6 +7,51 @@ from twilio.rest import Client
 from apscheduler.schedulers.background import BackgroundScheduler
 from contextlib import asynccontextmanager
 
+def init_db_tables():
+    """Ensures all required tracking tables exist on boot (crucial for cloud deployments)."""
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    cursor = conn.cursor()
+    
+    # 1. Core Profile Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_profile (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
+    
+    # Seed default skill level if the table was just created empty
+    cursor.execute("SELECT value FROM user_profile WHERE key='skill_level'")
+    if not cursor.fetchone():
+        cursor.execute("INSERT INTO user_profile (key, value) VALUES ('skill_level', 'Foundational')")
+        print("💾 State Engine: Initialized default 'Foundational' profile state on host server.")
+
+    # 2. Sent Concept History Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sent_history (
+            concept TEXT PRIMARY KEY,
+            summary TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # 3. Conversational Chat History Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS chat_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            role TEXT,
+            content TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+    print("✅ State Engine: All database tables verified and ready.")
+
+# 🚀 RUN THE INITIALIZER IMMEDIATELY ON SCRIPBOOT
+init_db_tables()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Spin up the background scheduler clock
