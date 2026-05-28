@@ -78,6 +78,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+@app.get("/")
+def health_check():
+    """Lightweight endpoint for cron-job.org to ping and keep the server awake."""
+    return {"status": "healthy", "message": "Engine is awake"}
+
 
 # ==========================================
 # 1. DATABASE STATE UTILITIES
