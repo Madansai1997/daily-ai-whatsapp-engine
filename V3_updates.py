@@ -67,8 +67,7 @@ async def lifespan(app: FastAPI):
     # Spin up the background scheduler clock
     scheduler = BackgroundScheduler(timezone="Asia/Kolkata") # Set to your local India timezone
     
-    # Schedule 'run_morning_digest' to execute every single day at 9:00 AM
-    scheduler.add_job(run_morning_digest, "cron", hour=22, minute=23)
+    scheduler.add_job(run_morning_digest, "cron", hour=9, minute=0)
     scheduler.start()
     print("⏰ Automated Scheduler Active: Set to fire daily at 09:00 AM.")
     
