@@ -1,6 +1,8 @@
 fastapi
-uvicorn[standard]
-requests
-beautifulsoup4
+uvicorn
 twilio
+requests
 apscheduler
+beautifulsoup4
+python-dotenv
+python-multipart
