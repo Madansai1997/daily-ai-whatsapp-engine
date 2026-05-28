@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 # Core Credentials
 TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-CLAUDE_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 FROM_WHATSAPP = "whatsapp:+14155238886"
 TO_WHATSAPP = "whatsapp:+919963214141"
 
