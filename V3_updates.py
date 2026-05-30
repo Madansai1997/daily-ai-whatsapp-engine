@@ -449,7 +449,7 @@ Structure the `<reference_implementation>` response as valid Python code contain
         prompt += f"\n\n⚠️ CRITICAL CORRECTION REQUIRED FROM PREVIOUS ATTEMPT:\n{feedback_loop_msg}"
 
     response = await anthropic_client.messages.create(
-        model="claude-4-6-sonnet",
+        model="claude-sonnet-4-6",
         max_tokens=1200,
         temperature=0.2,
         messages=[{"role": "user", "content": prompt}]
