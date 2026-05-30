@@ -111,7 +111,7 @@ async def lifespan(app: FastAPI):
 
     # Spin up the background scheduler clock (AsyncIOScheduler runs inside the FastAPI event loop)
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata") # Set to India timezone
-    scheduler.add_job(run_morning_digest, "cron", hour=23, minute=53
+    scheduler.add_job(run_morning_digest, "cron", hour=9, minute=0
     )
     scheduler.start()
     print("⏰ Automated Scheduler Active: Set to fire daily at 09:00 AM.")
