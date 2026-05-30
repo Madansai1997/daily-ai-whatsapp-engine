@@ -6,3 +6,5 @@ apscheduler
 beautifulsoup4
 python-dotenv
 python-multipart
+anthropic
+aiosqlite
