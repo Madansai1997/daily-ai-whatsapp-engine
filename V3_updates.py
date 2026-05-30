@@ -111,8 +111,7 @@ async def lifespan(app: FastAPI):
 
     # Spin up the background scheduler clock (AsyncIOScheduler runs inside the FastAPI event loop)
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata") # Set to India timezone
-    scheduler.add_job(run_morning_digest, "cron", hour=9, minute=0
-    )
+    scheduler.add_job(run_morning_digest, "cron", hour=9, minute=0)
     scheduler.start()
     print("⏰ Automated Scheduler Active: Set to fire daily at 09:00 AM.")
     
@@ -228,7 +227,7 @@ Output raw JSON only. If no facts are extracted, output an empty array [].
 """
     try:
         response = await anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-3-5-sonnet-latest",
             max_tokens=300,
             temperature=0.0,
             messages=[{"role": "user", "content": prompt}]
@@ -265,8 +264,6 @@ def fetch_live_internet_updates() -> list[dict]:
     agentic scaffolds, and production test/eval pipelines.
     """
     articles = []
-    
-    # Consolidated cross-domain query to fetch diverse industry contexts in one call
     unified_query = "latest artificial intelligence breakthroughs enterprise multi agent frameworks production architectures LLM evaluation guardrails testing evals"
     
     if TAVILY_API_KEY:
@@ -277,7 +274,7 @@ def fetch_live_internet_updates() -> list[dict]:
             "query": unified_query,
             "search_depth": "advanced",
             "include_raw_content": False,
-            "max_results": 8  # Increased result counts to catch diverse website tracks naturally
+            "max_results": 8
         }
         try:
             res = requests.post(url, json=payload, timeout=15)
@@ -294,7 +291,6 @@ def fetch_live_internet_updates() -> list[dict]:
         except Exception as e:
             print(f"⚠️ Ingestion: Tavily API request failed ({e}). Falling back to DuckDuckGo...")
             
-    # Fallback to DuckDuckGo HTML scraper using the unified multi-track query
     print("🕷️ Ingestion: Scraping broad multi-track updates from DuckDuckGo...")
     encoded_query = unified_query.replace(" ", "+")
     search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
@@ -360,28 +356,23 @@ Student skill track: {skill_level}
 Previously covered concepts: {history_concepts}
 
 Your job is to select the next logical learning concept. Focus on one of these core areas:
-1. Advanced Prompting/Scaffolding (e.g., self-consistency, router chains, prompting for structured output)
-2. RAG QA Testing (e.g., retrieval precision, embedding validation, reranker evaluations)
-3. Multi-Agent Systems Testing (e.g., mocking agents, loop detection, state-space exploration)
-4. LLM Guardrails & Evals (e.g., semantic drift detection, assertion-based output validation)
+1. Advanced Prompting/Scaffolding
+2. RAG QA Testing
+3. Multi-Agent Systems Testing
+4. LLM Guardrails & Evals
 
-Output a single JSON object with the following keys:
-- "concept": The name of the concept (short, e.g., "Dynamic Prompt Router Testing")
-- "pedagogical_focus": 1-sentence explanation of why the student needs to learn this today
-- "assert_template": Guidelines of what standard assertions should test
-
-Do not output any conversational text. Output raw JSON only.
+Output a single, compact JSON object with exactly these keys: "concept", "pedagogical_focus", "assert_template".
+CRITICAL: Do not enclose your output in markdown ```json blocks. Do not add trailing commas or leave strings unterminated. Output raw, valid JSON only.
 """
     try:
         response = await anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-3-5-sonnet-latest",
             max_tokens=300,
             temperature=0.4,
             messages=[{"role": "user", "content": prompt}]
         )
         text = response.content[0].text.strip()
         
-        # Clean markdown code blocks if present
         if text.startswith("```json"):
             text = text.replace("```json", "", 1)
         if text.startswith("```"):
@@ -440,7 +431,12 @@ Structure the `<whatsapp_payload>` response EXACTLY matching this layout. Use ON
 *📘 WHAT I NEED TO LEARN & PROJECTS TO WORK ON*
 - *Core Concept to Master Today*: {concept} — {pedagogical_focus}
 - *Practical Mini-Project Blueprint*: A quick technical project loop.
-- *QA Validation Lines*: Write exactly 3 short, executable Python 'assert' code verification lines testing this concept. Ensure the functions called in the assertions match the ones defined in your reference implementation.
+- *QA Validation Lines*:
+assert your_function_here() == True
+assert your_second_function() is not None
+assert your_third_function() == expected_value
+
+CRITICAL FORMATTING RULE FOR QA LINES: Write exactly 3 standard, executable Python assertion lines. Every line MUST start with the raw lowercase word "assert" followed by a space. Do not place emojis, hyphens, numbers, or markdown code blocks (```) on these lines. Ensure the functions called in the assertions match the ones defined in your reference implementation.
 
 Structure the `<reference_implementation>` response as valid Python code containing the function definitions tested by the assertions.
 """
@@ -449,7 +445,7 @@ Structure the `<reference_implementation>` response as valid Python code contain
         prompt += f"\n\n⚠️ CRITICAL CORRECTION REQUIRED FROM PREVIOUS ATTEMPT:\n{feedback_loop_msg}"
 
     response = await anthropic_client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-3-5-sonnet-latest",
         max_tokens=1200,
         temperature=0.2,
         messages=[{"role": "user", "content": prompt}]
@@ -457,7 +453,6 @@ Structure the `<reference_implementation>` response as valid Python code contain
     
     text = response.content[0].text
     
-    # Parse tags
     whatsapp_payload = ""
     reference_code = ""
     
@@ -468,7 +463,6 @@ Structure the `<reference_implementation>` response as valid Python code contain
         
     if "<reference_implementation>" in text and "</reference_implementation>" in text:
         reference_code = text.split("<reference_implementation>")[1].split("</reference_implementation>")[0].strip()
-        # Clean up code blocks if present
         if reference_code.startswith("```python"):
             reference_code = reference_code.replace("```python", "", 1)
         if reference_code.startswith("```"):
@@ -487,10 +481,8 @@ def run_code_sandbox(reference_code: str, assert_lines: list) -> tuple[bool, str
     """Runs the reference implementation and assertions in a restricted context to verify logic."""
     print("🧪 [Sandbox Executor]: Verifying code assertions...")
     
-    # Construct unified code string
     full_code = reference_code + "\n\n" + "\n".join(assert_lines)
     
-    # Prepare sandbox environment with basic safe primitives
     sandbox_globals = {
         "__builtins__": {
             "abs": abs, "all": all, "any": any, "bin": bin, "bool": bool,
@@ -508,10 +500,7 @@ def run_code_sandbox(reference_code: str, assert_lines: list) -> tuple[bool, str
     }
     
     try:
-        # Check compiling syntax first
         compiled = compile(full_code, "<sandbox>", "exec")
-        
-        # Execute in sandboxed context
         exec(compiled, sandbox_globals)
         return True, "All assertions passed successfully."
     except AssertionError as e:
@@ -531,7 +520,6 @@ def run_qa_critic(content, reference_code):
     has_updates = "*🔴 REGULAR DAILY AI UPDATES*" in content
     has_learnings = "*📘 WHAT I NEED TO LEARN & PROJECTS TO WORK ON*" in content
     
-    # Parse assertions from content
     assert_lines = []
     for line in content.split('\n'):
         if line.strip().startswith('assert ') or 'assert' in line:
@@ -543,7 +531,6 @@ def run_qa_critic(content, reference_code):
     char_length = len(content)
     within_twilio_limit = char_length <= 1550
     
-    # Density check for Daily updates
     lines = content.split('\n')
     is_in_update_block = False
     update_count = 0
@@ -563,7 +550,6 @@ def run_qa_critic(content, reference_code):
     if not within_twilio_limit: errors.append(f"Payload out of size bounds ({char_length}/1600 chars).")
     if not (3 <= update_count <= 8): errors.append(f"Density check mismatch. Found {update_count} updates, expected 5-7.")
 
-    # Sandbox checks
     sandbox_passed = False
     sandbox_msg = ""
     if has_assert_syntax and reference_code:
@@ -599,21 +585,16 @@ async def run_morning_digest():
     try:
         skill_level, recent_topics, full_history_log = await get_db_state()
         
-        # 1. Run Curriculum Planner Agent to get tailored concept
         planner_context = await run_curriculum_planner(skill_level, recent_topics)
         concept = planner_context.get("concept", "Agentic Scaffolding Testing")
         
-        # 2. Fetch live updates (runs requests blocking call in thread pool)
         loop = asyncio.get_running_loop()
         raw_news = await loop.run_in_executor(None, fetch_live_internet_updates)
         
-        # 3. Store new articles in database knowledge cache
         await save_articles_to_knowledge_store(raw_news)
         
-        # 4. Query RAG engine for relevant articles matching selected concept
         relevant_articles = await retrieve_relevant_context(concept, limit=3)
         
-        # Format the retrieved article context
         if relevant_articles:
             print(f"📚 RAG Engine: Retrieved {len(relevant_articles)} relevant articles matching concept '{concept}'")
             context_blocks = []
@@ -622,7 +603,6 @@ async def run_morning_digest():
             news_context = "\n\n".join(context_blocks)
         else:
             print("📚 RAG Engine: No high-relevance matches found in knowledge store. Using fallback recent news.")
-            # Fallback to recent articles from this scrape
             context_blocks = []
             for idx, art in enumerate(raw_news[:3]):
                 context_blocks.append(f"[{idx+1}] Title: {art['title']}\nURL: {art['url']}\nSnippet: {art['content']}")
@@ -657,7 +637,6 @@ async def run_morning_digest():
         if is_valid_run:
             await log_sent_concept(concept, final_text)
             
-            # Send message via Twilio (run twilio's blocking API in thread pool)
             try:
                 def send_twilio():
                     twilio_client = Client(TWILIO_SID, TWILIO_TOKEN)
@@ -679,25 +658,20 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
     user_message = Body.strip()
     loop = asyncio.get_running_loop()
     
-    # 🚀 Manual Trigger Command
     if user_message.lower() in ["digest", "refresh", "force digest"]:
         print("⚡ [Manual Override]: 'digest' keyword detected. Triggering morning engine immediately...")
-        # Fire off morning digest routine directly
         digest_status = await run_morning_digest()
         
-        # Log this control event
         await log_chat_message("user", user_message)
         await log_chat_message("assistant", f"Manual trigger activated. Status: {digest_status.get('status')}")
         
         return Response(content="<Response></Response>", media_type="text/xml")
         
-    # 1. Log incoming user message
     await log_chat_message("user", user_message)
     
     skill_level, recent_topics, full_history_log = await get_db_state()   
     exclusions = ", ".join(recent_topics) if recent_topics else "None"
     
-    # Retrieve long-term memory facts
     facts = await get_user_facts(limit=10)
     facts_context = "\n".join([f"- {f}" for f in facts]) if facts else "None recorded yet."
     
@@ -727,12 +701,11 @@ EXECUTION LOGIC:
 - If they submit code snippets or questions about a mini-project, review their implementation instantly and provide a brief QA code critique or advice.
 """
 
-    # 2. Fetch the last 5 messages for memory context
     conversation_history = await get_recent_chat_history(limit=5)
     
     try:
         response = await anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-3-5-sonnet-latest",
             max_tokens=500,
             temperature=0.3,
             system=system_instruction,
@@ -740,10 +713,8 @@ EXECUTION LOGIC:
         )
         ai_response = response.content[0].text.strip()
         
-        # 3. Log response
         await log_chat_message("assistant", ai_response)
         
-        # Stateful Self-Correction
         if "shifting their profile state to 'Advanced'" in ai_response or "to *Advanced*" in ai_response:
             await update_db_skill("Advanced")
             print("💾 State Engine: Automatically scaled user state to Advanced.")
@@ -751,14 +722,12 @@ EXECUTION LOGIC:
             await update_db_skill("Foundational")
             print("💾 State Engine: Automatically dialed user state back to Foundational.")
             
-        # 🚀 Asynchronously trigger fact extraction in the background (zero impact on WhatsApp reply latency)
         asyncio.create_task(extract_and_save_facts(user_message, ai_response))
             
     except Exception as e:
         print(f"❌ Webhook LLM routing error: {e}")
         ai_response = "⚠️ Connection to the coaching engine was interrupted. Please check your terminal console logs for structural issues."
 
-    # Echo the dialogue back directly to your phone thread
     try:
         def send_twilio():
             client = Client(TWILIO_SID, TWILIO_TOKEN)
@@ -772,16 +741,5 @@ EXECUTION LOGIC:
 
 if __name__ == "__main__":
     import uvicorn
-    # Read the port assigned by Render, defaulting to 8000 locally
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("V3_updates:app", host="0.0.0.0", port=port, reload=False)
-
-
-
-
-
-
-
-
-
-
