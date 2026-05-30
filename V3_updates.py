@@ -227,7 +227,7 @@ Output raw JSON only. If no facts are extracted, output an empty array [].
 """
     try:
         response = await anthropic_client.messages.create(
-            model="claude-3-5-sonnet-latest",
+            model="claude-sonnet-4-6",
             max_tokens=300,
             temperature=0.0,
             messages=[{"role": "user", "content": prompt}]
@@ -445,7 +445,7 @@ Structure the `<reference_implementation>` response as valid Python code contain
         prompt += f"\n\n⚠️ CRITICAL CORRECTION REQUIRED FROM PREVIOUS ATTEMPT:\n{feedback_loop_msg}"
 
     response = await anthropic_client.messages.create(
-        model="claude-3-5-sonnet-latest",
+        model="claude-sonnet-4-6",
         max_tokens=1200,
         temperature=0.2,
         messages=[{"role": "user", "content": prompt}]
@@ -705,7 +705,7 @@ EXECUTION LOGIC:
     
     try:
         response = await anthropic_client.messages.create(
-            model="claude-3-5-sonnet-latest",
+            model="claude-sonnet-4-6",
             max_tokens=500,
             temperature=0.3,
             system=system_instruction,
