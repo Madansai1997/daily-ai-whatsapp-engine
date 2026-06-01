@@ -5,7 +5,8 @@ import asyncio
 import json
 import requests
 import subprocess
-import random  # Added for generating OTP security codes
+import random
+import re
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Response, Form
 from twilio.rest import Client
@@ -23,9 +24,6 @@ TO_WHATSAPP = "whatsapp:+919963214141"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "agent_memory.db")
-
-# 🔒 VOLATILE AUTHENTICATION CACHE (Stored in server memory)
-PENDING_AUTH_CODE = None
 
 # Initialize Anthropic client safely
 def get_anthropic_client():
@@ -579,31 +577,6 @@ def run_qa_critic(content, reference_code):
 
 
 # ==========================================
-# EXTRA EXTRA: TERMINAL UTILITY FOR AUTOMATED GIT
-# ==========================================
-def execute_automated_git_push(commit_message: str = "Automated agent update") -> tuple[bool, str]:
-    """Runs a terminal subprocess chain to safely stage, commit, and push modifications."""
-    print("🚀 [Git Engine]: Starting automated workspace push...")
-    try:
-        # 1. Stage changes
-        subprocess.run(["git", "add", "."], check=True, capture_output=True)
-        # 2. Commit changes
-        subprocess.run(["git", "commit", "-m", commit_message], check=True, capture_output=True)
-        # 3. Push to upstream origin
-        subprocess.run(["git", "push", "origin", "main"], check=True, capture_output=True, text=True)
-        
-        print("✅ [Git Engine]: Terminal subprocess returned status code 0. Deployed upstream.")
-        return True, "Code successfully pushed to GitHub main branch."
-    except subprocess.CalledProcessError as e:
-        err = e.stderr.decode().strip() if e.stderr else str(e)
-        print(f"❌ [Git Engine]: Subprocess execution failed: {err}")
-        return False, err
-    except Exception as e:
-        print(f"❌ [Git Engine]: Critical runtime environment failure: {str(e)}")
-        return False, str(e)
-
-
-# ==========================================
 # 7. ENDPOINTS WITH EMBEDDED RETRY AGENT LOOPS
 # ==========================================
 @app.post("/run-morning-digest")
@@ -679,73 +652,100 @@ async def run_morning_digest():
         return {"status": "Error running digest pipeline", "error": str(e)}
 
 
+# ==========================================
+# 🛠️ HARDENED LINEAR SUBPROCESS WORKFLOW ROUTING
+# ==========================================
 @app.post("/whatsapp-webhook")
 async def incoming_whatsapp_reply(Body: str = Form(...)):
-    global PENDING_AUTH_CODE
     user_message = Body.strip()
-    user_message_clean = user_message.lower()
+    user_message_clean = user_message.lower().strip()
     loop = asyncio.get_running_loop()
     
-    # --- INTERCEPT 1: AUTOMATED DIGEST MANUAL TRIGGERS ---
-    if user_message_clean in ["digest", "refresh", "force digest"]:
+    print(f"📥 [Incoming Message]: '{user_message_clean}'")
+    await log_chat_message("user", user_message)
+
+    # =========================================================================
+    # 🚀 DIRECT TERMINAL ROUTERS (STRICT EARLY RETURNS - NO CONVERSATIONAL FALLTHROUGH)
+    # =========================================================================
+
+    # 1. TRIGGER: "push to git" or "git push"
+    if "push to git" in user_message_clean or "git push" in user_message_clean:
+        print(f"💻 [Terminal Engine]: Executing Git Push inside {BASE_DIR}")
+        
+        def run_git_push():
+            try:
+                # Stage changes safely
+                subprocess.run(["git", "add", "."], check=True, capture_output=True, cwd=BASE_DIR)
+                
+                # Check for changes to prevent empty commit blocks
+                status_check = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, cwd=BASE_DIR)
+                if not status_check.stdout.strip():
+                    return True, "Working tree clean. No changes detected to commit or push."
+
+                # Commit and Push upstream
+                subprocess.run(["git", "commit", "-m", "Automated hot-swap deployment via WhatsApp Webhook Engine"], check=True, capture_output=True, cwd=BASE_DIR)
+                res = subprocess.run(["git", "push", "origin", "main"], check=True, capture_output=True, text=True, cwd=BASE_DIR)
+                return True, res.stdout.strip() if res.stdout else "Push completed successfully."
+            except subprocess.CalledProcessError as e:
+                return False, e.stderr.decode().strip() if e.stderr else str(e)
+            except Exception as e:
+                return False, str(e)
+                
+        success, terminal_log = await loop.run_in_executor(None, run_git_push)
+        execution_response = "🚀 *Git Push Success!* Workspace updated upstream. ✅" if success else f"⚠️ *Git Push Failed.*\n\nLogs:\n```{terminal_log}```"
+        
+        await log_chat_message("assistant", execution_response)
+        await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=execution_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
+        return Response(content="<Response></Response>", media_type="text/xml")
+
+    # 2. TRIGGER: "git pull" or "git merge"
+    if "git pull" in user_message_clean or "git merge" in user_message_clean:
+        print("💻 [Terminal Engine]: Executing Git Pull...")
+        
+        def run_git_pull():
+            try:
+                res = subprocess.run(["git", "pull", "origin", "main", "--no-rebase"], check=True, capture_output=True, text=True, cwd=BASE_DIR)
+                return True, res.stdout.decode().strip() if isinstance(res.stdout, bytes) else res.stdout.strip()
+            except subprocess.CalledProcessError as e:
+                return False, e.stderr.decode().strip() if e.stderr else str(e)
+                
+        success, terminal_log = await loop.run_in_executor(None, run_git_pull)
+        execution_response = f"📥 *Git Pull Success!*\n\nLogs:\n```{terminal_log}```" if success else f"⚠️ *Git Pull Failed.*\n\nLogs:\n```{terminal_log}```"
+
+        await log_chat_message("assistant", execution_response)
+        await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=execution_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
+        return Response(content="<Response></Response>", media_type="text/xml")
+
+    # 3. TRIGGER ACTION TRACK: "git status"
+    elif "git status" in user_message_clean:
+        print("💻 [Terminal Subprocess]: Querying status tree...")
+        await log_chat_message("user", user_message)
+        
+        def run_git_status():
+            try:
+                res = subprocess.run(["git", "status"], capture_output=True, text=True, cwd=BASE_DIR)
+                return res.stdout.strip()
+            except Exception as e:
+                return str(e)
+
+        status_output = await loop.run_in_executor(None, run_git_status)
+        execution_response = f"📊 *Local Workspace Repository Status Tree*:\n\nPath: `{BASE_DIR}`\n\n```{status_output}```"
+        
+        await log_chat_message("assistant", execution_response)
+        await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=execution_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
+        return Response(content="<Response></Response>", media_type="text/xml")
+    
+    # 4. TRIGGER ACTION TRACK: MANUAL DAILY DIGEST
+    elif user_message_clean in ["digest", "refresh", "force digest"]:
         print("⚡ [Manual Override]: 'digest' keyword detected. Triggering morning engine immediately...")
+        await log_chat_message("user", user_message)
         digest_status = await run_morning_digest()
-        
-        await log_chat_message("user", user_message)
         await log_chat_message("assistant", f"Manual trigger activated. Status: {digest_status.get('status')}")
-        
         return Response(content="<Response></Response>", media_type="text/xml")
 
-    # --- INTERCEPT 2: AUTHORIZATION APPROVAL LOOP ---
-    if user_message_clean.startswith("approve"):
-        print("🔑 [Auth Verification]: Evaluating incoming confirmation handshake...")
-        await log_chat_message("user", user_message)
-        
-        parts = user_message.split()
-        incoming_code = parts[1].strip() if len(parts) > 1 else ""
-        
-        if PENDING_AUTH_CODE and incoming_code == str(PENDING_AUTH_CODE):
-            # Clear cache immediately to prevent reuse
-            PENDING_AUTH_CODE = None
-            
-            # Execute terminal tasks
-            success, report = await loop.run_in_executor(None, execute_automated_git_push, "Pushed from WhatsApp agent loop")
-            
-            if success:
-                ai_response = "🚀 *Git Deploy Complete!* I've successfully opened your terminal shell, staged your files, created a commit, and pushed to your upstream repository branch main. ✅"
-            else:
-                ai_response = f"⚠️ *Execution Interrupted.* Git terminal task failed with details:\n`{report}`"
-        else:
-            ai_response = "❌ *Access Denied.* The verification code matches neither the pending cache nor active authorizations. Git process aborted."
-            PENDING_AUTH_CODE = None # Flush mismatched state
-            
-        await log_chat_message("assistant", ai_response)
-        
-        def send_auth_reply():
-            client = Client(TWILIO_SID, TWILIO_TOKEN)
-            client.messages.create(body=ai_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
-        await loop.run_in_executor(None, send_auth_reply)
-        return Response(content="<Response></Response>", media_type="text/xml")
-
-    # --- INTERCEPT 3: INITIALIZE SECURITY GATEWAY FOR GIT ---
-    if "push to git" in user_message_clean or "update to git" in user_message_clean:
-        print("🛠️ [Auth Gate Initialization]: Code change/push action requested.")
-        await log_chat_message("user", user_message)
-        
-        # Generate a dynamic temporary 4-digit code
-        PENDING_AUTH_CODE = random.randint(1000, 9999)
-        print(f"🔑 [Auth Gate]: Active session OTP created: {PENDING_AUTH_CODE}")
-        
-        ai_response = f"🛠️ *Secure Execution Gate Initialized.* I've prepared a sandbox to stage your code workspace changes.\n\nTo authorize the terminal push to GitHub, reply with:\n`APPROVE {PENDING_AUTH_CODE}`"
-        await log_chat_message("assistant", ai_response)
-        
-        def send_gate_init():
-            client = Client(TWILIO_SID, TWILIO_TOKEN)
-            client.messages.create(body=ai_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
-        await loop.run_in_executor(None, send_gate_init)
-        return Response(content="<Response></Response>", media_type="text/xml")
-        
-    # --- DEFAULT PATHWAY: STANDARD COACHING CONVERSATION ---
+    # -------------------------------------------------------------------------
+    # 💬 DEFAULT PATHWAY: STANDARD CONVERSATIONAL AI COACHING ROUTE
+    # -------------------------------------------------------------------------
     await log_chat_message("user", user_message)
     
     skill_level, recent_topics, full_history_log = await get_db_state()   
@@ -755,7 +755,6 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
     facts_context = "\n".join([f"- {f}" for f in facts]) if facts else "None recorded yet."
     
     print(f"📥 Received WhatsApp message: '{user_message}' [Current Track: {skill_level}]")
-    print(f"🧠 Long-Term Memory Context:\n{facts_context}")
     
     system_instruction = f"""
 You are an expert AI Test Architect and Curriculum Coach guiding an engineer named Madan transitioning into Agentic AI Quality Engineering.
