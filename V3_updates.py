@@ -7,6 +7,7 @@ import requests
 import subprocess
 import random
 import re
+import base64
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Response, Form
 from twilio.rest import Client
@@ -22,8 +23,13 @@ CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 FROM_WHATSAPP = "whatsapp:+14155238886"
 TO_WHATSAPP = "whatsapp:+919963214141"
 
+# GitHub REST API Credentials for Remote Deployment
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = os.getenv("GITHUB_REPO") # Expected layout: "username/repository_name"
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "agent_memory.db")
+STAGED_CODE_FILE = "/tmp/staged_code_update.json"
 
 # Initialize Anthropic client safely
 def get_anthropic_client():
@@ -662,162 +668,215 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
     loop = asyncio.get_running_loop()
     
     print(f"📥 [Incoming Message]: '{user_message_clean}'")
-    await log_chat_message("user", user_message)
 
     # =========================================================================
-    # 🚀 DIRECT TERMINAL ROUTERS (STRICT EARLY RETURNS - NO CONVERSATIONAL FALLTHROUGH)
+    # PHASE 2: EVALUATE APPROVAL / CONFIRMATION COMMANDS
     # =========================================================================
-
-    # 1. TRIGGER: "push to git" or "git push"
-    if "push to git" in user_message_clean or "git push" in user_message_clean:
-        print(f"💻 [Terminal Engine]: Executing Git Push inside {BASE_DIR}")
-        
-        def run_git_push():
+    if user_message_clean in ["approve", "yes", "confirm", "push"]:
+        await log_chat_message("user", user_message)
+        if not os.path.exists(STAGED_CODE_FILE):
+            no_stage_msg = "⚠️ *No changes are currently staged.* Send me an upgrade instruction first!"
+            await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=no_stage_msg, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
+            return Response(content="<Response></Response>", media_type="text/xml")
+            
+        def execute_staged_push():
             try:
-                # Stage changes safely
-                subprocess.run(["git", "add", "."], check=True, capture_output=True, cwd=BASE_DIR)
+                if not GITHUB_TOKEN or not GITHUB_REPO:
+                    return False, "GITHUB_TOKEN or GITHUB_REPO missing from Render platform environment variables."
+                    
+                with open(STAGED_CODE_FILE, "r") as f:
+                    staged_data = json.load(f)
                 
-                # Check for changes to prevent empty commit blocks
-                status_check = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, cwd=BASE_DIR)
-                if not status_check.stdout.strip():
-                    return True, "Working tree clean. No changes detected to commit or push."
-
-                # Commit and Push upstream
-                subprocess.run(["git", "commit", "-m", "Automated hot-swap deployment via WhatsApp Webhook Engine"], check=True, capture_output=True, cwd=BASE_DIR)
-                res = subprocess.run(["git", "push", "origin", "main"], check=True, capture_output=True, text=True, cwd=BASE_DIR)
-                return True, res.stdout.strip() if res.stdout else "Push completed successfully."
-            except subprocess.CalledProcessError as e:
-                return False, e.stderr.decode().strip() if e.stderr else str(e)
+                headers = {
+                    "Authorization": f"token {GITHUB_TOKEN}",
+                    "Accept": "application/vnd.github.v3+json"
+                }
+                file_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/V3_updates.py"
+                payload = {
+                    "message": f"🤖 Approved Auto-Upgrade: {staged_data['instruction'][:50]}...",
+                    "content": base64.b64encode(staged_data["code"].encode("utf-8")).decode("utf-8"),
+                    "sha": staged_data["sha"],
+                    "branch": "main"
+                }
+                
+                put_res = requests.put(file_url, headers=headers, json=payload)
+                
+                if os.path.exists(STAGED_CODE_FILE):
+                    os.remove(STAGED_CODE_FILE)
+                
+                if put_res.status_code in [200, 201]:
+                    return True, "Success"
+                else:
+                    return False, put_res.json().get("message", "Unknown write fault.")
             except Exception as e:
                 return False, str(e)
-                
-        success, terminal_log = await loop.run_in_executor(None, run_git_push)
-        execution_response = "🚀 *Git Push Success!* Workspace updated upstream. ✅" if success else f"⚠️ *Git Push Failed.*\n\nLogs:\n```{terminal_log}```"
-        
+
+        success, report = await loop.run_in_executor(None, execute_staged_push)
+        if success:
+            execution_response = "🚀 *Approval Received!* Code has been committed and pushed to GitHub main branch.\n\n🔄 *Render Continuous Deployment Initiated.* Monitor dashboard for live container updates."
+        else:
+            execution_response = f"❌ *Deployment Engine Aborted.*\n\nDetails: `{report}`"
+            
         await log_chat_message("assistant", execution_response)
         await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=execution_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
         return Response(content="<Response></Response>", media_type="text/xml")
 
-    # 2. TRIGGER: "git pull" or "git merge"
-    if "git pull" in user_message_clean or "git merge" in user_message_clean:
-        print("💻 [Terminal Engine]: Executing Git Pull...")
-        
-        def run_git_pull():
-            try:
-                res = subprocess.run(["git", "pull", "origin", "main", "--no-rebase"], check=True, capture_output=True, text=True, cwd=BASE_DIR)
-                return True, res.stdout.decode().strip() if isinstance(res.stdout, bytes) else res.stdout.strip()
-            except subprocess.CalledProcessError as e:
-                return False, e.stderr.decode().strip() if e.stderr else str(e)
-                
-        success, terminal_log = await loop.run_in_executor(None, run_git_pull)
-        execution_response = f"📥 *Git Pull Success!*\n\nLogs:\n```{terminal_log}```" if success else f"⚠️ *Git Pull Failed.*\n\nLogs:\n```{terminal_log}```"
-
-        await log_chat_message("assistant", execution_response)
-        await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=execution_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
-        return Response(content="<Response></Response>", media_type="text/xml")
-
-    # 3. TRIGGER ACTION TRACK: "git status"
-    elif "git status" in user_message_clean:
-        print("💻 [Terminal Subprocess]: Querying status tree...")
+    if user_message_clean in ["cancel", "no", "abort"]:
         await log_chat_message("user", user_message)
-        
-        def run_git_status():
-            try:
-                res = subprocess.run(["git", "status"], capture_output=True, text=True, cwd=BASE_DIR)
-                return res.stdout.strip()
-            except Exception as e:
-                return str(e)
+        if os.path.exists(STAGED_CODE_FILE):
+            os.remove(STAGED_CODE_FILE)
+            cancel_msg = "🛑 *Deployment Aborted.* Staged repository changes have been cleared from memory cache."
+        else:
+            cancel_msg = "ℹ️ No adjustments were staged. Staging buffer is already empty."
+            
+        await log_chat_message("assistant", cancel_msg)
+        await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=cancel_msg, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
+        return Response(content="<Response></Response>", media_type="text/xml")
 
+    # =========================================================================
+    # 🚀 SYSTEM COMMAND PASS-THROUGHS (LOCAL BACKDOORS)
+    # =========================================================================
+    if user_message_clean == "git status":
+        await log_chat_message("user", user_message)
+        def run_git_status():
+            try: return subprocess.run(["git", "status"], capture_output=True, text=True, cwd=BASE_DIR).stdout.strip()
+            except Exception as e: return str(e)
         status_output = await loop.run_in_executor(None, run_git_status)
-        execution_response = f"📊 *Local Workspace Repository Status Tree*:\n\nPath: `{BASE_DIR}`\n\n```{status_output}```"
-        
+        execution_response = f"📊 *Current Render Container Status Tree*:\n\nPath: `{BASE_DIR}`\n\n```{status_output}```"
         await log_chat_message("assistant", execution_response)
         await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=execution_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
         return Response(content="<Response></Response>", media_type="text/xml")
     
-    # 4. TRIGGER ACTION TRACK: MANUAL DAILY DIGEST
-    elif user_message_clean in ["digest", "refresh", "force digest"]:
-        print("⚡ [Manual Override]: 'digest' keyword detected. Triggering morning engine immediately...")
+    if user_message_clean in ["digest", "refresh", "force digest"]:
         await log_chat_message("user", user_message)
+        print("⚡ [Manual Override]: Triggering morning engine immediately...")
         digest_status = await run_morning_digest()
         await log_chat_message("assistant", f"Manual trigger activated. Status: {digest_status.get('status')}")
         return Response(content="<Response></Response>", media_type="text/xml")
 
-    # -------------------------------------------------------------------------
-    # 💬 DEFAULT PATHWAY: STANDARD CONVERSATIONAL AI COACHING ROUTE
-    # -------------------------------------------------------------------------
+    # =========================================================================
+    # PHASE 1: EVALUATE REQUESTS FOR CODE REWRITES, UPGRADES, & CONFIGS
+    # =========================================================================
+    is_upgrade_intent = any(k in user_message_clean for k in ["change", "update", "set", "add", "modify", "upgrade", "fix", "scheduler", "timings", "implement"])
+    
+    if is_upgrade_intent:
+        await log_chat_message("user", user_message)
+        
+        if not GITHUB_TOKEN or not GITHUB_REPO:
+            error_response = "❌ *Operation Denied.* `GITHUB_TOKEN` or `GITHUB_REPO` environment parameters missing on Render configuration setup."
+            await log_chat_message("assistant", error_response)
+            await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=error_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
+            return Response(content="<Response></Response>", media_type="text/xml")
+
+        # Fixed Bug: Run cleanly inside native async await loops instead of nesting blocking execution blocks
+        try:
+            headers = {
+                "Authorization": f"token {GITHUB_TOKEN}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            file_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/V3_updates.py"
+            
+            # Use run_in_executor only for the raw network synchronous requests call
+            def fetch_from_github():
+                return requests.get(file_url, headers=headers)
+                
+            res = await loop.run_in_executor(None, fetch_from_github)
+            if res.status_code != 200:
+                execution_response = f"❌ *GitHub Access Error:* {res.json().get('message', 'Validation error')}"
+                await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=execution_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
+                return Response(content="<Response></Response>", media_type="text/xml")
+            
+            file_data = res.json()
+            current_sha = file_data["sha"]
+            current_code = base64.b64decode(file_data["content"]).decode("utf-8")
+            
+            print("🧠 [AI Architect]: Constructing autonomous staging payload using Claude...")
+            
+            system_prompt = (
+                "You are an expert autonomous software engineer. Modify the current python code base strictly matching "
+                "the user's structural instructions (e.g., code changes, scheduler adjustment, logic upgrades). "
+                "You must return your output in a clean, valid, strict JSON structure containing exactly two keys:\n"
+                "1. 'summary': A brief bullet-point summary detailing exactly what changes were performed inside the code structure.\n"
+                "2. 'code': The ENTIRE updated python codebase file ready to be executed and written directly to the repo.\n"
+                "CRITICAL: Return only raw text JSON. Do not wrap the JSON output in backticks or markdown code blocks (```json). Ensure the python script value handles escapes correctly."
+            )
+            
+            user_prompt = f"User Request: {user_message}\n\nCurrent Code Base:\n{current_code}"
+            
+            # Call your live global async client cleanly using await!
+            response_data = await anthropic_client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=2500,
+                temperature=0.1,
+                messages=[{"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}]
+            )
+            
+            raw_json = response_data.content[0].text.strip()
+
+            # Clean potential markdown backticks from the AI response
+            if raw_json.startswith("```json"):
+                raw_json = raw_json.replace("```json", "", 1)
+            if raw_json.startswith("```"):
+                raw_json = raw_json.replace("```", "", 1)
+            if raw_json.endswith("```"):
+                raw_json = raw_json.rsplit("```", 1)[0]
+            raw_json = raw_json.strip()
+
+            try:
+                staged_update = json.loads(raw_json)
+                new_code = staged_update["code"]
+                summary = staged_update["summary"]
+
+                # Save the proposed changes to the staging buffer
+                with open(STAGED_CODE_FILE, "w") as f:
+                    json.dump({
+                        "instruction": user_message,
+                        "summary": summary,
+                        "code": new_code,
+                        "sha": current_sha
+                    }, f)
+
+                execution_response = f"🛠️ *Code Upgrade Staged!*\n\n*Summary of Changes:*\n{summary}\n\nReply with *'Approve'* to push to GitHub or *'Cancel'* to discard."
+                await log_chat_message("assistant", execution_response)
+                await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=execution_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
+                return Response(content="<Response></Response>", media_type="text/xml")
+            except Exception as e:
+                error_msg = f"❌ *AI Architect Parsing Error:* {str(e)}"
+                await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=error_msg, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
+                return Response(content="<Response></Response>", media_type="text/xml")
+
+        except Exception as e:
+            error_response = f"❌ *Deployment Engine Fault:* {str(e)}"
+            await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=error_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
+            return Response(content="<Response></Response>", media_type="text/xml")
+
+    # =========================================================================
+    # PHASE 3: GENERAL CONVERSATIONAL CHAT (RAG + LONG-TERM MEMORY)
+    # =========================================================================
     await log_chat_message("user", user_message)
+    relevant_context = await retrieve_relevant_context(user_message, limit=2)
+    user_facts = await get_user_facts(limit=10)
+    chat_history = await get_recent_chat_history(limit=6)
+
+    context_str = "\n".join([f"- {c['content']}" for c in relevant_context])
+    facts_str = "\n".join([f"- {f}" for f in user_facts])
+
+    system_msg = f"You are Madan's Curriculum Coach and AI Architect. Facts about Madan:\n{facts_str}\n\nContext:\n{context_str}"
     
-    skill_level, recent_topics, full_history_log = await get_db_state()   
-    exclusions = ", ".join(recent_topics) if recent_topics else "None"
+    response = await anthropic_client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=800,
+        system=system_msg,
+        messages=chat_history + [{"role": "user", "content": user_message}]
+    )
     
-    facts = await get_user_facts(limit=10)
-    facts_context = "\n".join([f"- {f}" for f in facts]) if facts else "None recorded yet."
+    assistant_reply = response.content[0].text
+    await log_chat_message("assistant", assistant_reply)
     
-    print(f"📥 Received WhatsApp message: '{user_message}' [Current Track: {skill_level}]")
+    # Send reply via Twilio
+    await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=assistant_reply, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
     
-    system_instruction = f"""
-You are an expert AI Test Architect and Curriculum Coach guiding an engineer named Madan transitioning into Agentic AI Quality Engineering.
-The student's current skill track level is: {skill_level}
-The topics covered recently are: {exclusions}
-
-STUDENT PROGRESS MEMORY (Permanently remembered facts):
-{facts_context}
-
-Use this memory context to build continuity, reference his tech stack (e.g. Pytest, FastAPI), acknowledge completed mini-projects, and avoid asking questions he has already answered.
-
-CRITICAL WHATSAPP CONVERSATIONAL FORMATTING RULES:
-1. NEVER send long paragraphs, essays, or walls of text. 
-2. Keep responses highly interactive, snappy, and restricted to 2-4 sentences max per message block.
-3. If providing technical details, use short, punchy bullet points.
-4. Match his energy as a sharp, practical engineering peer. Use emojis sparingly (e.g., 🚀, 🔍, 🛠️) to cleanly format text blocks.
-5. Always end your response with a single, highly contextual, open-ended question to keep the conversation flowing.
-
-EXECUTION LOGIC:
-- If the user explicitly asks to scale up the difficulty, mention that you are shifting their profile state to 'Advanced'.
-- If they ask to slow down or request simpler foundations, mention that you are shifting their profile state to 'Foundational'.
-- If they submit code snippets or questions about a mini-project, review their implementation instantly and provide a brief QA code critique or advice.
-"""
-
-    conversation_history = await get_recent_chat_history(limit=5)
+    # Trigger background fact extraction
+    asyncio.create_task(extract_and_save_facts(user_message, assistant_reply))
     
-    try:
-        response = await anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=500,
-            temperature=0.3,
-            system=system_instruction,
-            messages=conversation_history
-        )
-        ai_response = response.content[0].text.strip()
-        
-        await log_chat_message("assistant", ai_response)
-        
-        if "shifting their profile state to 'Advanced'" in ai_response or "to *Advanced*" in ai_response:
-            await update_db_skill("Advanced")
-            print("💾 State Engine: Automatically scaled user state to Advanced.")
-        elif "shifting their profile state to 'Foundational'" in ai_response or "to *Foundational*" in ai_response:
-            await update_db_skill("Foundational")
-            print("💾 State Engine: Automatically dialed user state back to Foundational.")
-            
-        asyncio.create_task(extract_and_save_facts(user_message, ai_response))
-            
-    except Exception as e:
-        print(f"❌ Webhook LLM routing error: {e}")
-        ai_response = "⚠️ Connection to the coaching engine was interrupted. Please check your terminal console logs for structural issues."
-
-    try:
-        def send_twilio():
-            client = Client(TWILIO_SID, TWILIO_TOKEN)
-            client.messages.create(body=ai_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
-        await loop.run_in_executor(None, send_twilio)
-    except Exception as e:
-        print(f"❌ Twilio dispatch failed in webhook: {e}")
-        
     return Response(content="<Response></Response>", media_type="text/xml")
-
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("V3_updates:app", host="0.0.0.0", port=port, reload=False)
