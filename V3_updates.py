@@ -794,30 +794,43 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             system_prompt = (
                 "You are an expert autonomous software engineer. Modify the current python code base strictly matching "
                 "the user's structural instructions (e.g., code changes, scheduler adjustment, logic upgrades). "
-                "You must return your output in a clean, valid, strict JSON structure containing exactly two keys:\n"
-                "1. 'summary': A brief bullet-point summary detailing exactly what changes were performed inside the code structure.\n"
-                "2. 'code': The ENTIRE updated python codebase file ready to be executed and written directly to the repo.\n"
-                "CRITICAL: Return only raw text JSON. Do not wrap the JSON output in backticks or markdown code blocks (```json). Ensure the python script value handles escapes correctly."
+                "Provide your response in two parts using XML-style tags:\n"
+                "1. <summary>: A brief bullet-point summary of exactly what changes were performed.\n"
+                "2. <code>: The ENTIRE updated python codebase file ready for execution.\n"
+                "Do not include any conversational filler outside these tags."
             )
             
             user_prompt = f"User Request: {user_message}\n\nCurrent Code Base:\n{current_code}"
             
             response_data = await anthropic_client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=4096,
+                max_tokens=8192,
                 temperature=0.1,
                 messages=[{"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}]
             )
             
             raw_text = response_data.content[0].text
-            # Robustly extract JSON block even if AI includes conversational filler or artifacts
-            json_match = re.search(r'(\{.*\})', raw_text, re.DOTALL)
-            raw_json = json_match.group(1) if json_match else raw_text.strip()
 
             try:
-                staged_update = json.loads(raw_json)
-                new_code = staged_update["code"]
-                summary = staged_update["summary"]
+                summary = ""
+                new_code = ""
+                
+                if "<summary>" in raw_text and "</summary>" in raw_text:
+                    summary = raw_text.split("<summary>")[1].split("</summary>")[0].strip()
+                
+                if "<code>" in raw_text and "</code>" in raw_text:
+                    new_code = raw_text.split("<code>")[1].split("</code>")[0].strip()
+                    # Clean up potential markdown blocks if LLM adds them inside tags
+                    if new_code.startswith("```python"):
+                        new_code = new_code.replace("```python", "", 1)
+                    if new_code.startswith("```"):
+                        new_code = new_code.replace("```", "", 1)
+                    if new_code.endswith("```"):
+                        new_code = new_code.rsplit("```", 1)[0]
+                    new_code = new_code.strip()
+
+                if not summary or not new_code:
+                    raise ValueError("AI response missing <summary> or <code> tags.")
 
                 with open(STAGED_CODE_FILE, "w") as f:
                     json.dump({
