@@ -120,9 +120,11 @@ async def lifespan(app: FastAPI):
 
     # Spin up the background scheduler clock (AsyncIOScheduler runs inside the FastAPI event loop)
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata") # Set to India timezone
-    scheduler.add_job(run_morning_digest, "cron", hour=9, minute=0)
+    
+    # 🕒 Scheduled timing dynamically set to 11:56 AM as requested
+    scheduler.add_job(run_morning_digest, "cron", hour=11, minute=56)
     scheduler.start()
-    print("⏰ Automated Scheduler Active: Set to fire daily at 09:00 AM.")
+    print("⏰ Automated Scheduler Active: Set to fire daily at 11:56 AM.")
     
     yield
     
@@ -176,7 +178,6 @@ async def get_recent_chat_history(limit=5):
         async with db.execute("SELECT role, content FROM chat_history ORDER BY timestamp DESC LIMIT ?", (limit,)) as cursor:
             rows = await cursor.fetchall()
             
-    # Format rows into standard Anthropic message structures
     history = [{"role": row[0], "content": row[1]} for row in reversed(rows)]
     return history
 
@@ -768,7 +769,6 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=error_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
             return Response(content="<Response></Response>", media_type="text/xml")
 
-        # Fixed Bug: Run cleanly inside native async await loops instead of nesting blocking execution blocks
         try:
             headers = {
                 "Authorization": f"token {GITHUB_TOKEN}",
@@ -776,7 +776,6 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             }
             file_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/V3_updates.py"
             
-            # Use run_in_executor only for the raw network synchronous requests call
             def fetch_from_github():
                 return requests.get(file_url, headers=headers)
                 
@@ -803,7 +802,6 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             
             user_prompt = f"User Request: {user_message}\n\nCurrent Code Base:\n{current_code}"
             
-            # Call your live global async client cleanly using await!
             response_data = await anthropic_client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=2500,
@@ -813,7 +811,6 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             
             raw_json = response_data.content[0].text.strip()
 
-            # Clean potential markdown backticks from the AI response
             if raw_json.startswith("```json"):
                 raw_json = raw_json.replace("```json", "", 1)
             if raw_json.startswith("```"):
@@ -827,7 +824,6 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
                 new_code = staged_update["code"]
                 summary = staged_update["summary"]
 
-                # Save the proposed changes to the staging buffer
                 with open(STAGED_CODE_FILE, "w") as f:
                     json.dump({
                         "instruction": user_message,
@@ -842,41 +838,74 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
                 return Response(content="<Response></Response>", media_type="text/xml")
             except Exception as e:
                 error_msg = f"❌ *AI Architect Parsing Error:* {str(e)}"
+                await log_chat_message("assistant", error_msg)
                 await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=error_msg, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
                 return Response(content="<Response></Response>", media_type="text/xml")
 
         except Exception as e:
             error_response = f"❌ *Deployment Engine Fault:* {str(e)}"
+            await log_chat_message("assistant", error_response)
             await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=error_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
             return Response(content="<Response></Response>", media_type="text/xml")
 
     # =========================================================================
     # PHASE 3: GENERAL CONVERSATIONAL CHAT (RAG + LONG-TERM MEMORY)
     # =========================================================================
-    await log_chat_message("user", user_message)
-    relevant_context = await retrieve_relevant_context(user_message, limit=2)
-    user_facts = await get_user_facts(limit=10)
-    chat_history = await get_recent_chat_history(limit=6)
+    try:
+        skill_level, recent_topics, full_history_log = await get_db_state()
+        relevant_context = await retrieve_relevant_context(user_message, limit=2)
+        user_facts = await get_user_facts(limit=10)
+        chat_history = await get_recent_chat_history(limit=6)
 
-    context_str = "\n".join([f"- {c['content']}" for c in relevant_context])
-    facts_str = "\n".join([f"- {f}" for f in user_facts])
+        context_str = "\n".join([f"- {c['content']}" for c in relevant_context])
+        facts_str = "\n".join([f"- {f}" for f in user_facts])
 
-    system_msg = f"You are Madan's Curriculum Coach and AI Architect. Facts about Madan:\n{facts_str}\n\nContext:\n{context_str}"
-    
-    response = await anthropic_client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=800,
-        system=system_msg,
-        messages=chat_history + [{"role": "user", "content": user_message}]
-    )
-    
-    assistant_reply = response.content[0].text
-    await log_chat_message("assistant", assistant_reply)
-    
-    # Send reply via Twilio
-    await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=assistant_reply, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
-    
-    # Trigger background fact extraction
-    asyncio.create_task(extract_and_save_facts(user_message, assistant_reply))
-    
+        system_msg = (
+            f"You are Madan's Curriculum Coach and AI Architect tracking toward Agentic AI Quality Engineering.\n"
+            f"Facts about Madan:\n{facts_str}\n\n"
+            f"Context:\n{context_str}\n\n"
+            f"CRITICAL FORMATTING RULES:\n"
+            f"1. Keep responses restricted to 2-4 sentences max per message block.\n"
+            f"2. Use brief, punchy bullet points if conveying technical details.\n"
+            f"3. Use asterisks (*) for WhatsApp bolding instead of markdown hashes (#).\n"
+            f"4. Always end your response with a single open-ended learning question."
+        )
+        
+        response = await anthropic_client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=800,
+            system=system_msg,
+            messages=chat_history + [{"role": "user", "content": user_message}]
+        )
+        
+        ai_response = response.content[0].text.strip()
+        await log_chat_message("assistant", ai_response)
+        
+        if "shifting their profile state to 'Advanced'" in ai_response or "to *Advanced*" in ai_response:
+            await update_db_skill("Advanced")
+            print("💾 State Engine: Automatically scaled user state to Advanced.")
+        elif "shifting their profile state to 'Foundational'" in ai_response or "to *Foundational*" in ai_response:
+            await update_db_skill("Foundational")
+            print("💾 State Engine: Automatically dialed user state back to Foundational.")
+                
+        asyncio.create_task(extract_and_save_facts(user_message, ai_response))
+                
+    except Exception as e:
+        print(f"❌ Webhook LLM routing error: {e}")
+        ai_response = "⚠️ Connection to the coaching engine was interrupted. Please check your terminal console logs for structural issues."
+
+    try:
+        def send_twilio():
+            client = Client(TWILIO_SID, TWILIO_TOKEN)
+            client.messages.create(body=ai_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
+        await loop.run_in_executor(None, send_twilio)
+    except Exception as e:
+        print(f"❌ Twilio dispatch failed in webhook: {e}")
+        
     return Response(content="<Response></Response>", media_type="text/xml")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("V3_updates:app", host="0.0.0.0", port=port, reload=False)
