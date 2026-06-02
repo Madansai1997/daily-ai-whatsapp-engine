@@ -804,20 +804,15 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             
             response_data = await anthropic_client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=2500,
+                max_tokens=4096,
                 temperature=0.1,
                 messages=[{"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}]
             )
             
-            raw_json = response_data.content[0].text.strip()
-
-            if raw_json.startswith("```json"):
-                raw_json = raw_json.replace("```json", "", 1)
-            if raw_json.startswith("```"):
-                raw_json = raw_json.replace("```", "", 1)
-            if raw_json.endswith("```"):
-                raw_json = raw_json.rsplit("```", 1)[0]
-            raw_json = raw_json.strip()
+            raw_text = response_data.content[0].text
+            # Robustly extract JSON block even if AI includes conversational filler or artifacts
+            json_match = re.search(r'(\{.*\})', raw_text, re.DOTALL)
+            raw_json = json_match.group(1) if json_match else raw_text.strip()
 
             try:
                 staged_update = json.loads(raw_json)
