@@ -36,8 +36,8 @@ def get_anthropic_client():
     key = os.getenv("CLAUDE_API_KEY")
     if not key:
         print("⚠️ WARNING: CLAUDE_API_KEY environment variable is not set!")
-        return AsyncAnthropic(api_key="dummy_key_for_compilation_safety")
-    return AsyncAnthropic(api_key=key)
+        return AsyncAnthropic(api_key="dummy_key_for_compilation_safety", max_retries=0)
+    return AsyncAnthropic(api_key=key, max_retries=5)
 
 anthropic_client = get_anthropic_client()
 
@@ -838,7 +838,10 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
                 return Response(content="<Response></Response>", media_type="text/xml")
 
         except Exception as e:
-            error_response = f"❌ *Deployment Engine Fault:* {str(e)}"
+            if "529" in str(e) or "overloaded" in str(e).lower():
+                error_response = "⏳ *Claude is currently overloaded.* I tried retrying several times, but the server is still busy. Please wait a moment and try your upgrade request again."
+            else:
+                error_response = f"❌ *Deployment Engine Fault:* {str(e)}"
             await log_chat_message("assistant", error_response)
             await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=error_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
             return Response(content="<Response></Response>", media_type="text/xml")
