@@ -20,7 +20,7 @@ from rag_engine import retrieve_relevant_context
 TWILIO_SID = os.getenv("TWILIO_SID")
 TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
-CLAUDE_MODEL = "claude-3-5-sonnet-latest"
+CLAUDE_MODEL = "claude-sonnet-4-6"
 FROM_WHATSAPP = "whatsapp:+14155238886"
 TO_WHATSAPP = "whatsapp:+919963214141"
 
