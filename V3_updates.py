@@ -148,6 +148,7 @@ async def lifespan(app: FastAPI):
         print("✅ Environment Variables Verified.")
 
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
+<<<<<<< HEAD
 
     # Morning digest
     scheduler.add_job(run_morning_digest, "cron", hour=11, minute=56)
@@ -163,6 +164,11 @@ async def lifespan(app: FastAPI):
 
     scheduler.start()
     print("⏰ Scheduler Active: Digest 11:56AM | Check-ins 1PM, 3PM, 5PM, 7PM | Weekly report Sunday 9AM")
+=======
+    scheduler.add_job(run_morning_digest, "cron", hour=14, minute=16)
+    scheduler.start()
+    print("⏰ Automated Scheduler Active: Set to fire daily at 02:16 PM Asia/Kolkata.")
+>>>>>>> 37d2bfaa5851bb53ffb766faeb4281dd44b592f1
 
     yield
     scheduler.shutdown()
