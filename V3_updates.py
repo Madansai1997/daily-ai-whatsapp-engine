@@ -794,16 +794,16 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             system_prompt = (
                 "You are an expert autonomous software engineer. Modify the current python code base strictly matching "
                 "the user's structural instructions (e.g., code changes, scheduler adjustment, logic upgrades). "
-                "Provide your response in two parts using XML-style tags:\n"
+                "CRITICAL: You MUST provide your response in two parts using XML-style tags:\n"
                 "1. <summary>: A brief bullet-point summary of exactly what changes were performed.\n"
                 "2. <code>: The ENTIRE updated python codebase file ready for execution.\n"
-                "Do not include any conversational filler outside these tags."
+                "Do not include any conversational filler or markdown outside these tags."
             )
             
             user_prompt = f"User Request: {user_message}\n\nCurrent Code Base:\n{current_code}"
             
             response_data = await anthropic_client.messages.create(
-                model="claude-sonnet-4-6",
+                model="claude-3-5-sonnet-20240620",
                 max_tokens=8192,
                 temperature=0.1,
                 messages=[{"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}]
@@ -812,24 +812,22 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             raw_text = response_data.content[0].text
 
             try:
-                summary = ""
-                new_code = ""
-                
-                if "<summary>" in raw_text and "</summary>" in raw_text:
-                    summary = raw_text.split("<summary>")[1].split("</summary>")[0].strip()
-                
-                if "<code>" in raw_text and "</code>" in raw_text:
-                    new_code = raw_text.split("<code>")[1].split("</code>")[0].strip()
-                    # Clean up potential markdown blocks if LLM adds them inside tags
-                    if new_code.startswith("```python"):
-                        new_code = new_code.replace("```python", "", 1)
-                    if new_code.startswith("```"):
-                        new_code = new_code.replace("```", "", 1)
-                    if new_code.endswith("```"):
-                        new_code = new_code.rsplit("```", 1)[0]
+                # Use Regex for robust tag extraction
+                summary_match = re.search(r'<summary>(.*?)</summary>', raw_text, re.DOTALL | re.IGNORECASE)
+                code_match = re.search(r'<code>(.*?)</code>', raw_text, re.DOTALL | re.IGNORECASE)
+
+                summary = summary_match.group(1).strip() if summary_match else ""
+                new_code = code_match.group(1).strip() if code_match else ""
+
+                if new_code:
+                    # Aggressively clean up potential markdown blocks inside tags
+                    new_code = re.sub(r'^```python\s*', '', new_code, flags=re.MULTILINE)
+                    new_code = re.sub(r'^```\s*', '', new_code, flags=re.MULTILINE)
+                    new_code = re.sub(r'```$', '', new_code, flags=re.MULTILINE)
                     new_code = new_code.strip()
 
                 if not summary or not new_code:
+                    print(f"DEBUG: Failed to parse AI response. Raw text:\n{raw_text}")
                     raise ValueError("AI response missing <summary> or <code> tags.")
 
                 with open(STAGED_CODE_FILE, "w") as f:
