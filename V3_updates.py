@@ -773,7 +773,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             )
 
             raw_text = code_response.content[0].text
-            print(f"🔍 RAW AI RESPONSE PREVIEW:\n{raw_text[:500]}")
+            print(f"🔍 RAW AI RESPONSE PREVIEW:\n{raw_text}")
 
             code_match = re.search(r'<code>(.*?)</code>', raw_text, re.DOTALL | re.IGNORECASE)
             new_code = code_match.group(1).strip() if code_match else ""
