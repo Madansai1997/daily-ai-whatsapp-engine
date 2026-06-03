@@ -369,6 +369,8 @@ Your job is to select the next logical learning concept. Focus on one of these c
 
 Output a single, compact JSON object with exactly these keys: "concept", "pedagogical_focus", "assert_template".
 CRITICAL: Do not enclose your output in markdown ```json blocks. Do not add trailing commas or leave strings unterminated. Output raw, valid JSON only.
+Provide your selection inside <plan> tags as a JSON object with these keys: "concept", "pedagogical_focus", "assert_template".
+Example: <plan>{"concept": "...", ...}</plan>
 """
     try:
         response = await anthropic_client.messages.create(
@@ -378,16 +380,15 @@ CRITICAL: Do not enclose your output in markdown ```json blocks. Do not add trai
             messages=[{"role": "user", "content": prompt}]
         )
         text = response.content[0].text.strip()
-        
-        if text.startswith("```json"):
-            text = text.replace("```json", "", 1)
-        if text.startswith("```"):
-            text = text.replace("```", "", 1)
-        if text.endswith("```"):
-            text = text.rsplit("```", 1)[0]
-        text = text.strip()
-        
-        data = json.loads(text)
+
+        # Robust extraction using Regex to find the JSON inside <plan> tags
+        plan_match = re.search(r'<plan>\s*(.*?)\s*</plan>', text, re.DOTALL | re.IGNORECASE)
+        plan_content = plan_match.group(1).strip() if plan_match else text.strip()
+
+        # Clean up potential markdown code fences if LLM included them inside the tags
+        plan_content = re.sub(r'^```(?:json)?\s*|\s*```$', '', plan_content, flags=re.MULTILINE | re.IGNORECASE)
+
+        data = json.loads(plan_content.strip())
         print(f"🎯 Planner Agent selected concept: '{data.get('concept')}'")
         return data
     except Exception as e:
@@ -487,21 +488,26 @@ def run_code_sandbox(reference_code: str, assert_lines: list) -> tuple[bool, str
     """Runs the reference implementation and assertions in a restricted context to verify logic."""
     print("🧪 [Sandbox Executor]: Verifying code assertions...")
     
+    import math, json, re
+
     full_code = reference_code + "\n\n" + "\n".join(assert_lines)
     
     sandbox_globals = {
+        "math": math,
+        "json": json,
+        "re": re,
         "__builtins__": {
             "abs": abs, "all": all, "any": any, "bin": bin, "bool": bool,
             "chr": chr, "dict": dict, "dir": dir, "divmod": divmod, "enumerate": enumerate,
             "filter": filter, "float": float, "format": format, "hash": hash, "hex": hex,
             "id": id, "int": int, "isinstance": isinstance, "issubclass": issubclass,
             "iter": iter, "len": len, "list": list, "map": map, "max": max, "min": min,
-            "next": next, "object": object, "oct": oct, "ord": ord, "pow": pow, "range": range,
-            "repr": repr, "reversed": reversed, "round": round, "set": set, "slice": slice,
+            "next": next, "object": object, "oct": oct, "ord": ord, "pow": pow, "print": print,
+            "range": range, "repr": repr, "reversed": reversed, "round": round, "set": set, "slice": slice,
             "sorted": sorted, "str": str, "sum": sum, "tuple": tuple, "type": type,
             "zip": zip, "AssertionError": AssertionError, "ValueError": ValueError,
             "TypeError": TypeError, "KeyError": KeyError, "IndexError": IndexError,
-            "Exception": Exception
+            "Exception": Exception, "StopIteration": StopIteration, "RuntimeError": RuntimeError
         }
     }
     
@@ -803,7 +809,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             user_prompt = f"User Request: {user_message}\n\nCurrent Code Base:\n{current_code}"
             
             response_data = await anthropic_client.messages.create(
-                model="claude-3-5-sonnet-20240620",
+                model="claude-sonnet-4-6",
                 max_tokens=8192,
                 temperature=0.1,
                 messages=[{"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}]
