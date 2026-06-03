@@ -124,8 +124,11 @@ async def lifespan(app: FastAPI):
     
     # 🕒 Scheduled timing dynamically set to 11:56 AM as requested
     scheduler.add_job(run_morning_digest, "cron", hour=11, minute=56)
+    # 🕒 Scheduled timing dynamically set to 02:16 PM as requested
+    scheduler.add_job(run_morning_digest, "cron", hour=14, minute=16)
     scheduler.start()
     print("⏰ Automated Scheduler Active: Set to fire daily at 11:56 AM.")
+    print("⏰ Automated Scheduler Active: Set to fire daily at 02:16 PM.")
     
     yield
     
@@ -454,7 +457,7 @@ Structure the `<reference_implementation>` response as valid Python code contain
 
     response = await anthropic_client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=1200,
+        max_tokens=2000,
         temperature=0.2,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -535,10 +538,9 @@ def run_qa_critic(content, reference_code):
     
     assert_lines = []
     for line in content.split('\n'):
-        if line.strip().startswith('assert ') or 'assert' in line:
-            clean_line = line.replace('*', '').replace('-', '').strip()
-            if clean_line.startswith('assert '):
-                assert_lines.append(clean_line)
+        clean_line = line.replace('*', '').replace('-', '').strip()
+        if clean_line.startswith('assert '):
+            assert_lines.append(clean_line)
                 
     has_assert_syntax = len(assert_lines) >= 3
     char_length = len(content)
@@ -813,9 +815,10 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
                 model=CLAUDE_MODEL,
                 max_tokens=8192,
                 temperature=0.1,
-                messages=[{"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}]
+                system=system_prompt,  # ← move here
+                messages=[{"role": "user", "content": user_prompt}]
             )
-            
+
             raw_text = response_data.content[0].text
 
             try:
