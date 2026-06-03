@@ -20,7 +20,7 @@ from rag_engine import retrieve_relevant_context
 TWILIO_SID = os.getenv("TWILIO_SID")
 TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
-CLAUDE_MODEL = "claude-sonnet-4-6"  # ✅ Fixed: removed duplicate
+CLAUDE_MODEL = "claude-sonnet-4-6"
 FROM_WHATSAPP = "whatsapp:+14155238886"
 TO_WHATSAPP = "whatsapp:+919963214141"
 
@@ -225,7 +225,6 @@ Output a JSON array of strings. Output raw JSON only. If no facts, output [].
             messages=[{"role": "user", "content": prompt}]
         )
         text = response.content[0].text.strip()
-
         text = re.sub(r'^```(?:json)?\s*|\s*```$', '', text, flags=re.MULTILINE).strip()
 
         facts = json.loads(text)
@@ -420,7 +419,7 @@ Structure the <reference_implementation> as valid Python code containing the fun
 
     response = await anthropic_client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=2000,  # ✅ Fixed: increased from 1200
+        max_tokens=2000,
         temperature=0.2,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -492,7 +491,6 @@ def run_qa_critic(content, reference_code):
     has_updates = "*🔴 REGULAR DAILY AI UPDATES*" in content
     has_learnings = "*📘 WHAT I NEED TO LEARN & PROJECTS TO WORK ON*" in content
 
-    # ✅ Fixed: tightened assert extraction
     assert_lines = []
     for line in content.split('\n'):
         clean_line = line.replace('*', '').replace('-', '').strip()
@@ -501,7 +499,7 @@ def run_qa_critic(content, reference_code):
 
     has_assert_syntax = len(assert_lines) >= 3
     char_length = len(content)
-    within_twilio_limit = char_length <= 1600  # ✅ Fixed: consistent limit
+    within_twilio_limit = char_length <= 1600
 
     lines = content.split('\n')
     is_in_update_block = False
@@ -601,7 +599,7 @@ async def run_morning_digest():
                 feedback = f"Internal generation error: {str(e)}"
                 current_attempt += 1
 
-        if is_valid_run:  # ✅ Fixed: added missing colon (was syntax error)
+        if is_valid_run:
             await log_sent_concept(concept, final_text)
 
             try:
@@ -655,10 +653,28 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
                     "Accept": "application/vnd.github.v3+json"
                 }
                 file_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/V3_updates.py"
+
+                # ✅ Apply the patch to the current live file from GitHub
+                get_res = requests.get(file_url, headers=headers)
+                if get_res.status_code != 200:
+                    return False, f"Could not fetch current file from GitHub: {get_res.json().get('message')}"
+
+                live_file_data = get_res.json()
+                live_code = base64.b64decode(live_file_data["content"]).decode("utf-8")
+                current_sha = live_file_data["sha"]
+
+                find_text = staged_data.get("find")
+                replace_text = staged_data.get("replace")
+
+                if find_text not in live_code:
+                    return False, "Patch target not found in current live file. The file may have changed. Please retry your instruction."
+
+                patched_code = live_code.replace(find_text, replace_text, 1)
+
                 payload = {
-                    "message": f"🤖 Approved Auto-Upgrade: {staged_data['instruction'][:50]}...",
-                    "content": base64.b64encode(staged_data["code"].encode("utf-8")).decode("utf-8"),
-                    "sha": staged_data["sha"],
+                    "message": f"🤖 Surgical Patch: {staged_data['instruction'][:60]}",
+                    "content": base64.b64encode(patched_code.encode("utf-8")).decode("utf-8"),
+                    "sha": current_sha,
                     "branch": "main"
                 }
 
@@ -676,7 +692,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
 
         success, report = await loop.run_in_executor(None, execute_staged_push)
         if success:
-            execution_response = "🚀 *Approval Received!* Code committed and pushed to GitHub main branch.\n\n🔄 *Render Continuous Deployment Initiated.*"
+            execution_response = "🚀 *Approval Received!* Surgical patch committed and pushed to GitHub.\n\n🔄 *Render Continuous Deployment Initiated.*"
         else:
             execution_response = f"❌ *Deployment Engine Aborted.*\n\nDetails: `{report}`"
 
@@ -718,7 +734,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
         return Response(content="<Response></Response>", media_type="text/xml")
 
     # =========================================================================
-    # PHASE 1: CODE REWRITES & UPGRADES
+    # PHASE 1: CODE REWRITES & UPGRADES — OPTION 2: SURGICAL PATCH
     # =========================================================================
     is_upgrade_intent = any(k in user_message_clean for k in ["change", "update", "set", "add", "modify", "upgrade", "fix", "scheduler", "timings", "implement"])
 
@@ -751,55 +767,71 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             current_sha = file_data["sha"]
             current_code = base64.b64decode(file_data["content"]).decode("utf-8")
 
-            print("🧠 [AI Architect]: Constructing autonomous staging payload using Claude...")
+            print("🧠 [AI Architect]: Generating surgical patch using Claude...")
 
-            # ✅ Fixed: system prompt in system param, code-only response
+            # ✅ OPTION 2: Claude only returns find + replace JSON, never the full file
             system_prompt = (
-                "You are an expert autonomous Python software engineer. "
-                "Apply the user's requested changes to the provided codebase. "
-                "CRITICAL: Output ONLY the complete modified Python code inside <code></code> tags. "
-                "No explanation, no summary, no markdown outside the tags."
+                "You are an expert Python code surgeon. "
+                "You will be given a user instruction and the current Python file. "
+                "Your job is to identify the EXACT snippet that needs to change and return a surgical patch. "
+                "CRITICAL: Respond ONLY with a valid raw JSON object with exactly two keys: "
+                "\"find\" (the exact existing code to find, copied verbatim) and "
+                "\"replace\" (the new code to replace it with). "
+                "The \"find\" value must be an exact match of what is in the file — no paraphrasing. "
+                "Do not include any explanation, markdown, or text outside the JSON object."
             )
 
-            user_prompt = f"Apply this change: {user_message}\n\nCurrent Code:\n{current_code}\n\nReturn ONLY <code>complete updated python file here</code>"
+            user_prompt = (
+                f"User instruction: {user_message}\n\n"
+                f"Current Python file:\n{current_code}\n\n"
+                f"Return ONLY a JSON object like this:\n"
+                f"{{\"find\": \"exact old code here\", \"replace\": \"new code here\"}}"
+            )
 
-            # ✅ Fixed: system prompt in system= param, not stuffed in user message
-            code_response = await anthropic_client.messages.create(
+            patch_response = await anthropic_client.messages.create(
                 model=CLAUDE_MODEL,
-                max_tokens=8192,
+                max_tokens=1500,
                 temperature=0.1,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}]
             )
 
-            raw_text = code_response.content[0].text
-            print(f"🔍 RAW AI RESPONSE PREVIEW:\n{raw_text}")
+            raw_text = patch_response.content[0].text.strip()
+            print(f"🔍 RAW PATCH RESPONSE:\n{raw_text}")
 
-            code_match = re.search(r'<code>(.*?)</code>', raw_text, re.DOTALL | re.IGNORECASE)
-            new_code = code_match.group(1).strip() if code_match else ""
+            # Clean markdown fences if present
+            raw_text = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw_text, flags=re.MULTILINE).strip()
 
-            if new_code:
-                new_code = re.sub(r'^```python\s*', '', new_code, flags=re.MULTILINE)
-                new_code = re.sub(r'^```\s*', '', new_code, flags=re.MULTILINE)
-                new_code = re.sub(r'```$', '', new_code, flags=re.MULTILINE)
-                new_code = new_code.strip()
+            patch_data = json.loads(raw_text)
+            find_text = patch_data.get("find", "").strip()
+            replace_text = patch_data.get("replace", "").strip()
 
-            if not new_code:
-                print(f"DEBUG: Failed to parse AI response. Raw text:\n{raw_text[:1000]}")
-                raise ValueError("AI response missing <code> tags.")
+            if not find_text or not replace_text:
+                raise ValueError("Patch JSON is missing 'find' or 'replace' keys.")
 
-            # Auto-generate summary from user instruction
-            summary = f"Applied: {user_message[:100]}"
+            if find_text not in current_code:
+                raise ValueError(f"Patch target not found in current file. Claude may have paraphrased instead of copying verbatim.")
+
+            # Preview the patch for user approval
+            preview_find = find_text[:200] + "..." if len(find_text) > 200 else find_text
+            preview_replace = replace_text[:200] + "..." if len(replace_text) > 200 else replace_text
 
             with open(STAGED_CODE_FILE, "w") as f:
                 json.dump({
                     "instruction": user_message,
-                    "summary": summary,
-                    "code": new_code,
+                    "find": find_text,
+                    "replace": replace_text,
                     "sha": current_sha
                 }, f)
 
-            execution_response = f"🛠️ *Code Upgrade Staged!*\n\n*Change:* {summary}\n\nReply with *'Approve'* to push to GitHub or *'Cancel'* to discard."
+            execution_response = (
+                f"🛠️ *Surgical Patch Staged!*\n\n"
+                f"*Instruction:* {user_message[:80]}\n\n"
+                f"*Removing:*\n`{preview_find}`\n\n"
+                f"*Replacing with:*\n`{preview_replace}`\n\n"
+                f"Reply *'Approve'* to push to GitHub or *'Cancel'* to discard."
+            )
+
             await log_chat_message("assistant", execution_response)
             await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=execution_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
             return Response(content="<Response></Response>", media_type="text/xml")
@@ -808,7 +840,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             if "529" in str(e) or "overloaded" in str(e).lower():
                 error_response = "⏳ *Claude is currently overloaded.* Please wait a moment and try your upgrade request again."
             else:
-                error_response = f"❌ *AI Architect Parsing Error:* {str(e)}"
+                error_response = f"❌ *AI Architect Patch Error:* {str(e)}"
             await log_chat_message("assistant", error_response)
             await loop.run_in_executor(None, lambda: Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=error_response, from_=FROM_WHATSAPP, to=TO_WHATSAPP))
             return Response(content="<Response></Response>", media_type="text/xml")
