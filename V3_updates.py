@@ -237,7 +237,7 @@ Output raw JSON only. If no facts are extracted, output an empty array [].
 """
     try:
         response = await anthropic_client.messages.create(
-            model="claude-opus-4-8",
+            model="claude-3-5-sonnet-20240620",
             max_tokens=300,
             temperature=0.0,
             messages=[{"role": "user", "content": prompt}]
@@ -374,7 +374,7 @@ Example: <plan>{{"concept": "...", ...}}</plan>
 """
     try:
         response = await anthropic_client.messages.create(
-            model="claude-opus-4-8",
+            model="claude-3-5-sonnet-20240620",
             max_tokens=300,
             temperature=0.4,
             messages=[{"role": "user", "content": prompt}]
@@ -452,7 +452,7 @@ Structure the `<reference_implementation>` response as valid Python code contain
         prompt += f"\n\n⚠️ CRITICAL CORRECTION REQUIRED FROM PREVIOUS ATTEMPT:\n{feedback_loop_msg}"
 
     response = await anthropic_client.messages.create(
-        model="claude-opus-4-8",
+        model="claude-3-5-sonnet-20240620",
         max_tokens=1200,
         temperature=0.2,
         messages=[{"role": "user", "content": prompt}]
@@ -809,7 +809,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             user_prompt = f"User Request: {user_message}\n\nCurrent Code Base:\n{current_code}"
             
             response_data = await anthropic_client.messages.create(
-                model="claude-opus-4-8",
+                model="claude-3-5-sonnet-20240620",
                 max_tokens=8192,
                 temperature=0.1,
                 messages=[{"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}]
@@ -887,7 +887,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
         )
         
         response = await anthropic_client.messages.create(
-            model="claude-opus-4-8",
+            model="claude-3-5-sonnet-20240620",
             max_tokens=800,
             system=system_msg,
             messages=chat_history + [{"role": "user", "content": user_message}]
