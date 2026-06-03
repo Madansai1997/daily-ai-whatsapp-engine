@@ -145,14 +145,14 @@ async def lifespan(app: FastAPI):
         print("✅ Environment Variables Verified.")
 
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
-    scheduler.add_job(run_morning_digest, "cron", hour=11, minute=56)
-    scheduler.add_job(send_checkin_reminder, "cron", hour=13, minute=0, kwargs={"reminder_number": 1})
-    scheduler.add_job(send_checkin_reminder, "cron", hour=15, minute=0, kwargs={"reminder_number": 2})
-    scheduler.add_job(send_checkin_reminder, "cron", hour=17, minute=0, kwargs={"reminder_number": 3})
-    scheduler.add_job(send_checkin_reminder, "cron", hour=19, minute=0, kwargs={"reminder_number": 4})
+    scheduler.add_job(run_morning_digest, "cron", hour=9, minute=0)
+    scheduler.add_job(send_checkin_reminder, "cron", hour=9, minute=0, kwargs={"reminder_number": 1})
+    scheduler.add_job(send_checkin_reminder, "cron", hour=9, minute=0, kwargs={"reminder_number": 2})
+    scheduler.add_job(send_checkin_reminder, "cron", hour=9, minute=0, kwargs={"reminder_number": 3})
+    scheduler.add_job(send_checkin_reminder, "cron", hour=9, minute=0, kwargs={"reminder_number": 4})
     scheduler.add_job(send_weekly_report, "cron", day_of_week="sun", hour=9, minute=0)
     scheduler.start()
-    print("⏰ Scheduler: Digest 11:56AM | Check-ins 1PM 3PM 5PM 7PM | Report Sunday 9AM")
+    print("⏰ Scheduler: Digest 9:00AM | Check-ins 9:00AM | Report Sunday 9:00AM (Asia/Kolkata)")
 
     yield
     scheduler.shutdown()
