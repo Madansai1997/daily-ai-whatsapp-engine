@@ -8,6 +8,7 @@ import subprocess
 import random
 import re
 import base64
+import copy
 from datetime import datetime, date
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Response, Form
@@ -38,7 +39,7 @@ QUIZ_STATE_FILE = "/tmp/quiz_state.json"
 def get_anthropic_client():
     key = os.getenv("CLAUDE_API_KEY")
     if not key:
-        print("⚠️ WARNING: CLAUDE_API_KEY environment variable is not set!")
+        print("⚠️ WARNING: CLAUDE_API_KEY not set!")
         return AsyncAnthropic(api_key="dummy_key_for_compilation_safety", max_retries=0)
     return AsyncAnthropic(api_key=key, max_retries=5)
 
@@ -69,60 +70,56 @@ def init_db_tables():
         id INTEGER PRIMARY KEY AUTOINCREMENT, fact TEXT UNIQUE,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
-    # Quiz session table
     cursor.execute('''CREATE TABLE IF NOT EXISTS quiz_sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date TEXT,
-        concept TEXT,
-        skill_level TEXT,
+        date TEXT, concept TEXT, skill_level TEXT,
         total_questions INTEGER DEFAULT 10,
-        score INTEGER DEFAULT 0,
-        completed INTEGER DEFAULT 0,
+        score INTEGER DEFAULT 0, completed INTEGER DEFAULT 0,
         current_question INTEGER DEFAULT 0,
+        assertion_quality_score REAL DEFAULT 0,
+        mutation_passed INTEGER DEFAULT 0,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
-    # Individual quiz answers
     cursor.execute('''CREATE TABLE IF NOT EXISTS quiz_answers (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id INTEGER,
-        question_number INTEGER,
-        question_text TEXT,
-        correct_answer TEXT,
-        user_answer TEXT,
-        difficulty TEXT,
+        session_id INTEGER, question_number INTEGER,
+        question_text TEXT, correct_answer TEXT,
+        user_answer TEXT, difficulty TEXT,
         is_correct INTEGER DEFAULT 0,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
-    # Weekly mini-project progress
     cursor.execute('''CREATE TABLE IF NOT EXISTS project_progress (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        week_start TEXT,
-        project_title TEXT,
+        week_start TEXT, project_title TEXT,
         subtask_number INTEGER DEFAULT 1,
-        subtask_title TEXT,
-        subtask_description TEXT,
+        subtask_title TEXT, subtask_description TEXT,
         status TEXT DEFAULT 'pending',
         hint_sent INTEGER DEFAULT 0,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
-    # Daily check-in tracking
     cursor.execute('''CREATE TABLE IF NOT EXISTS daily_checkins (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date TEXT,
-        reminder_count INTEGER DEFAULT 0,
+        date TEXT, reminder_count INTEGER DEFAULT 0,
         learning_status TEXT DEFAULT 'in_progress',
         quiz_triggered INTEGER DEFAULT 0,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
-    # Performance tracking
     cursor.execute('''CREATE TABLE IF NOT EXISTS performance_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date TEXT,
-        concept TEXT,
-        quiz_score INTEGER,
-        max_score INTEGER DEFAULT 10,
-        skill_level TEXT,
-        weak_areas TEXT,
+        date TEXT, concept TEXT,
+        quiz_score INTEGER, max_score INTEGER DEFAULT 10,
+        skill_level TEXT, weak_areas TEXT,
+        assertion_quality_avg REAL DEFAULT 0,
+        mutation_passed INTEGER DEFAULT 0,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+    # Assertion quality log
+    cursor.execute('''CREATE TABLE IF NOT EXISTS assertion_quality_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT, concept TEXT,
+        assertion_text TEXT,
+        quality_score REAL DEFAULT 0,
+        mutation_survived INTEGER DEFAULT 0,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
     conn.commit()
@@ -143,32 +140,19 @@ async def lifespan(app: FastAPI):
     if not CLAUDE_API_KEY: missing_env.append("CLAUDE_API_KEY")
 
     if missing_env:
-        print(f"⚠️ STARTUP WARNING: Missing environment variables: {', '.join(missing_env)}")
+        print(f"⚠️ STARTUP WARNING: Missing: {', '.join(missing_env)}")
     else:
         print("✅ Environment Variables Verified.")
 
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
-<<<<<<< HEAD
-
-    # Morning digest
     scheduler.add_job(run_morning_digest, "cron", hour=11, minute=56)
-
-    # 4 daily check-in reminders
     scheduler.add_job(send_checkin_reminder, "cron", hour=13, minute=0, kwargs={"reminder_number": 1})
     scheduler.add_job(send_checkin_reminder, "cron", hour=15, minute=0, kwargs={"reminder_number": 2})
     scheduler.add_job(send_checkin_reminder, "cron", hour=17, minute=0, kwargs={"reminder_number": 3})
     scheduler.add_job(send_checkin_reminder, "cron", hour=19, minute=0, kwargs={"reminder_number": 4})
-
-    # Sunday weekly report
     scheduler.add_job(send_weekly_report, "cron", day_of_week="sun", hour=9, minute=0)
-
     scheduler.start()
-    print("⏰ Scheduler Active: Digest 11:56AM | Check-ins 1PM, 3PM, 5PM, 7PM | Weekly report Sunday 9AM")
-=======
-    scheduler.add_job(run_morning_digest, "cron", hour=14, minute=16)
-    scheduler.start()
-    print("⏰ Automated Scheduler Active: Set to fire daily at 02:16 PM Asia/Kolkata.")
->>>>>>> 37d2bfaa5851bb53ffb766faeb4281dd44b592f1
+    print("⏰ Scheduler: Digest 11:56AM | Check-ins 1PM 3PM 5PM 7PM | Report Sunday 9AM")
 
     yield
     scheduler.shutdown()
@@ -289,12 +273,12 @@ def fetch_live_internet_updates() -> list[dict]:
                 if articles:
                     return articles
         except Exception as e:
-            print(f"⚠️ Tavily failed ({e}). Falling back to DuckDuckGo...")
+            print(f"⚠️ Tavily failed ({e}). Falling back...")
 
     print("🕷️ Ingestion: Scraping from DuckDuckGo...")
     try:
         res = requests.get(
-            f"https://html.duckduckgo.com/html/?q={unified_query.replace('','+')}",
+            f"https://html.duckduckgo.com/html/?q={unified_query.replace(' ', '+')}",
             headers={"User-Agent": "Mozilla/5.0"}, timeout=12
         )
         if res.status_code == 200:
@@ -362,19 +346,27 @@ Example: <plan>{{"concept": "...", "pedagogical_focus": "...", "assert_template"
 # 4. WEEKLY MINI-PROJECT ENGINE
 # ==========================================
 async def get_or_create_weekly_project(skill_level: str, concept: str) -> dict:
+    import datetime as dt
     today = date.today()
-    week_start = today.strftime("%Y-%m-%d") if today.weekday() == 0 else (today - __import__('datetime').timedelta(days=today.weekday())).strftime("%Y-%m-%d")
+    week_start = (today - dt.timedelta(days=today.weekday())).strftime("%Y-%m-%d")
 
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT * FROM project_progress WHERE week_start=? ORDER BY subtask_number DESC LIMIT 1", (week_start,)) as cursor:
+        async with db.execute(
+            "SELECT project_title, subtask_number, subtask_title, subtask_description, status FROM project_progress WHERE week_start=? AND status='pending' ORDER BY subtask_number ASC LIMIT 1",
+            (week_start,)
+        ) as cursor:
             row = await cursor.fetchone()
 
     if row:
-        return {
-            "project_title": row[2], "subtask_number": row[3],
-            "subtask_title": row[4], "subtask_description": row[5],
-            "status": row[6], "week_start": week_start
-        }
+        return {"project_title": row[0], "subtask_number": row[1], "subtask_title": row[2], "subtask_description": row[3], "status": row[4], "week_start": week_start}
+
+    # Check if project exists but all done
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM project_progress WHERE week_start=?", (week_start,)) as cursor:
+            count_row = await cursor.fetchone()
+
+    if count_row and count_row[0] > 0:
+        return {"project_title": "Week Complete", "subtask_number": 0, "subtask_title": "All tasks done!", "subtask_description": "You completed this week's project. Great work!", "status": "completed", "week_start": week_start}
 
     # Generate new weekly project
     prompt = f"""
@@ -383,8 +375,6 @@ Skill level: {skill_level}
 This week's concept theme: {concept}
 
 Design a 7-day mini-project where each day builds on the previous day.
-The overall project should be completable in one week.
-
 Output raw JSON only:
 {{
   "project_title": "Overall project name",
@@ -415,25 +405,11 @@ Output raw JSON only:
                 )
             await db.commit()
 
-        first_subtask = project_data["subtasks"][0]
-        return {
-            "project_title": project_data["project_title"],
-            "subtask_number": 1,
-            "subtask_title": first_subtask["title"],
-            "subtask_description": first_subtask["description"],
-            "status": "pending",
-            "week_start": week_start
-        }
+        first = project_data["subtasks"][0]
+        return {"project_title": project_data["project_title"], "subtask_number": 1, "subtask_title": first["title"], "subtask_description": first["description"], "status": "pending", "week_start": week_start}
     except Exception as e:
         print(f"⚠️ Project engine error: {e}")
-        return {
-            "project_title": "Agentic QA Pipeline",
-            "subtask_number": 1,
-            "subtask_title": "Set up the project structure",
-            "subtask_description": "Create the base folder structure and initialize your Python environment for the week's project.",
-            "status": "pending",
-            "week_start": week_start
-        }
+        return {"project_title": "Agentic QA Pipeline", "subtask_number": 1, "subtask_title": "Set up project structure", "subtask_description": "Create the base folder structure and initialize your Python environment.", "status": "pending", "week_start": week_start}
 
 async def advance_project_subtask(week_start: str):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -443,27 +419,426 @@ async def advance_project_subtask(week_start: str):
         ) as cursor:
             row = await cursor.fetchone()
         if row:
-            await db.execute(
-                "UPDATE project_progress SET status='completed' WHERE week_start=? AND subtask_number=?",
-                (week_start, row[0])
-            )
+            await db.execute("UPDATE project_progress SET status='completed' WHERE week_start=? AND subtask_number=?", (week_start, row[0]))
             await db.commit()
             print(f"✅ Project subtask {row[0]} marked complete.")
 
 async def get_current_subtask(week_start: str) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT project_title, subtask_number, subtask_title, subtask_description, status FROM project_progress WHERE week_start=? AND status='pending' ORDER BY subtask_number ASC LIMIT 1",
+            "SELECT project_title, subtask_number, subtask_title, subtask_description FROM project_progress WHERE week_start=? AND status='pending' ORDER BY subtask_number ASC LIMIT 1",
             (week_start,)
         ) as cursor:
             row = await cursor.fetchone()
     if row:
-        return {"project_title": row[0], "subtask_number": row[1], "subtask_title": row[2], "subtask_description": row[3], "status": row[4]}
+        return {"project_title": row[0], "subtask_number": row[1], "subtask_title": row[2], "subtask_description": row[3]}
     return {}
 
 
 # ==========================================
-# 5. QUIZ ENGINE
+# 5. ASSERTION QUALITY SCORER
+# ==========================================
+async def score_assertion_quality(assertions: list[str], concept: str, reference_code: str) -> dict:
+    """
+    Scores each assertion from 1-10 based on how meaningful it is.
+    Returns scores and overall verdict.
+
+    Scoring guide:
+    1-3: Useless — always passes, tests nothing (assert True, assert x is not None)
+    4-6: Shallow — checks type or existence but not logic
+    7-10: Strong — checks actual business logic and concept correctness
+    """
+    print("🔍 [Assertion Quality Scorer]: Evaluating assertion strength...")
+
+    prompt = f"""
+You are an expert Python QA engineer evaluating assertion quality for an AI engineering student.
+
+Concept being tested: {concept}
+
+Reference implementation:
+{reference_code}
+
+Assertions to evaluate:
+{chr(10).join([f"{i+1}. {a}" for i, a in enumerate(assertions)])}
+
+Score each assertion from 1 to 10 using this strict rubric:
+- 1-3: USELESS. Always passes regardless of implementation. Examples: assert True, assert x is not None, assert len(x) >= 0
+- 4-6: SHALLOW. Checks type or basic existence but not actual logic correctness.
+- 7-10: STRONG. Checks specific business logic, correct return values, or concept-specific behavior.
+
+Output raw JSON only:
+{{
+  "scores": [
+    {{"assertion": "assert ...", "score": 8, "reason": "Tests specific routing logic"}},
+    {{"assertion": "assert ...", "score": 3, "reason": "Always passes, tests nothing"}},
+    {{"assertion": "assert ...", "score": 7, "reason": "Verifies correct output type and value"}}
+  ],
+  "average_score": 6.0,
+  "verdict": "PASS",
+  "feedback": "One assertion is too weak. Consider replacing assert x is not None with a specific value check."
+}}
+
+Verdict is PASS if average_score >= 6.0, otherwise FAIL.
+"""
+    try:
+        response = await anthropic_client.messages.create(
+            model=CLAUDE_MODEL, max_tokens=600, temperature=0.0,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.content[0].text.strip(), flags=re.MULTILINE).strip()
+        result = json.loads(text)
+        avg = result.get("average_score", 0)
+        verdict = result.get("verdict", "FAIL")
+        print(f"📊 Assertion Quality: Average score {avg}/10 — {verdict}")
+        return result
+    except Exception as e:
+        print(f"⚠️ Quality scorer error: {e}")
+        return {"scores": [], "average_score": 5.0, "verdict": "PASS", "feedback": "Scorer unavailable, defaulting to pass."}
+
+
+# ==========================================
+# 6. MUTATION TESTING ENGINE
+# ==========================================
+def apply_mutations(code: str) -> list[str]:
+    """
+    Generates a list of mutated versions of the reference code.
+    Each mutation changes one small thing that should break correct assertions.
+    """
+    mutations = []
+    lines = code.split('\n')
+
+    for i, line in enumerate(lines):
+        mutated_lines = lines.copy()
+
+        # Mutation 1: flip == to !=
+        if '==' in line and 'assert' not in line:
+            mutated_lines[i] = line.replace('==', '!=', 1)
+            mutations.append('\n'.join(mutated_lines))
+            mutated_lines = lines.copy()
+
+        # Mutation 2: flip + to -
+        if ' + ' in line and 'assert' not in line:
+            mutated_lines[i] = line.replace(' + ', ' - ', 1)
+            mutations.append('\n'.join(mutated_lines))
+            mutated_lines = lines.copy()
+
+        # Mutation 3: flip True to False
+        if 'True' in line and 'assert' not in line:
+            mutated_lines[i] = line.replace('True', 'False', 1)
+            mutations.append('\n'.join(mutated_lines))
+            mutated_lines = lines.copy()
+
+        # Mutation 4: flip > to <
+        if ' > ' in line and 'assert' not in line:
+            mutated_lines[i] = line.replace(' > ', ' < ', 1)
+            mutations.append('\n'.join(mutated_lines))
+            mutated_lines = lines.copy()
+
+        # Mutation 5: flip return value — change return X to return None
+        if line.strip().startswith('return ') and 'None' not in line and 'assert' not in line:
+            mutated_lines[i] = line.replace(line.strip(), 'return None', 1)
+            mutations.append('\n'.join(mutated_lines))
+
+    # Deduplicate and limit to 5 mutations
+    seen = set()
+    unique_mutations = []
+    for m in mutations:
+        if m != code and m not in seen:
+            seen.add(m)
+            unique_mutations.append(m)
+        if len(unique_mutations) >= 5:
+            break
+
+    return unique_mutations
+
+def run_sandbox_silent(code: str, assert_lines: list) -> bool:
+    """Runs code + assertions silently. Returns True if assertions pass, False if they fail."""
+    import math, json as json_mod, re as re_mod
+    full_code = code + "\n\n" + "\n".join(assert_lines)
+    sandbox_globals = {
+        "math": math, "json": json_mod, "re": re_mod,
+        "__builtins__": {
+            "abs": abs, "all": all, "any": any, "bool": bool, "dict": dict,
+            "enumerate": enumerate, "filter": filter, "float": float,
+            "int": int, "isinstance": isinstance, "len": len, "list": list,
+            "map": map, "max": max, "min": min, "print": print,
+            "range": range, "round": round, "set": set, "sorted": sorted,
+            "str": str, "sum": sum, "tuple": tuple, "type": type, "zip": zip,
+            "AssertionError": AssertionError, "ValueError": ValueError,
+            "TypeError": TypeError, "Exception": Exception
+        }
+    }
+    try:
+        exec(compile(full_code, "<sandbox>", "exec"), sandbox_globals)
+        return True  # assertions passed
+    except Exception:
+        return False  # assertions failed (caught the mutation)
+
+def run_mutation_testing(reference_code: str, assert_lines: list) -> dict:
+    """
+    Runs mutation testing on the reference code.
+    Generates mutations, runs assertions against each mutation.
+    If assertions pass on a mutated (broken) version, they are weak.
+    Returns verdict and details.
+    """
+    print("🧬 [Mutation Tester]: Running mutation tests...")
+
+    mutations = apply_mutations(reference_code)
+
+    if not mutations:
+        print("⚠️ No mutations generated — code may be too simple.")
+        return {"verdict": "PASS", "mutations_tested": 0, "mutations_caught": 0, "kill_rate": 100.0, "feedback": "No mutations applicable."}
+
+    caught = 0
+    survived = 0
+    survived_examples = []
+
+    for i, mutated_code in enumerate(mutations):
+        assertions_passed_on_mutation = run_sandbox_silent(mutated_code, assert_lines)
+        if assertions_passed_on_mutation:
+            # Assertions PASSED on broken code = they did NOT catch the bug = mutation SURVIVED (bad)
+            survived += 1
+            if len(survived_examples) < 2:
+                # Find what changed
+                orig_lines = reference_code.split('\n')
+                mut_lines = mutated_code.split('\n')
+                for ol, ml in zip(orig_lines, mut_lines):
+                    if ol != ml:
+                        survived_examples.append(f"Changed: '{ol.strip()}' → '{ml.strip()}'")
+                        break
+        else:
+            # Assertions FAILED on broken code = they caught the bug = mutation KILLED (good)
+            caught += 1
+
+    total = len(mutations)
+    kill_rate = (caught / total * 100) if total > 0 else 100.0
+    verdict = "PASS" if kill_rate >= 60.0 else "FAIL"
+
+    print(f"🧬 Mutation Results: {caught}/{total} mutations caught. Kill rate: {kill_rate:.0f}% — {verdict}")
+
+    feedback = ""
+    if verdict == "FAIL":
+        feedback = f"Your assertions only caught {caught}/{total} mutations ({kill_rate:.0f}%). "
+        if survived_examples:
+            feedback += f"They missed bugs like: {'; '.join(survived_examples)}. "
+        feedback += "Write assertions that check specific return values, not just types or None checks."
+
+    return {
+        "verdict": verdict,
+        "mutations_tested": total,
+        "mutations_caught": caught,
+        "kill_rate": kill_rate,
+        "feedback": feedback
+    }
+
+
+# ==========================================
+# 7. EXECUTION SANDBOX (FULL)
+# ==========================================
+def run_code_sandbox(reference_code: str, assert_lines: list) -> tuple[bool, str]:
+    print("🧪 [Sandbox]: Verifying assertions...")
+    import math, json as json_mod, re as re_mod
+    full_code = reference_code + "\n\n" + "\n".join(assert_lines)
+    sandbox_globals = {
+        "math": math, "json": json_mod, "re": re_mod,
+        "__builtins__": {
+            "abs": abs, "all": all, "any": any, "bin": bin, "bool": bool,
+            "chr": chr, "dict": dict, "dir": dir, "divmod": divmod, "enumerate": enumerate,
+            "filter": filter, "float": float, "format": format, "hash": hash,
+            "id": id, "int": int, "isinstance": isinstance, "issubclass": issubclass,
+            "iter": iter, "len": len, "list": list, "map": map, "max": max, "min": min,
+            "next": next, "object": object, "ord": ord, "pow": pow, "print": print,
+            "range": range, "repr": repr, "reversed": reversed, "round": round,
+            "set": set, "slice": slice, "sorted": sorted, "str": str, "sum": sum,
+            "tuple": tuple, "type": type, "zip": zip,
+            "AssertionError": AssertionError, "ValueError": ValueError,
+            "TypeError": TypeError, "KeyError": KeyError, "IndexError": IndexError,
+            "Exception": Exception, "StopIteration": StopIteration, "RuntimeError": RuntimeError
+        }
+    }
+    try:
+        exec(compile(full_code, "<sandbox>", "exec"), sandbox_globals)
+        return True, "All assertions passed."
+    except AssertionError as e:
+        return False, f"AssertionError: {str(e) if str(e) else 'Assert failed.'}"
+    except SyntaxError as e:
+        return False, f"SyntaxError line {e.lineno}: {e.msg}"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)}"
+
+
+# ==========================================
+# 8. QA CRITIC AGENT (WITH QUALITY + MUTATION)
+# ==========================================
+async def run_qa_critic(content: str, reference_code: str) -> tuple[bool, str]:
+    print("🕵️‍♂️ [QA Critic]: Verifying pipeline parameters...")
+
+    has_updates = "*🔴 REGULAR DAILY AI UPDATES*" in content
+    has_learnings = "*📘 WHAT I NEED TO LEARN & PROJECTS TO WORK ON*" in content
+
+    assert_lines = []
+    for line in content.split('\n'):
+        clean_line = line.replace('*', '').replace('-', '').strip()
+        if clean_line.startswith('assert '):
+            assert_lines.append(clean_line)
+
+    has_assert_syntax = len(assert_lines) >= 3
+    char_length = len(content)
+    within_twilio_limit = char_length <= 1600
+
+    lines = content.split('\n')
+    is_in_update_block = False
+    update_count = 0
+    for line in lines:
+        if "*🔴 REGULAR DAILY AI UPDATES*" in line:
+            is_in_update_block = True
+            continue
+        if "*📘 WHAT I NEED TO LEARN*" in line:
+            is_in_update_block = False
+        if is_in_update_block and (line.strip().startswith('-') or line.strip().startswith('*') or (line.strip() and line.strip()[0].isdigit())):
+            update_count += 1
+
+    errors = []
+    if not has_updates: errors.append("Missing '*🔴 REGULAR DAILY AI UPDATES*' header.")
+    if not has_learnings: errors.append("Missing '*📘 WHAT I NEED TO LEARN & PROJECTS TO WORK ON*' header.")
+    if not has_assert_syntax: errors.append(f"Found {len(assert_lines)} assertions, expected at least 3.")
+    if not within_twilio_limit: errors.append(f"Payload out of size bounds ({char_length}/1600 chars).")
+    if not (3 <= update_count <= 8): errors.append(f"Density check: Found {update_count} updates, expected 5-7.")
+
+    sandbox_passed = False
+    quality_result = {"verdict": "SKIP", "average_score": 0, "feedback": ""}
+    mutation_result = {"verdict": "SKIP", "kill_rate": 0, "feedback": ""}
+
+    if has_assert_syntax and reference_code:
+        # Step 1: Basic sandbox run
+        sandbox_passed, sandbox_msg = run_code_sandbox(reference_code, assert_lines)
+        if not sandbox_passed:
+            errors.append(f"Sandbox Failed: {sandbox_msg}")
+        else:
+            # Step 2: Assertion quality scoring
+            concept = "today's concept"
+            quality_result = await score_assertion_quality(assert_lines, concept, reference_code)
+            if quality_result.get("verdict") == "FAIL":
+                errors.append(f"Assertion Quality Failed (avg score {quality_result.get('average_score', 0):.1f}/10): {quality_result.get('feedback', '')}")
+
+            # Step 3: Mutation testing (only if quality passed)
+            if quality_result.get("verdict") != "FAIL":
+                mutation_result = run_mutation_testing(reference_code, assert_lines)
+                if mutation_result.get("verdict") == "FAIL":
+                    errors.append(f"Mutation Testing Failed (kill rate {mutation_result.get('kill_rate', 0):.0f}%): {mutation_result.get('feedback', '')}")
+
+    print("\n" + "="*50)
+    print("📊 QA CRITIC STATUS AND INTEGRITY METRICS")
+    print("-"*50)
+    print(f"  - Daily Updates Section:         {'PASS' if has_updates else 'FAIL'}")
+    print(f"  - Learning & Projects Section:  {'PASS' if has_learnings else 'FAIL'}")
+    print(f"  - Sandbox Assert Execution:      {'PASS' if sandbox_passed else 'FAIL'}")
+    print(f"  - Assertion Quality Score:       {quality_result.get('average_score', 0):.1f}/10 ({quality_result.get('verdict', 'SKIP')})")
+    print(f"  - Mutation Test Kill Rate:       {mutation_result.get('kill_rate', 0):.0f}% ({mutation_result.get('verdict', 'SKIP')})")
+    print(f"  - Twilio Message Size Safety:    {char_length}/1600 chars ({'PASS' if within_twilio_limit else 'FAIL'})")
+    print(f"  - Density Metric:                {update_count} updates processed")
+
+    if not errors:
+        print("\nSTATUS: ALL PARAMETERS WORKING FINE. RELEASING PAYLOAD.")
+        print("="*50 + "\n")
+        return True, ""
+    else:
+        feedback_report = " | ".join(errors)
+        print(f"\nSTATUS: REJECTED. Violations: {feedback_report}")
+        print("="*50 + "\n")
+        return False, feedback_report
+
+
+# ==========================================
+# 9. CREATOR AGENT
+# ==========================================
+async def generate_daily_payload(raw_data, skill_level, exclusions, planner_context, project_context, feedback_loop_msg=""):
+    print("🤖 [Creator Agent]: Requesting compact update from Claude...")
+
+    concept = planner_context.get("concept")
+    pedagogical_focus = planner_context.get("pedagogical_focus")
+    assert_template = planner_context.get("assert_template")
+
+    project_section = ""
+    if project_context and project_context.get("subtask_number", 0) > 0:
+        project_section = (
+            f"\n*🏗️ WEEKLY PROJECT — Day {project_context.get('subtask_number', 1)}*\n"
+            f"Project: {project_context.get('project_title', '')}\n"
+            f"Today's Task: *{project_context.get('subtask_title', '')}*\n"
+            f"— {project_context.get('subtask_description', '')}\n"
+            f"Reply *'subtask done'* when complete."
+        )
+
+    prompt = f"""
+You are the Lead Curriculum Director for an Engineer tracking towards Agentic AI Test Architecture.
+Current Student Skill Level: {skill_level}
+Strict Exclusion List (DO NOT REPEAT): {exclusions}
+
+Today's Curriculum Focus:
+- Concept to Master: {concept}
+- Pedagogical Focus: {pedagogical_focus}
+- Assert Template Guide: {assert_template}
+
+Using these fresh live internet updates:
+{raw_data}
+
+Provide two outputs:
+1. A WhatsApp-friendly learning digest wrapped in <whatsapp_payload> tags.
+2. A valid Python reference implementation wrapped in <reference_implementation> tags.
+
+CRITICAL SIZE CONSTRAINT: Content inside <whatsapp_payload> must be strictly under 1200 characters.
+
+Structure the <whatsapp_payload> EXACTLY as:
+
+*🔴 REGULAR DAILY AI UPDATES*
+(5 to 7 high-signal, short, single-sentence points)
+
+*📘 WHAT I NEED TO LEARN & PROJECTS TO WORK ON*
+- *Core Concept to Master Today*: {concept} — {pedagogical_focus}
+- *Practical Mini-Project Blueprint*: A quick technical project loop.
+- *QA Validation Lines*:
+assert your_function_here() == expected_value
+assert your_second_function(input) == specific_result
+assert your_third_function() == True
+
+CRITICAL ASSERTION RULES:
+1. Every assertion MUST start with "assert " (lowercase)
+2. Every assertion MUST check a SPECIFIC value, not just "is not None" or "== True" on its own
+3. The functions called must match exactly what is defined in your reference implementation
+4. Assertions must test actual concept logic, not placeholder checks
+
+Structure the <reference_implementation> as valid Python code with the function definitions.
+"""
+
+    if feedback_loop_msg:
+        prompt += f"\n\n⚠️ CRITICAL CORRECTION REQUIRED:\n{feedback_loop_msg}"
+
+    response = await anthropic_client.messages.create(
+        model=CLAUDE_MODEL, max_tokens=2000, temperature=0.2,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    text = response.content[0].text
+    whatsapp_payload = ""
+    reference_code = ""
+
+    if "<whatsapp_payload>" in text and "</whatsapp_payload>" in text:
+        whatsapp_payload = text.split("<whatsapp_payload>")[1].split("</whatsapp_payload>")[0].strip()
+    else:
+        whatsapp_payload = text
+
+    if project_section:
+        whatsapp_payload += f"\n\n{project_section}"
+
+    if "<reference_implementation>" in text and "</reference_implementation>" in text:
+        reference_code = text.split("<reference_implementation>")[1].split("</reference_implementation>")[0].strip()
+        reference_code = re.sub(r'^```(?:python)?\s*|\s*```$', '', reference_code, flags=re.MULTILINE).strip()
+
+    return whatsapp_payload, reference_code
+
+
+# ==========================================
+# 10. QUIZ ENGINE
 # ==========================================
 async def generate_quiz_questions(concept: str, skill_level: str) -> list[dict]:
     prompt = f"""
@@ -479,8 +854,7 @@ Distribution:
 - Questions 7-8: Difficult
 - Questions 9-10: Advanced
 
-Each question must have exactly 4 options A, B, C, D.
-
+Each question must have exactly 4 options A B C D.
 Output raw JSON array only:
 [
   {{
@@ -543,20 +917,19 @@ async def start_quiz_session(concept: str, skill_level: str) -> str:
         "answers": []
     })
 
-    first_q = questions[0]
-    return format_question(first_q, 1, len(questions))
+    return format_question(questions[0], 1, len(questions))
 
 def format_question(q: dict, current: int, total: int) -> str:
-    difficulty_emoji = {"Easy": "🟢", "Medium": "🟡", "Hard": "🟠", "Difficult": "🔴", "Advanced": "⚫"}.get(q["difficulty"], "⚪")
+    emoji = {"Easy": "🟢", "Medium": "🟡", "Hard": "🟠", "Difficult": "🔴", "Advanced": "⚫"}.get(q["difficulty"], "⚪")
     return (
         f"🧠 *Quiz — Question {current}/{total}*\n"
-        f"{difficulty_emoji} Difficulty: *{q['difficulty']}*\n\n"
+        f"{emoji} Difficulty: *{q['difficulty']}*\n\n"
         f"{q['question']}\n\n"
         f"*A)* {q['options']['A']}\n"
         f"*B)* {q['options']['B']}\n"
         f"*C)* {q['options']['C']}\n"
         f"*D)* {q['options']['D']}\n\n"
-        f"Reply with *A*, *B*, *C*, or *D*"
+        f"Reply *A*, *B*, *C*, or *D*"
     )
 
 async def process_quiz_answer(user_answer: str) -> str:
@@ -588,7 +961,7 @@ async def process_quiz_answer(user_answer: str) -> str:
         )
         await db.commit()
 
-    feedback = "✅ Correct!" if is_correct else f"❌ Wrong. Correct answer: *{current_q['correct']}* — {current_q.get('explanation','')}"
+    feedback = "✅ Correct!" if is_correct else f"❌ Wrong. Answer: *{current_q['correct']}* — {current_q.get('explanation', '')}"
     state["current_index"] += 1
     save_quiz_state(state)
 
@@ -598,8 +971,7 @@ async def process_quiz_answer(user_answer: str) -> str:
         return f"{feedback}\n\n{result_msg}"
     else:
         next_q = questions[state["current_index"]]
-        next_msg = format_question(next_q, state["current_index"]+1, len(questions))
-        return f"{feedback}\n\n{next_msg}"
+        return f"{feedback}\n\n{format_question(next_q, state['current_index']+1, len(questions))}"
 
 async def finalize_quiz(state: dict) -> str:
     score = state["score"]
@@ -610,107 +982,92 @@ async def finalize_quiz(state: dict) -> str:
 
     wrong_answers = [a for a in answers if not a["is_correct"]]
     weak_areas = ", ".join(set([a["difficulty"] for a in wrong_answers])) if wrong_answers else "None"
+    percentage = (score / total) * 100
 
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE quiz_sessions SET score=?, completed=1 WHERE id=?",
-            (score, state["session_id"])
-        )
+        await db.execute("UPDATE quiz_sessions SET score=?, completed=1 WHERE id=?", (score, state["session_id"]))
         await db.execute(
             "INSERT INTO performance_log (date, concept, quiz_score, max_score, skill_level, weak_areas) VALUES (?, ?, ?, ?, ?, ?)",
             (date.today().isoformat(), concept, score, total, skill_level, weak_areas)
         )
         await db.commit()
 
-    percentage = (score / total) * 100
-
     if score < 5:
         wrong_topics = [a["question_text"][:60] for a in wrong_answers[:3]]
-        feedback_msg = (
+        msg = (
             f"📊 *Quiz Complete!*\n\n"
             f"Score: *{score}/{total}* ({percentage:.0f}%)\n\n"
-            f"📉 You need more practice on this concept.\n\n"
-            f"*Areas to revise:*\n"
-            + "\n".join([f"- {t}..." for t in wrong_topics]) +
+            f"📉 Needs more practice.\n\n"
+            f"*Questions you missed:*\n" + "\n".join([f"- {t}..." for t in wrong_topics]) +
             f"\n\n*What to do next:*\n"
             f"- Re-read today's concept carefully\n"
             f"- Focus on *{weak_areas}* level questions\n"
-            f"- Try building a small example from scratch\n"
-            f"- Tomorrow's concept will be adjusted to help reinforce this\n\n"
-            f"💪 Don't give up — every expert was once a beginner!"
+            f"- Build a small example from scratch\n"
+            f"- Tomorrow's concept adjusts to reinforce this\n\n"
+            f"💪 Every expert was once a beginner!"
         )
         await update_db_skill("Foundational")
     elif score < 8:
-        feedback_msg = (
+        msg = (
             f"📊 *Quiz Complete!*\n\n"
             f"Score: *{score}/{total}* ({percentage:.0f}%)\n\n"
-            f"👍 Good effort! You have a solid base.\n\n"
+            f"👍 Good effort! Solid base.\n\n"
             f"*Keep improving on:* {weak_areas if weak_areas != 'None' else 'Advanced topics'}\n\n"
             f"Tomorrow we push slightly harder. Keep going! 🚀"
         )
     else:
-        feedback_msg = (
+        msg = (
             f"📊 *Quiz Complete!*\n\n"
             f"Score: *{score}/{total}* ({percentage:.0f}%)\n\n"
-            f"🌟 Excellent work! You've mastered this concept.\n\n"
+            f"🌟 Excellent! Concept mastered.\n\n"
             f"Tomorrow we move to a more advanced topic. You're on fire! 🔥"
         )
         await update_db_skill("Intermediate" if skill_level == "Foundational" else "Advanced")
 
-    return feedback_msg
+    return msg
 
 
 # ==========================================
-# 6. CHECK-IN REMINDER ENGINE
+# 11. CHECK-IN REMINDER ENGINE
 # ==========================================
 async def send_checkin_reminder(reminder_number: int):
     today = date.today().isoformat()
     loop = asyncio.get_event_loop()
 
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT * FROM daily_checkins WHERE date=?", (today,)) as cursor:
-            row = await cursor.fetchone()
-
-    if not row:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("INSERT INTO daily_checkins (date, reminder_count) VALUES (?, ?)", (today, 0))
-            await db.commit()
-
-    async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT reminder_count, learning_status, quiz_triggered FROM daily_checkins WHERE date=?", (today,)) as cursor:
             row = await cursor.fetchone()
 
     if not row:
-        return
-
-    reminder_count, learning_status, quiz_triggered = row
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("INSERT OR IGNORE INTO daily_checkins (date, reminder_count) VALUES (?, 0)", (today,))
+            await db.commit()
+        reminder_count, learning_status, quiz_triggered = 0, "in_progress", 0
+    else:
+        reminder_count, learning_status, quiz_triggered = row
 
     if quiz_triggered:
         return
 
-    if learning_status == "done" and not quiz_triggered:
-        return
-
-    reminder_messages = {
-        1: "📚 Hey Madan! How's your learning going today? Reply *'done'* when you finish or tell me where you're at.",
-        2: "⏰ Quick check-in — still working through today's concept? Reply *'done'* if you've finished!",
-        3: "🎯 How's the progress? You're doing great — reply *'done'* to unlock your quiz when ready.",
-        4: "🔔 Final reminder for today! Replying *'done'* to start your quiz, or I'll start it automatically now anyway. Let's go! 💪"
+    messages = {
+        1: "📚 Hey Madan! How's your learning going today? Reply *'done'* when you finish today's concept.",
+        2: "⏰ Quick check-in — still working through today's topic? Reply *'done'* when you're ready for your quiz!",
+        3: "🎯 How's the progress? Reply *'done'* to unlock your quiz whenever you're ready.",
+        4: "🔔 Final reminder! Reply *'done'* to start your quiz, or I'll kick it off automatically now. Let's go! 💪"
     }
 
-    message = reminder_messages.get(reminder_number, "How's your learning going today?")
+    msg = messages.get(reminder_number, "How's your learning going today?")
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE daily_checkins SET reminder_count=? WHERE date=?", (reminder_count + 1, today))
         await db.commit()
 
     def send_msg():
-        Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=message, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
+        Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=msg, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
 
     await loop.run_in_executor(None, send_msg)
     print(f"⏰ Check-in reminder {reminder_number} sent.")
 
-    # After 4th reminder, auto-trigger quiz
     if reminder_number == 4:
         await asyncio.sleep(30)
         await auto_trigger_quiz()
@@ -726,13 +1083,13 @@ async def auto_trigger_quiz():
         return
 
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT concept, summary FROM sent_history ORDER BY timestamp DESC LIMIT 1") as cursor:
+        async with db.execute("SELECT concept FROM sent_history ORDER BY timestamp DESC LIMIT 1") as cursor:
             concept_row = await cursor.fetchone()
 
     concept = concept_row[0] if concept_row else "Agentic Scaffolding Testing"
     skill_level, _, _ = await get_db_state()
 
-    intro_msg = f"⏰ Time's up for today! Let's see what you've picked up on *{concept}*. Starting your quiz now...\n\n"
+    intro = f"⏰ Time's up! Let's test what you've learned on *{concept}*. Starting quiz now...\n\n"
     first_question = await start_quiz_session(concept, skill_level)
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -741,18 +1098,19 @@ async def auto_trigger_quiz():
 
     loop = asyncio.get_event_loop()
     def send_msg():
-        Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=intro_msg + first_question, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
+        Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=intro + first_question, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
     await loop.run_in_executor(None, send_msg)
     print("🧠 Auto-triggered quiz after 4th reminder.")
 
 
 # ==========================================
-# 7. WEEKLY PERFORMANCE REPORT
+# 12. WEEKLY PERFORMANCE REPORT
 # ==========================================
 async def send_weekly_report():
+    import datetime as dt
     loop = asyncio.get_event_loop()
     today = date.today()
-    week_ago = (today - __import__('datetime').timedelta(days=7)).isoformat()
+    week_ago = (today - dt.timedelta(days=7)).isoformat()
 
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
@@ -762,7 +1120,7 @@ async def send_weekly_report():
             rows = await cursor.fetchall()
 
     if not rows:
-        msg = "📊 *Weekly Report*\n\nNo quiz data recorded this week yet. Keep learning and completing your daily quizzes! 💪"
+        msg = "📊 *Weekly Report*\n\nNo quiz data this week yet. Keep learning and completing your daily quizzes! 💪"
         def send_msg():
             Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=msg, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
         await loop.run_in_executor(None, send_msg)
@@ -770,25 +1128,21 @@ async def send_weekly_report():
 
     total_score = sum(r[2] for r in rows)
     total_max = sum(r[3] for r in rows)
-    avg_percentage = (total_score / total_max * 100) if total_max > 0 else 0
-    all_weak_areas = [r[5] for r in rows if r[5] and r[5] != "None"]
-    weak_summary = ", ".join(set(", ".join(all_weak_areas).split(", "))) if all_weak_areas else "None"
-
-    daily_breakdown = "\n".join([
-        f"- {r[0]}: *{r[1][:30]}* — {r[2]}/{r[3]} ({r[2]/r[3]*100:.0f}%)"
-        for r in rows
-    ])
-
+    avg_pct = (total_score / total_max * 100) if total_max > 0 else 0
+    all_weak = [r[5] for r in rows if r[5] and r[5] != "None"]
+    weak_summary = ", ".join(set(", ".join(all_weak).split(", "))) if all_weak else "None"
     trend = "📈 Improving!" if len(rows) >= 2 and rows[-1][2] >= rows[0][2] else "📉 Needs more focus"
+
+    daily = "\n".join([f"- {r[0]}: *{r[1][:25]}* — {r[2]}/{r[3]} ({r[2]/r[3]*100:.0f}%)" for r in rows])
 
     report = (
         f"📊 *Weekly Performance Report*\n"
-        f"{'='*30}\n\n"
-        f"*Overall Score:* {total_score}/{total_max} ({avg_percentage:.0f}%)\n"
+        f"{'='*28}\n\n"
+        f"*Overall:* {total_score}/{total_max} ({avg_pct:.0f}%)\n"
         f"*Trend:* {trend}\n"
         f"*Days Active:* {len(rows)}/7\n\n"
-        f"*Daily Breakdown:*\n{daily_breakdown}\n\n"
-        f"*Weak Areas This Week:* {weak_summary}\n\n"
+        f"*Daily Breakdown:*\n{daily}\n\n"
+        f"*Weak Areas:* {weak_summary}\n\n"
         f"*Next Week Focus:* Strengthen {weak_summary if weak_summary != 'None' else 'Advanced concepts'}\n\n"
         f"Keep pushing Madan — you're building something great! 🚀"
     )
@@ -800,194 +1154,12 @@ async def send_weekly_report():
 
 
 # ==========================================
-# 8. CREATOR AGENT
-# ==========================================
-async def generate_daily_payload(raw_data, skill_level, exclusions, planner_context, project_context, feedback_loop_msg=""):
-    print("🤖 [Creator Agent]: Requesting compact update from Claude...")
-
-    concept = planner_context.get("concept")
-    pedagogical_focus = planner_context.get("pedagogical_focus")
-    assert_template = planner_context.get("assert_template")
-
-    project_section = ""
-    if project_context:
-        project_section = (
-            f"\n*🏗️ WEEKLY PROJECT — Day {project_context.get('subtask_number', 1)}*\n"
-            f"Project: {project_context.get('project_title', '')}\n"
-            f"Today's Task: *{project_context.get('subtask_title', '')}*\n"
-            f"— {project_context.get('subtask_description', '')}\n"
-            f"Reply *'subtask done'* when complete to unlock tomorrow's task."
-        )
-
-    prompt = f"""
-You are the Lead Curriculum Director for an Engineer tracking towards Agentic AI Test Architecture.
-Current Student Skill Level: {skill_level}
-Strict Exclusion List (DO NOT REPEAT): {exclusions}
-
-Today's Curriculum Focus:
-- Concept to Master: {concept}
-- Pedagogical Focus: {pedagogical_focus}
-- Assert Template Guide: {assert_template}
-
-Using these fresh live internet updates:
-{raw_data}
-
-Provide two outputs:
-1. A WhatsApp-friendly learning digest wrapped in <whatsapp_payload> tags.
-2. A valid Python reference implementation wrapped in <reference_implementation> tags.
-
-CRITICAL SIZE CONSTRAINT: Content inside <whatsapp_payload> must be strictly under 1200 characters.
-
-Structure the <whatsapp_payload> EXACTLY as:
-
-*🔴 REGULAR DAILY AI UPDATES*
-(5 to 7 high-signal, short, single-sentence points)
-
-*📘 WHAT I NEED TO LEARN & PROJECTS TO WORK ON*
-- *Core Concept to Master Today*: {concept} — {pedagogical_focus}
-- *Practical Mini-Project Blueprint*: A quick technical project loop.
-- *QA Validation Lines*:
-assert your_function_here() == True
-assert your_second_function() is not None
-assert your_third_function() == expected_value
-
-CRITICAL FORMATTING RULE FOR QA LINES: Write exactly 3 standard executable Python assertion lines starting with "assert ". No emojis, hyphens, or markdown on these lines.
-
-Structure the <reference_implementation> as valid Python code with the function definitions tested by the assertions.
-"""
-
-    if feedback_loop_msg:
-        prompt += f"\n\n⚠️ CRITICAL CORRECTION REQUIRED:\n{feedback_loop_msg}"
-
-    response = await anthropic_client.messages.create(
-        model=CLAUDE_MODEL, max_tokens=2000, temperature=0.2,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    text = response.content[0].text
-    whatsapp_payload = ""
-    reference_code = ""
-
-    if "<whatsapp_payload>" in text and "</whatsapp_payload>" in text:
-        whatsapp_payload = text.split("<whatsapp_payload>")[1].split("</whatsapp_payload>")[0].strip()
-    else:
-        whatsapp_payload = text
-
-    if project_section:
-        whatsapp_payload += f"\n\n{project_section}"
-
-    if "<reference_implementation>" in text and "</reference_implementation>" in text:
-        reference_code = text.split("<reference_implementation>")[1].split("</reference_implementation>")[0].strip()
-        reference_code = re.sub(r'^```(?:python)?\s*|\s*```$', '', reference_code, flags=re.MULTILINE).strip()
-
-    return whatsapp_payload, reference_code
-
-
-# ==========================================
-# 9. EXECUTION SANDBOX
-# ==========================================
-def run_code_sandbox(reference_code: str, assert_lines: list) -> tuple[bool, str]:
-    print("🧪 [Sandbox]: Verifying assertions...")
-    import math, json, re
-    full_code = reference_code + "\n\n" + "\n".join(assert_lines)
-    sandbox_globals = {
-        "math": math, "json": json, "re": re,
-        "__builtins__": {
-            "abs": abs, "all": all, "any": any, "bin": bin, "bool": bool,
-            "chr": chr, "dict": dict, "dir": dir, "divmod": divmod, "enumerate": enumerate,
-            "filter": filter, "float": float, "format": format, "hash": hash, "hex": hex,
-            "id": id, "int": int, "isinstance": isinstance, "issubclass": issubclass,
-            "iter": iter, "len": len, "list": list, "map": map, "max": max, "min": min,
-            "next": next, "object": object, "oct": oct, "ord": ord, "pow": pow, "print": print,
-            "range": range, "repr": repr, "reversed": reversed, "round": round, "set": set,
-            "slice": slice, "sorted": sorted, "str": str, "sum": sum, "tuple": tuple,
-            "type": type, "zip": zip, "AssertionError": AssertionError, "ValueError": ValueError,
-            "TypeError": TypeError, "KeyError": KeyError, "IndexError": IndexError,
-            "Exception": Exception, "StopIteration": StopIteration, "RuntimeError": RuntimeError
-        }
-    }
-    try:
-        exec(compile(full_code, "<sandbox>", "exec"), sandbox_globals)
-        return True, "All assertions passed."
-    except AssertionError as e:
-        return False, f"AssertionError: {str(e) if str(e) else 'Assert failed.'}"
-    except SyntaxError as e:
-        return False, f"SyntaxError line {e.lineno}: {e.msg}"
-    except Exception as e:
-        return False, f"{type(e).__name__}: {str(e)}"
-
-
-# ==========================================
-# 10. QA CRITIC AGENT
-# ==========================================
-def run_qa_critic(content, reference_code):
-    print("🕵️‍♂️ [QA Critic]: Verifying pipeline parameters...")
-
-    has_updates = "*🔴 REGULAR DAILY AI UPDATES*" in content
-    has_learnings = "*📘 WHAT I NEED TO LEARN & PROJECTS TO WORK ON*" in content
-
-    assert_lines = []
-    for line in content.split('\n'):
-        clean_line = line.replace('*', '').replace('-', '').strip()
-        if clean_line.startswith('assert '):
-            assert_lines.append(clean_line)
-
-    has_assert_syntax = len(assert_lines) >= 3
-    char_length = len(content)
-    within_twilio_limit = char_length <= 1600
-
-    lines = content.split('\n')
-    is_in_update_block = False
-    update_count = 0
-    for line in lines:
-        if "*🔴 REGULAR DAILY AI UPDATES*" in line:
-            is_in_update_block = True
-            continue
-        if "*📘 WHAT I NEED TO LEARN*" in line:
-            is_in_update_block = False
-        if is_in_update_block and (line.strip().startswith('-') or line.strip().startswith('*') or (line.strip() and line.strip()[0].isdigit())):
-            update_count += 1
-
-    errors = []
-    if not has_updates: errors.append("Missing '*🔴 REGULAR DAILY AI UPDATES*' header.")
-    if not has_learnings: errors.append("Missing '*📘 WHAT I NEED TO LEARN & PROJECTS TO WORK ON*' header.")
-    if not has_assert_syntax: errors.append(f"Found {len(assert_lines)} assertions, expected at least 3.")
-    if not within_twilio_limit: errors.append(f"Payload out of size bounds ({char_length}/1600 chars).")
-    if not (3 <= update_count <= 8): errors.append(f"Density check: Found {update_count} updates, expected 5-7.")
-
-    sandbox_passed = False
-    if has_assert_syntax and reference_code:
-        sandbox_passed, sandbox_msg = run_code_sandbox(reference_code, assert_lines)
-        if not sandbox_passed:
-            errors.append(f"Sandbox Failed: {sandbox_msg}")
-
-    print("\n" + "="*50)
-    print("📊 QA CRITIC STATUS AND INTEGRITY METRICS")
-    print("-"*50)
-    print(f"  - Daily Updates Section:         {'PASS' if has_updates else 'FAIL'}")
-    print(f"  - Learning & Projects Section:  {'PASS' if has_learnings else 'FAIL'}")
-    print(f"  - Sandbox Assert Execution:      {'PASS' if (has_assert_syntax and sandbox_passed) else 'FAIL'}")
-    print(f"  - Twilio Message Size Safety:    {char_length}/1600 chars ({'PASS' if within_twilio_limit else 'FAIL'})")
-    print(f"  - Density Metric:                {update_count} updates processed")
-
-    if not errors:
-        print("\nSTATUS: ALL PARAMETERS WORKING FINE. RELEASING PAYLOAD.")
-        print("="*50 + "\n")
-        return True, ""
-    else:
-        feedback_report = " | ".join(errors)
-        print(f"\nSTATUS: REJECTED. Violations: {feedback_report}")
-        print("="*50 + "\n")
-        return False, feedback_report
-
-
-# ==========================================
-# 11. MORNING DIGEST ENDPOINT
+# 13. MORNING DIGEST ENDPOINT
 # ==========================================
 @app.post("/run-morning-digest")
 async def run_morning_digest():
     try:
-        skill_level, recent_topics, full_history_log = await get_db_state()
+        skill_level, recent_topics, _ = await get_db_state()
         planner_context = await run_curriculum_planner(skill_level, recent_topics)
         concept = planner_context.get("concept", "Agentic Scaffolding Testing")
 
@@ -1003,7 +1175,6 @@ async def run_morning_digest():
 
         news_context = "\n\n".join(context_blocks)
         exclusions = ", ".join(recent_topics) if recent_topics else "None"
-
         project_context = await get_or_create_weekly_project(skill_level, concept)
 
         today = date.today().isoformat()
@@ -1024,7 +1195,7 @@ async def run_morning_digest():
                 final_text, reference_code = await generate_daily_payload(
                     news_context, skill_level, exclusions, planner_context, project_context, feedback_loop_msg=feedback
                 )
-                is_valid_run, feedback = run_qa_critic(final_text, reference_code)
+                is_valid_run, feedback = await run_qa_critic(final_text, reference_code)
                 if is_valid_run:
                     break
                 current_attempt += 1
@@ -1054,7 +1225,7 @@ async def run_morning_digest():
 
 
 # ==========================================
-# 12. WHATSAPP WEBHOOK
+# 14. WHATSAPP WEBHOOK
 # ==========================================
 @app.post("/whatsapp-webhook")
 async def incoming_whatsapp_reply(Body: str = Form(...)):
@@ -1063,13 +1234,13 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
     loop = asyncio.get_running_loop()
     today = date.today().isoformat()
 
-    print(f"📥 [Incoming Message]: '{user_message_clean}'")
+    print(f"📥 [Incoming]: '{user_message_clean}'")
 
     def send_whatsapp(msg):
         Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=msg, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
 
     # =========================================================================
-    # QUIZ ANSWER HANDLER — check first so A/B/C/D gets processed during quiz
+    # QUIZ ANSWER HANDLER
     # =========================================================================
     quiz_state = load_quiz_state()
     if quiz_state and user_message_clean.upper() in ["A", "B", "C", "D"]:
@@ -1081,7 +1252,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
         return Response(content="<Response></Response>", media_type="text/xml")
 
     # =========================================================================
-    # LEARNING STATUS — "done" triggers quiz immediately
+    # LEARNING DONE — trigger quiz
     # =========================================================================
     if user_message_clean in ["done", "completed", "finished", "complete"]:
         await log_chat_message("user", user_message)
@@ -1091,21 +1262,19 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
                 row = await cursor.fetchone()
 
         if row and row[0]:
-            await loop.run_in_executor(None, lambda: send_whatsapp("✅ Quiz already completed for today! Check back tomorrow for a new concept. 🌟"))
+            await loop.run_in_executor(None, lambda: send_whatsapp("✅ Quiz already completed today! Come back tomorrow for a new concept. 🌟"))
             return Response(content="<Response></Response>", media_type="text/xml")
 
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("UPDATE daily_checkins SET learning_status='done' WHERE date=?", (today,))
-            await db.commit()
-
-        async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT concept FROM sent_history ORDER BY timestamp DESC LIMIT 1") as cursor:
                 concept_row = await cursor.fetchone()
+            await db.commit()
 
         concept = concept_row[0] if concept_row else "Agentic Scaffolding Testing"
         skill_level, _, _ = await get_db_state()
 
-        intro = f"🎉 Great work finishing today's concept! Let's test your knowledge on *{concept}*.\n\nStarting your quiz — 10 questions, mix of Easy to Advanced. Here we go!\n\n"
+        intro = f"🎉 Great work finishing today's concept! Testing your knowledge on *{concept}* now.\n\n10 questions — Easy to Advanced. Here we go!\n\n"
         first_question = await start_quiz_session(concept, skill_level)
 
         async with aiosqlite.connect(DB_PATH) as db:
@@ -1119,20 +1288,16 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
     # =========================================================================
     # SUBTASK COMPLETION
     # =========================================================================
-    if "subtask done" in user_message_clean or "subtask complete" in user_message_clean or "subtask finished" in user_message_clean:
+    if any(k in user_message_clean for k in ["subtask done", "subtask complete", "subtask finished"]):
         await log_chat_message("user", user_message)
-        skill_level, _, _ = await get_db_state()
-
         import datetime as dt
-        week_start = date.today()
-        week_start = week_start - dt.timedelta(days=week_start.weekday())
-        week_start_str = week_start.strftime("%Y-%m-%d")
-
-        await advance_project_subtask(week_start_str)
-        next_subtask = await get_current_subtask(week_start_str)
+        today_date = date.today()
+        week_start = (today_date - dt.timedelta(days=today_date.weekday())).strftime("%Y-%m-%d")
+        await advance_project_subtask(week_start)
+        next_subtask = await get_current_subtask(week_start)
 
         if next_subtask:
-            response_msg = (
+            msg = (
                 f"✅ *Subtask Complete!* Well done!\n\n"
                 f"*Tomorrow's Task — Day {next_subtask['subtask_number']}:*\n"
                 f"_{next_subtask['subtask_title']}_\n\n"
@@ -1140,19 +1305,19 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
                 f"See you tomorrow! 🚀"
             )
         else:
-            response_msg = "🏆 *Project Complete!* You've finished all subtasks this week. Outstanding work! Your weekly report will summarize everything on Sunday."
+            msg = "🏆 *Project Complete!* You've finished all subtasks this week. Outstanding! Your weekly report will summarise everything on Sunday."
 
-        await log_chat_message("assistant", response_msg)
-        await loop.run_in_executor(None, lambda: send_whatsapp(response_msg))
+        await log_chat_message("assistant", msg)
+        await loop.run_in_executor(None, lambda: send_whatsapp(msg))
         return Response(content="<Response></Response>", media_type="text/xml")
 
     # =========================================================================
-    # APPROVE / CONFIRM STAGED PATCH
+    # APPROVE STAGED PATCH
     # =========================================================================
     if user_message_clean in ["approve", "yes", "confirm", "push"]:
         await log_chat_message("user", user_message)
         if not os.path.exists(STAGED_CODE_FILE):
-            await loop.run_in_executor(None, lambda: send_whatsapp("⚠️ *No changes are currently staged.* Send me an upgrade instruction first!"))
+            await loop.run_in_executor(None, lambda: send_whatsapp("⚠️ *No changes staged.* Send an upgrade instruction first!"))
             return Response(content="<Response></Response>", media_type="text/xml")
 
         def execute_staged_push():
@@ -1165,14 +1330,14 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
                 file_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/V3_updates.py"
                 get_res = requests.get(file_url, headers=headers)
                 if get_res.status_code != 200:
-                    return False, f"Could not fetch current file: {get_res.json().get('message')}"
+                    return False, f"GitHub fetch failed: {get_res.json().get('message')}"
                 live_data = get_res.json()
                 live_code = base64.b64decode(live_data["content"]).decode("utf-8")
                 current_sha = live_data["sha"]
                 find_text = staged_data.get("find")
                 replace_text = staged_data.get("replace")
                 if find_text not in live_code:
-                    return False, "Patch target not found in live file. File may have changed. Please retry."
+                    return False, "Patch target not found. File may have changed. Retry your instruction."
                 patched_code = live_code.replace(find_text, replace_text, 1)
                 put_res = requests.put(file_url, headers=headers, json={
                     "message": f"🤖 Surgical Patch: {staged_data['instruction'][:60]}",
@@ -1186,7 +1351,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
                 return False, str(e)
 
         success, report = await loop.run_in_executor(None, execute_staged_push)
-        msg = "🚀 *Approval Received!* Patch committed to GitHub.\n\n🔄 *Render Deployment Initiated.*" if success else f"❌ *Deployment Aborted.*\n\n`{report}`"
+        msg = "🚀 *Approved!* Patch committed to GitHub.\n\n🔄 *Render Deployment Initiated.*" if success else f"❌ *Deployment Aborted.*\n\n`{report}`"
         await log_chat_message("assistant", msg)
         await loop.run_in_executor(None, lambda: send_whatsapp(msg))
         return Response(content="<Response></Response>", media_type="text/xml")
@@ -1198,9 +1363,9 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
         await log_chat_message("user", user_message)
         if os.path.exists(STAGED_CODE_FILE):
             os.remove(STAGED_CODE_FILE)
-            msg = "🛑 *Deployment Aborted.* Staged changes cleared."
+            msg = "🛑 *Aborted.* Staged changes cleared."
         else:
-            msg = "ℹ️ No changes staged. Buffer is empty."
+            msg = "ℹ️ Nothing staged. Buffer is empty."
         await log_chat_message("assistant", msg)
         await loop.run_in_executor(None, lambda: send_whatsapp(msg))
         return Response(content="<Response></Response>", media_type="text/xml")
@@ -1232,21 +1397,19 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
         return Response(content="<Response></Response>", media_type="text/xml")
 
     # =========================================================================
-    # UPGRADE INTENT — SURGICAL PATCH (OPTION 2)
+    # UPGRADE INTENT — SURGICAL PATCH
     # =========================================================================
     is_upgrade_intent = any(k in user_message_clean for k in ["change", "update", "set", "add", "modify", "upgrade", "fix", "scheduler", "timings", "implement"])
 
     if is_upgrade_intent:
         await log_chat_message("user", user_message)
         if not GITHUB_TOKEN or not GITHUB_REPO:
-            msg = "❌ *Operation Denied.* `GITHUB_TOKEN` or `GITHUB_REPO` missing."
-            await loop.run_in_executor(None, lambda: send_whatsapp(msg))
+            await loop.run_in_executor(None, lambda: send_whatsapp("❌ *Operation Denied.* `GITHUB_TOKEN` or `GITHUB_REPO` missing."))
             return Response(content="<Response></Response>", media_type="text/xml")
 
         try:
             headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
             file_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/V3_updates.py"
-
             res = await loop.run_in_executor(None, lambda: requests.get(file_url, headers=headers))
             if res.status_code != 200:
                 await loop.run_in_executor(None, lambda: send_whatsapp(f"❌ *GitHub Error:* {res.json().get('message')}"))
@@ -1259,9 +1422,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             print("🧠 [AI Architect]: Generating surgical patch...")
 
             patch_response = await anthropic_client.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=1500,
-                temperature=0.1,
+                model=CLAUDE_MODEL, max_tokens=1500, temperature=0.1,
                 system=(
                     "You are an expert Python code surgeon. "
                     "Given a user instruction and a Python file, identify the exact snippet to change. "
@@ -1283,11 +1444,18 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             find_text = patch_data.get("find", "").strip()
             replace_text = patch_data.get("replace", "").strip()
 
+
+            raw_text = re.sub(r'^```(?:json)?\s*|\s*```$', '', patch_response.content[0].text.strip(), flags=re.MULTILINE).strip()
+            print(f"🔍 PATCH RESPONSE:\n{raw_text}")
+
+            patch_data = json.loads(raw_text)
+            find_text = patch_data.get("find", "").strip()
+            replace_text = patch_data.get("replace", "").strip()
+
             if not find_text or not replace_text:
                 raise ValueError("Patch JSON missing 'find' or 'replace' keys.")
-
             if find_text not in current_code:
-                raise ValueError("Patch target not found in file. Claude may have paraphrased instead of copying verbatim.")
+                raise ValueError("Patch target not found. Claude may have paraphrased instead of copying verbatim.")
 
             preview_find = find_text[:150] + "..." if len(find_text) > 150 else find_text
             preview_replace = replace_text[:150] + "..." if len(replace_text) > 150 else replace_text
@@ -1325,10 +1493,9 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
         facts_str = "\n".join([f"- {f}" for f in user_facts])
 
         response = await anthropic_client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=800,
+            model=CLAUDE_MODEL, max_tokens=800,
             system=(
-                f"You are Madan's Curriculum Coach and AI Architect tracking toward Agentic AI Quality Engineering.\n"
+                f"You are Madan's Curriculum Coach and AI Architect toward Agentic AI Quality Engineering.\n"
                 f"Facts about Madan:\n{facts_str}\n\nContext:\n{context_str}\n\n"
                 f"RULES: 2-4 sentences max. Use asterisks (*) for bold. End with one open-ended learning question."
             ),
