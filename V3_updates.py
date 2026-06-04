@@ -793,28 +793,59 @@ Structure the <reference_implementation> as valid Python code with function defi
 # ==========================================
 async def generate_quiz_questions(concept: str, skill_level: str) -> list[dict]:
     prompt = f"""
-You are a quiz generator for an AI engineering student.
+You are a strict quiz generator for an AI engineering student.
 Concept: {concept}
 Skill level: {skill_level}
 
-Generate exactly 10 quiz questions. Distribution:
+Generate exactly 10 multiple choice questions. Every single question MUST have exactly 4 options labeled A, B, C, and D. No exceptions.
+
+Distribution:
 - Questions 1-2: Easy
 - Questions 3-4: Medium
 - Questions 5-6: Hard
 - Questions 7-8: Difficult
 - Questions 9-10: Advanced
 
-Output raw JSON array only:
+CRITICAL RULES:
+1. Every question MUST be a question ending with a question mark
+2. Every question MUST have exactly 4 options: A, B, C, and D
+3. Only ONE option is correct
+4. Never write statements — always write questions
+5. The "correct" field must be exactly one of: "A", "B", "C", or "D"
+
+Follow this exact format. Do not deviate:
+
+Output raw JSON array only — no markdown, no backticks, no extra text:
 [
   {{
     "number": 1,
     "difficulty": "Easy",
-    "question": "Question text?",
-    "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}},
+    "question": "What does RAG stand for in AI systems?",
+    "options": {{
+      "A": "Random Access Generation",
+      "B": "Retrieval Augmented Generation",
+      "C": "Rapid Agent Grounding",
+      "D": "Resource Allocation Graph"
+    }},
     "correct": "B",
-    "explanation": "Why B is correct"
+    "explanation": "RAG stands for Retrieval Augmented Generation which combines retrieval systems with LLMs."
+  }},
+  {{
+    "number": 2,
+    "difficulty": "Easy",
+    "question": "Which component in a RAG system is responsible for finding relevant documents?",
+    "options": {{
+      "A": "The generator",
+      "B": "The tokenizer",
+      "C": "The retriever",
+      "D": "The embedder"
+    }},
+    "correct": "C",
+    "explanation": "The retriever searches the knowledge base to find documents relevant to the query."
   }}
 ]
+
+Generate all 10 questions following this exact structure.
 """
     try:
         response = await anthropic_client.messages.create(
