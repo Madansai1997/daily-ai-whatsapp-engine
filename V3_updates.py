@@ -896,15 +896,19 @@ async def start_quiz_session(concept: str, skill_level: str) -> str:
 
 def format_question(q: dict, current: int, total: int) -> str:
     emoji = {"Easy": "🟢", "Medium": "🟡", "Hard": "🟠", "Difficult": "🔴", "Advanced": "⚫"}.get(q["difficulty"], "⚪")
+    progress_bar = "▓" * current + "░" * (total - current)
     return (
-        f"🧠 *Quiz — Question {current}/{total}*\n"
-        f"{emoji} Difficulty: *{q['difficulty']}*\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🧠 *Question {current} of {total}*\n"
+        f"{progress_bar}\n"
+        f"{emoji} *{q['difficulty']}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{q['question']}\n\n"
         f"*A)* {q['options']['A']}\n"
         f"*B)* {q['options']['B']}\n"
         f"*C)* {q['options']['C']}\n"
         f"*D)* {q['options']['D']}\n\n"
-        f"Reply *A*, *B*, *C*, or *D*"
+        f"↩️ Reply *A*, *B*, *C*, or *D*"
     )
 
 async def process_quiz_answer(user_answer: str) -> str:
@@ -936,7 +940,7 @@ async def process_quiz_answer(user_answer: str) -> str:
         )
         await db.commit()
 
-    feedback = "✅ Correct!" if is_correct else f"❌ Wrong. Answer: *{current_q['correct']}* — {current_q.get('explanation','')}"
+      feedback = "✅ Correct!" if is_correct else f"❌ Wrong. Answer: *{current_q['correct']}* — {current_q.get('explanation','')}"
     state["current_index"] += 1
     save_quiz_state(state)
 
@@ -946,7 +950,15 @@ async def process_quiz_answer(user_answer: str) -> str:
         return f"{feedback}\n\n{result_msg}"
     else:
         next_q = questions[state["current_index"]]
-        return f"{feedback}\n\n{format_question(next_q, state['current_index']+1, len(questions))}"
+        next_question_text = format_question(next_q, state["current_index"]+1, len(questions))
+        options_footer = (
+            f"\n─────────────────────\n"
+            f"*What do you want to do?*\n"
+            f"▶️ Reply *A/B/C/D* — Answer next question\n"
+            f"⏭️ Reply *skip* — Skip this question\n"
+            f"🛑 Reply *end quiz* — End quiz and see results"
+        )
+        return f"{feedback}\n\n{next_question_text}{options_footer}"
 
 async def finalize_quiz(state: dict) -> str:
     score = state["score"]
@@ -1312,13 +1324,72 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
     # QUIZ ANSWER HANDLER
     # =========================================================================
     quiz_state = load_quiz_state()
-    if quiz_state and user_message_clean.upper() in ["A", "B", "C", "D"]:
-        await log_chat_message("user", user_message)
-        result = await process_quiz_answer(user_message_clean.upper())
-        if result:
-            await log_chat_message("assistant", result)
-            await loop.run_in_executor(None, lambda: send_whatsapp(result))
-        return Response(content="<Response></Response>", media_type="text/xml")
+    if quiz_state:
+        # End quiz early
+        if user_message_clean in ["end quiz", "end", "stop quiz", "finish"]:
+            await log_chat_message("user", user_message)
+            result_msg = await finalize_quiz(quiz_state)
+            clear_quiz_state()
+            final = f"🛑 *Quiz ended early.*\n\n{result_msg}"
+            await log_chat_message("assistant", final)
+            await loop.run_in_executor(None, lambda: send_whatsapp(final))
+            return Response(content="<Response></Response>", media_type="text/xml")
+
+        # Skip current question
+        if user_message_clean == "skip":
+            await log_chat_message("user", user_message)
+            questions = quiz_state["questions"]
+            current_index = quiz_state["current_index"]
+            current_q = questions[current_index]
+
+            # Log skipped as wrong
+            quiz_state["answers"].append({
+                "question_number": current_index + 1,
+                "question_text": current_q["question"],
+                "correct_answer": current_q["correct"],
+                "user_answer": "SKIPPED",
+                "difficulty": current_q["difficulty"],
+                "is_correct": False
+            })
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "INSERT INTO quiz_answers (session_id, question_number, question_text, correct_answer, user_answer, difficulty, is_correct) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (quiz_state["session_id"], current_index+1, current_q["question"], current_q["correct"], "SKIPPED", current_q["difficulty"], 0)
+                )
+                await db.commit()
+
+            quiz_state["current_index"] += 1
+            save_quiz_state(quiz_state)
+
+            if quiz_state["current_index"] >= len(questions):
+                result_msg = await finalize_quiz(quiz_state)
+                clear_quiz_state()
+                skip_msg = f"⏭️ *Question skipped.*\n\n{result_msg}"
+            else:
+                next_q = questions[quiz_state["current_index"]]
+                next_question_text = format_question(next_q, quiz_state["current_index"]+1, len(questions))
+                options_footer = (
+                    f"\n─────────────────────\n"
+                    f"*What do you want to do?*\n"
+                    f"▶️ Reply *A/B/C/D* — Answer next question\n"
+                    f"⏭️ Reply *skip* — Skip this question\n"
+                    f"🛑 Reply *end quiz* — End quiz and see results"
+                )
+                skip_msg = f"⏭️ *Question skipped.* Moving on...\n\n{next_question_text}{options_footer}"
+
+            await log_chat_message("assistant", skip_msg)
+            await loop.run_in_executor(None, lambda: send_whatsapp(skip_msg))
+            return Response(content="<Response></Response>", media_type="text/xml")
+
+        # Answer A B C D
+        if user_message_clean.upper() in ["A", "B", "C", "D"]:
+            await log_chat_message("user", user_message)
+            result = await process_quiz_answer(user_message_clean.upper())
+            if result:
+                await log_chat_message("assistant", result)
+                await loop.run_in_executor(None, lambda: send_whatsapp(result))
+            return Response(content="<Response></Response>", media_type="text/xml")
 
     # =========================================================================
     # LEARNING DONE — trigger quiz
