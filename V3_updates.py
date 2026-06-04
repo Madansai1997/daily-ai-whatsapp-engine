@@ -1091,6 +1091,9 @@ async def send_checkin_reminder(reminder_number: int):
 
     if quiz_triggered:
         return
+    
+    if learning_status == "done":
+        return
 
     # Get today's project subtask
     week_start = (date.today() - dt.timedelta(days=date.today().weekday())).strftime("%Y-%m-%d")
