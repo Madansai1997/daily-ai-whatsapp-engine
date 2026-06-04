@@ -940,7 +940,7 @@ async def process_quiz_answer(user_answer: str) -> str:
         )
         await db.commit()
 
-      feedback = "✅ Correct!" if is_correct else f"❌ Wrong. Answer: *{current_q['correct']}* — {current_q.get('explanation','')}"
+    feedback = "✅ Correct!" if is_correct else f"❌ Wrong. Answer: *{current_q['correct']}* — {current_q.get('explanation','')}"
     state["current_index"] += 1
     save_quiz_state(state)
 
