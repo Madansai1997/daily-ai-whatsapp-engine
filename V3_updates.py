@@ -1632,3 +1632,19 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("V3_updates:app", host="0.0.0.0", port=port, reload=False)
+
+@app.get("/clear-today")
+async def clear_today():
+        from datetime import date
+        today = date.today().isoformat()
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT id FROM quiz_sessions WHERE date=?", (today,)) as cursor:
+                session_ids = [row[0] for row in await cursor.fetchall()]
+            for sid in session_ids:
+                await db.execute("DELETE FROM quiz_answers WHERE session_id=?", (sid,))
+            await db.execute("DELETE FROM quiz_sessions WHERE date=?", (today,))
+            await db.execute("DELETE FROM performance_log WHERE date=?", (today,))
+            await db.execute("DELETE FROM daily_checkins WHERE date=?", (today,))
+            await db.execute("DELETE FROM sent_history WHERE timestamp LIKE ?", (f"{today}%",))
+            await db.commit()
+        return {"status": f"All data for {today} cleared successfully"}
