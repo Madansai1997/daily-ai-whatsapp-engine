@@ -955,8 +955,74 @@ async def finalize_quiz(state: dict) -> str:
     skill_level = state["skill_level"]
     answers = state["answers"]
     wrong_answers = [a for a in answers if not a["is_correct"]]
+    correct_answers = [a for a in answers if a["is_correct"]]
     weak_areas = ", ".join(set([a["difficulty"] for a in wrong_answers])) if wrong_answers else "None"
     percentage = (score / total) * 100
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE quiz_sessions SET score=?, completed=1 WHERE id=?", (score, state["session_id"]))
+        await db.execute(
+            "INSERT INTO performance_log (date, concept, quiz_score, max_score, skill_level, weak_areas) VALUES (?, ?, ?, ?, ?, ?)",
+            (date.today().isoformat(), concept, score, total, skill_level, weak_areas)
+        )
+        await db.commit()
+
+    # Build missed topics list
+    missed_questions = [a["question_text"][:70] for a in wrong_answers]
+    missed_section = ""
+    if missed_questions:
+        missed_section = "\n*❌ Questions You Missed:*\n" + "\n".join([f"- {q}..." for q in missed_questions[:5]])
+
+    # Build key concepts to practice
+    missed_difficulties = list(set([a["difficulty"] for a in wrong_answers]))
+    concepts_section = ""
+    if missed_difficulties:
+        concepts_section = f"\n*📌 Key Concepts to Practice:*\n- Focus on *{concept}* at {' and '.join(missed_difficulties)} level\n- Revisit the fundamentals before moving to harder questions"
+
+    # Resources based on concept and score
+    resources_section = ""
+    if score < 8:
+        prompt = f"""
+The student just scored {score}/{total} on a quiz about {concept} at {skill_level} level.
+They struggled with: {', '.join(missed_questions[:3]) if missed_questions else 'advanced questions'}
+
+Suggest exactly 3 specific free learning resources for {concept}.
+Output raw JSON only:
+[
+  {{"title": "Resource name", "url": "https://...", "why": "One sentence why this helps"}},
+  {{"title": "...", "url": "https://...", "why": "..."}},
+  {{"title": "...", "url": "https://...", "why": "..."}}
+]
+"""
+        try:
+            response = await anthropic_client.messages.create(
+                model=CLAUDE_MODEL, max_tokens=400, temperature=0.2,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.content[0].text.strip(), flags=re.MULTILINE).strip()
+            resources = json.loads(text)
+            resources_section = "\n*📚 Resources to Study:*\n" + "\n".join([f"- *{r['title']}*\n  {r['url']}\n  _{r['why']}_" for r in resources])
+        except Exception as e:
+            print(f"⚠️ Resource generation error: {e}")
+            resources_section = f"\n*📚 Resources to Study:*\n- Search '{concept} tutorial' on YouTube\n- Check official documentation\n- Practice on GitHub"
+
+    # Build final message based on score
+    if score < 5:
+        header = f"📊 *Quiz Complete!*\n\nScore: *{score}/{total}* ({percentage:.0f}%) — Needs Work 📉"
+        footer = "\n\n💪 Don't give up — review the resources above and try again tomorrow. Every expert started as a beginner!"
+        await update_db_skill("Foundational")
+    elif score < 8:
+        header = f"📊 *Quiz Complete!*\n\nScore: *{score}/{total}* ({percentage:.0f}%) — Good Effort 👍"
+        footer = "\n\n🚀 Solid progress! Study the missed topics and tomorrow you will score higher."
+    else:
+        header = f"📊 *Quiz Complete!*\n\nScore: *{score}/{total}* ({percentage:.0f}%) — Excellent! 🌟"
+        missed_section = ""
+        concepts_section = "\n*✅ Concepts Mastered:*\n- " + "\n- ".join([a["question_text"][:50] + "..." for a in correct_answers[:3]])
+        resources_section = ""
+        footer = "\n\n🔥 Outstanding work! Tomorrow we level up to something harder."
+        await update_db_skill("Intermediate" if skill_level == "Foundational" else "Advanced")
+
+    return header + missed_section + concepts_section + resources_section + footer
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE quiz_sessions SET score=?, completed=1 WHERE id=?", (score, state["session_id"]))
