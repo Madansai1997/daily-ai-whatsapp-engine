@@ -30,9 +30,22 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "agent_memory.db")
+DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "agent_memory.db"))
 STAGED_CODE_FILE = "/tmp/staged_code_update.json"
 QUIZ_STATE_FILE = "/tmp/quiz_state.json"
+
+# Scheduler times (24-hour, Asia/Kolkata). Edit here to change all reminders.
+SCHEDULE_CONFIG = {
+    "digest_hour": 9,
+    "reminders": [
+        {"hour": 11, "number": 1},
+        {"hour": 13, "number": 2},
+        {"hour": 15, "number": 3},
+        {"hour": 17, "number": 4},
+        {"hour": 19, "number": 5},
+    ],
+    "weekly_report_hour": 9,
+}
 
 
 def get_anthropic_client():
@@ -50,9 +63,10 @@ def init_db_tables():
     cursor = conn.cursor()
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS user_profile (key TEXT PRIMARY KEY, value TEXT)''')
-    cursor.execute("SELECT value FROM user_profile WHERE key='skill_level'")
-    if not cursor.fetchone():
-        cursor.execute("INSERT INTO user_profile (key, value) VALUES ('skill_level', 'Foundational')")
+    cursor.execute("INSERT OR IGNORE INTO user_profile (key, value) VALUES ('skill_level', 'Foundational')")
+    cursor.execute("INSERT OR IGNORE INTO user_profile (key, value) VALUES ('study_streak', '0')")
+    cursor.execute("INSERT OR IGNORE INTO user_profile (key, value) VALUES ('last_study_date', '')")
+    cursor.execute("INSERT OR IGNORE INTO user_profile (key, value) VALUES ('difficulty_preference', 'just_right')")
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS sent_history (
         concept TEXT PRIMARY KEY, summary TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
@@ -108,6 +122,15 @@ def init_db_tables():
         quiz_triggered INTEGER DEFAULT 0,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
+    cursor.execute('''CREATE TABLE IF NOT EXISTS review_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        concept TEXT,
+        difficulty TEXT,
+        reason TEXT,
+        due_date TEXT,
+        completed INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
     cursor.execute('''CREATE TABLE IF NOT EXISTS performance_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT, concept TEXT,
@@ -146,15 +169,14 @@ async def lifespan(app: FastAPI):
         print("✅ Environment Variables Verified.")
 
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
-    scheduler.add_job(run_morning_digest, "cron", hour=9, minute=0)
-    scheduler.add_job(send_checkin_reminder, "cron", hour=11, minute=0, kwargs={"reminder_number": 1})
-    scheduler.add_job(send_checkin_reminder, "cron", hour=13, minute=0, kwargs={"reminder_number": 2})
-    scheduler.add_job(send_checkin_reminder, "cron", hour=15, minute=0, kwargs={"reminder_number": 3})
-    scheduler.add_job(send_checkin_reminder, "cron", hour=17, minute=0, kwargs={"reminder_number": 4})
-    scheduler.add_job(send_checkin_reminder, "cron", hour=19, minute=0, kwargs={"reminder_number": 5})
-    scheduler.add_job(send_weekly_report, "cron", day_of_week="sun", hour=9, minute=0)
+    scheduler.add_job(run_morning_digest, "cron", hour=SCHEDULE_CONFIG["digest_hour"], minute=0)
+    for r in SCHEDULE_CONFIG["reminders"]:
+        scheduler.add_job(send_checkin_reminder, "cron", hour=r["hour"], minute=0, kwargs={"reminder_number": r["number"]})
+    scheduler.add_job(send_weekly_report, "cron", day_of_week="sun", hour=SCHEDULE_CONFIG["weekly_report_hour"], minute=0)
     scheduler.start()
-    print("⏰ Scheduler: Digest 9AM | Check-ins 11AM 1PM 3PM 5PM 7PM | Report Sunday 9AM")
+    app.state.scheduler = scheduler
+    reminder_times = ", ".join([f"{r['hour']}:00" for r in SCHEDULE_CONFIG["reminders"]])
+    print(f"⏰ Scheduler: Digest {SCHEDULE_CONFIG['digest_hour']}:00 | Check-ins {reminder_times} | Report Sunday {SCHEDULE_CONFIG['weekly_report_hour']}:00")
 
     yield
     scheduler.shutdown()
@@ -228,6 +250,61 @@ async def save_articles_to_knowledge_store(articles: list[dict]):
                 )
             except Exception as e:
                 print(f"⚠️ Error saving article: {e}")
+        await db.commit()
+
+async def update_study_streak():
+    """Increments study streak if not already updated today; resets if a day was skipped."""
+    today = date.today().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT value FROM user_profile WHERE key='last_study_date'") as cursor:
+            row = await cursor.fetchone()
+        last_date_str = row[0] if row and row[0] else ""
+        async with db.execute("SELECT value FROM user_profile WHERE key='study_streak'") as cursor:
+            streak_row = await cursor.fetchone()
+        streak = int(streak_row[0]) if streak_row and streak_row[0].isdigit() else 0
+
+        if last_date_str == today:
+            return streak  # already counted today
+
+        yesterday = (date.today() - dt.timedelta(days=1)).isoformat()
+        new_streak = streak + 1 if last_date_str == yesterday else 1
+        await db.execute("UPDATE user_profile SET value=? WHERE key='study_streak'", (str(new_streak),))
+        await db.execute("UPDATE user_profile SET value=? WHERE key='last_study_date'", (today,))
+        await db.commit()
+    return new_streak
+
+async def get_study_streak() -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT value FROM user_profile WHERE key='study_streak'") as cursor:
+            row = await cursor.fetchone()
+    return int(row[0]) if row and row[0].isdigit() else 0
+
+async def add_to_review_queue(concept: str, difficulties: list[str]):
+    """Queue weak concept+difficulties for spaced repetition in 2 days."""
+    due = (date.today() + dt.timedelta(days=2)).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        for diff in difficulties:
+            await db.execute(
+                "INSERT INTO review_queue (concept, difficulty, reason, due_date) VALUES (?, ?, ?, ?)",
+                (concept, diff, "low quiz score", due)
+            )
+        await db.commit()
+
+async def get_due_review(today_str: str) -> dict | None:
+    """Returns the oldest incomplete review item due today or earlier."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id, concept, difficulty FROM review_queue WHERE completed=0 AND due_date<=? ORDER BY due_date ASC LIMIT 1",
+            (today_str,)
+        ) as cursor:
+            row = await cursor.fetchone()
+    if row:
+        return {"id": row[0], "concept": row[1], "difficulty": row[2]}
+    return None
+
+async def mark_review_done(review_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE review_queue SET completed=1 WHERE id=?", (review_id,))
         await db.commit()
 
 async def extract_and_save_facts(user_message: str, assistant_response: str):
@@ -307,8 +384,29 @@ def fetch_live_internet_updates() -> list[dict]:
 # ==========================================
 # 3. CURRICULUM PLANNER AGENT
 # ==========================================
+_FALLBACK_CONCEPTS = [
+    ("RAG QA Testing", "Build evaluation harnesses that test retrieval quality and answer faithfulness."),
+    ("Multi-Agent Systems Testing", "Write integration tests that validate agent handoff and task routing logic."),
+    ("LLM Guardrails & Evals", "Implement policy checks and eval suites to catch unsafe or off-topic LLM outputs."),
+    ("Advanced Prompting Scaffolding", "Master prompt chaining and few-shot patterns to control LLM behaviour reliably."),
+    ("Agentic Scaffolding Testing", "Test control flow logic of complex agentic scaffolding with deterministic assertions."),
+]
+
 async def run_curriculum_planner(skill_level, history_concepts):
     print("📋 [Curriculum Planner]: Selecting today's concept...")
+
+    # Check review queue first — re-test weak areas before new content
+    today_str = date.today().isoformat()
+    due_review = await get_due_review(today_str)
+    if due_review:
+        print(f"🔁 Review queue: revisiting '{due_review['concept']}' ({due_review['difficulty']} level)")
+        await mark_review_done(due_review["id"])
+        return {
+            "concept": due_review["concept"],
+            "pedagogical_focus": f"Revisit and solidify understanding at {due_review['difficulty']} level.",
+            "assert_template": "Write assertions that specifically test the areas you previously struggled with."
+        }
+
     prompt = f"""
 You are the Lead Curriculum Planner for an engineer transitioning to Agentic AI Quality Engineering.
 Student skill track: {skill_level}
@@ -337,10 +435,21 @@ Example: <plan>{{"concept": "...", "pedagogical_focus": "...", "assert_template"
         return data
     except Exception as e:
         print(f"⚠️ Planner fallback: {e}")
+        # Pick the fallback concept least recently covered
+        covered = set(history_concepts)
+        for concept, focus in _FALLBACK_CONCEPTS:
+            if concept not in covered:
+                return {
+                    "concept": concept,
+                    "pedagogical_focus": focus,
+                    "assert_template": "Write specific assertions that verify the core logic of this concept."
+                }
+        # All covered — cycle back to first
+        concept, focus = _FALLBACK_CONCEPTS[0]
         return {
-            "concept": "Agentic Scaffolding Testing",
-            "pedagogical_focus": "Master testing control flow logic of complex agentic scaffolding.",
-            "assert_template": "Test that the router directs prompts correctly based on mock criteria."
+            "concept": concept,
+            "pedagogical_focus": focus,
+            "assert_template": "Write specific assertions that verify the core logic of this concept."
         }
 
 
@@ -854,8 +963,28 @@ Generate all 10 questions following this exact structure.
         )
         text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.content[0].text.strip(), flags=re.MULTILINE).strip()
         questions = json.loads(text)
-        print(f"✅ Generated {len(questions)} quiz questions for '{concept}'")
-        return questions
+
+        # Validate structure — discard malformed questions
+        valid = []
+        required_keys = {"question", "options", "correct", "explanation", "difficulty"}
+        for q in questions:
+            if not isinstance(q, dict):
+                continue
+            if not required_keys.issubset(q.keys()):
+                continue
+            opts = q.get("options", {})
+            if not isinstance(opts, dict) or not {"A", "B", "C", "D"}.issubset(opts.keys()):
+                continue
+            if q.get("correct", "").upper() not in {"A", "B", "C", "D"}:
+                continue
+            valid.append(q)
+
+        if len(valid) < 5:
+            print(f"⚠️ Quiz validation: only {len(valid)} valid questions — treating as generation failure")
+            return []
+
+        print(f"✅ Generated {len(valid)} valid quiz questions for '{concept}'")
+        return valid
     except Exception as e:
         print(f"⚠️ Quiz generation error: {e}")
         return []
@@ -1019,13 +1148,25 @@ Output raw JSON only:
             resources_section = f"\n*📚 Resources to Study:*\n- Search '{concept} tutorial' on YouTube\n- Check official documentation\n- Practice on GitHub"
 
     # Build final message based on score
+    # Streak tracking
+    new_streak = await update_study_streak()
+    streak_msg = ""
+    if new_streak in [3, 7, 14, 30]:
+        streak_msg = f"\n\n🔥 *{new_streak}-day streak! Keep it up!*"
+    elif new_streak > 1:
+        streak_msg = f"\n\n📅 *Study streak: {new_streak} days*"
+
     if score < 5:
         header = f"📊 *Quiz Complete!*\n\nScore: *{score}/{total}* ({percentage:.0f}%) — Needs Work 📉"
         footer = "\n\n💪 Don't give up — review the resources above and try again tomorrow. Every expert started as a beginner!"
         await update_db_skill("Foundational")
+        if missed_difficulties:
+            await add_to_review_queue(concept, missed_difficulties)
     elif score < 8:
         header = f"📊 *Quiz Complete!*\n\nScore: *{score}/{total}* ({percentage:.0f}%) — Good Effort 👍"
         footer = "\n\n🚀 Solid progress! Study the missed topics and tomorrow you will score higher."
+        if missed_difficulties:
+            await add_to_review_queue(concept, missed_difficulties)
     else:
         header = f"📊 *Quiz Complete!*\n\nScore: *{score}/{total}* ({percentage:.0f}%) — Excellent! 🌟"
         missed_section = ""
@@ -1034,48 +1175,7 @@ Output raw JSON only:
         footer = "\n\n🔥 Outstanding work! Tomorrow we level up to something harder."
         await update_db_skill("Intermediate" if skill_level == "Foundational" else "Advanced")
 
-    return header + missed_section + concepts_section + resources_section + footer
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE quiz_sessions SET score=?, completed=1 WHERE id=?", (score, state["session_id"]))
-        await db.execute(
-            "INSERT INTO performance_log (date, concept, quiz_score, max_score, skill_level, weak_areas) VALUES (?, ?, ?, ?, ?, ?)",
-            (date.today().isoformat(), concept, score, total, skill_level, weak_areas)
-        )
-        await db.commit()
-
-    if score < 5:
-        wrong_topics = [a["question_text"][:60] for a in wrong_answers[:3]]
-        msg = (
-            f"📊 *Quiz Complete!*\n\n"
-            f"Score: *{score}/{total}* ({percentage:.0f}%)\n\n"
-            f"📉 Needs more practice.\n\n"
-            f"*Questions you missed:*\n" + "\n".join([f"- {t}..." for t in wrong_topics]) +
-            f"\n\n*What to do next:*\n"
-            f"- Re-read today's concept carefully\n"
-            f"- Focus on *{weak_areas}* level questions\n"
-            f"- Build a small example from scratch\n\n"
-            f"💪 Every expert was once a beginner!"
-        )
-        await update_db_skill("Foundational")
-    elif score < 8:
-        msg = (
-            f"📊 *Quiz Complete!*\n\n"
-            f"Score: *{score}/{total}* ({percentage:.0f}%)\n\n"
-            f"👍 Good effort! Solid base.\n\n"
-            f"*Keep improving on:* {weak_areas if weak_areas != 'None' else 'Advanced topics'}\n\n"
-            f"Tomorrow we push slightly harder. Keep going! 🚀"
-        )
-    else:
-        msg = (
-            f"📊 *Quiz Complete!*\n\n"
-            f"Score: *{score}/{total}* ({percentage:.0f}%)\n\n"
-            f"🌟 Excellent! Concept mastered.\n\n"
-            f"Tomorrow we move to a more advanced topic. You're on fire! 🔥"
-        )
-        await update_db_skill("Intermediate" if skill_level == "Foundational" else "Advanced")
-
-    return msg
+    return header + missed_section + concepts_section + resources_section + footer + streak_msg
 
 
 # ==========================================
@@ -1094,12 +1194,33 @@ async def send_checkin_reminder(reminder_number: int):
             row = await cursor.fetchone()
 
     if not row:
+        # Fetch today's concept from sent_history so reminders show the actual topic
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("INSERT OR IGNORE INTO daily_checkins (date, reminder_count, concept) VALUES (?, 0, '')", (today,))
+            async with db.execute(
+                "SELECT concept FROM sent_history WHERE date(timestamp)=? ORDER BY timestamp DESC LIMIT 1",
+                (today,)
+            ) as cursor:
+                concept_row = await cursor.fetchone()
+        concept = concept_row[0] if concept_row else ""
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("INSERT OR IGNORE INTO daily_checkins (date, reminder_count, concept) VALUES (?, 0, ?)", (today, concept))
             await db.commit()
-        reminder_count, learning_status, quiz_triggered, concept = 0, "in_progress", 0, ""
+        reminder_count, learning_status, quiz_triggered = 0, "in_progress", 0
     else:
         reminder_count, learning_status, quiz_triggered, concept = row[0], row[1], row[2], row[3] or ""
+        # Backfill missing concept from sent_history
+        if not concept:
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute(
+                    "SELECT concept FROM sent_history WHERE date(timestamp)=? ORDER BY timestamp DESC LIMIT 1",
+                    (today,)
+                ) as cursor:
+                    concept_row = await cursor.fetchone()
+            if concept_row:
+                concept = concept_row[0]
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute("UPDATE daily_checkins SET concept=? WHERE date=?", (concept, today))
+                    await db.commit()
 
     if quiz_triggered:
         return
@@ -1147,8 +1268,26 @@ async def send_checkin_reminder(reminder_number: int):
     print(f"⏰ Check-in reminder {reminder_number} sent.")
 
     if reminder_number == 5:
-        await asyncio.sleep(1800)  # 30 minutes
-        await auto_trigger_quiz()
+        # Schedule auto-quiz 30 min from now via APScheduler so it survives server restarts
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        from apscheduler.triggers.date import DateTrigger
+        fire_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=30)
+        try:
+            from apscheduler.schedulers.base import STATE_RUNNING
+            running_schedulers = [s for s in AsyncIOScheduler.__subclasses__() if getattr(s, 'state', None) == STATE_RUNNING]
+        except Exception:
+            running_schedulers = []
+        # Use the app's global scheduler via the app's state if available, else fire inline
+        app_scheduler = getattr(app.state, "scheduler", None)
+        if app_scheduler:
+            app_scheduler.add_job(auto_trigger_quiz, DateTrigger(run_date=fire_at), id="auto_quiz_today", replace_existing=True)
+            print("⏰ Auto-quiz scheduled for 30 minutes from now.")
+        else:
+            asyncio.create_task(_delayed_auto_quiz())
+
+async def _delayed_auto_quiz():
+    await asyncio.sleep(1800)
+    await auto_trigger_quiz()
 
 async def auto_trigger_quiz():
     today = date.today().isoformat()
@@ -1164,7 +1303,7 @@ async def auto_trigger_quiz():
         async with db.execute("SELECT concept FROM sent_history ORDER BY timestamp DESC LIMIT 1") as cursor:
             concept_row = await cursor.fetchone()
 
-    concept = concept_row[0] if concept_row else "Agentic Scaffolding Testing"
+    concept = concept_row[0] if concept_row else _FALLBACK_CONCEPTS[0][0]
     skill_level, _, _ = await get_db_state()
 
     intro = f"⏰ Time is up! Let us test what you have learned on *{concept}*. Starting your quiz now...\n\n"
@@ -1293,6 +1432,14 @@ async def run_morning_digest():
                 def send_twilio():
                     Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=final_text, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
                 await loop.run_in_executor(None, send_twilio)
+                # Difficulty feedback prompt — separate message so digest stays clean
+                feedback_prompt = (
+                    f"📐 *Quick feedback:* Was today's concept (*{concept}*) the right difficulty?\n"
+                    f"Reply *E* (too easy) · *J* (just right) · *H* (too hard)"
+                )
+                def send_feedback_prompt():
+                    Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=feedback_prompt, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
+                await loop.run_in_executor(None, send_feedback_prompt)
                 return {"status": "Digest approved and dispatched.", "concept": concept}
             except Exception as e:
                 return {"status": "QA Passed but Twilio failed", "error": str(e)}
@@ -1321,18 +1468,140 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
         Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=msg, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
 
     # =========================================================================
+    # GREETING / HELP MENU
+    # =========================================================================
+    if user_message_clean in ["hi", "hello", "hey", "start", "help", "menu", "commands"]:
+        await log_chat_message("user", user_message)
+        help_msg = (
+            "👋 *Welcome to your Daily AI Learning Assistant!*\n\n"
+            "*Available Commands:*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "✅ *done* — Mark today's learning complete & start quiz\n"
+            "📊 *status* — View your learning progress & streak\n"
+            "📰 *digest* — Trigger today's morning digest manually\n"
+            "📈 *report* — Get your weekly performance report\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "*During Quiz:*\n"
+            "▶️ *A / B / C / D* — Answer a question\n"
+            "⏭️ *skip* — Skip current question\n"
+            "🛑 *end quiz* — End quiz and see results\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "*Feedback:*\n"
+            "🟢 *E* — Today's concept was too easy\n"
+            "🟡 *J* — Just right\n"
+            "🔴 *H* — Too hard\n\n"
+            "Or just chat with me — I'm your AI coach! 💬"
+        )
+        await loop.run_in_executor(None, lambda: send_whatsapp(help_msg))
+        return Response(content="<Response></Response>", media_type="text/xml")
+
+    # =========================================================================
+    # STATUS / PROGRESS DASHBOARD
+    # =========================================================================
+    if user_message_clean in ["status", "progress", "my stats", "stats"]:
+        await log_chat_message("user", user_message)
+        skill_level, recent_topics, _ = await get_db_state()
+        streak = await get_study_streak()
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT COUNT(*) FROM sent_history") as cursor:
+                total_concepts = (await cursor.fetchone())[0]
+            async with db.execute(
+                "SELECT quiz_score, max_score, concept FROM performance_log ORDER BY timestamp DESC LIMIT 1"
+            ) as cursor:
+                last_quiz = await cursor.fetchone()
+            async with db.execute(
+                "SELECT COUNT(*) FROM review_queue WHERE completed=0"
+            ) as cursor:
+                pending_reviews = (await cursor.fetchone())[0]
+        last_quiz_text = f"{last_quiz[0]}/{last_quiz[1]} on _{last_quiz[2][:30]}_" if last_quiz else "No quizzes yet"
+        next_concept_hint = recent_topics[0] if recent_topics else "TBD"
+        status_msg = (
+            f"📊 *Your Learning Dashboard*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎓 *Skill Level:* {skill_level}\n"
+            f"🔥 *Study Streak:* {streak} day{'s' if streak != 1 else ''}\n"
+            f"📚 *Concepts Learned:* {total_concepts}\n"
+            f"📝 *Last Quiz:* {last_quiz_text}\n"
+            f"🔁 *Pending Reviews:* {pending_reviews}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Reply *done* after today's reading to start your quiz! 🚀"
+        )
+        await log_chat_message("assistant", status_msg)
+        await loop.run_in_executor(None, lambda: send_whatsapp(status_msg))
+        return Response(content="<Response></Response>", media_type="text/xml")
+
+    # =========================================================================
+    # DIFFICULTY FEEDBACK (E / J / H)
+    # =========================================================================
+    if user_message_clean in ["e", "j", "h"]:
+        mapping = {"e": "too_easy", "j": "just_right", "h": "too_hard"}
+        pref = mapping[user_message_clean]
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE user_profile SET value=? WHERE key='difficulty_preference'", (pref,))
+            await db.commit()
+        labels = {"e": "too easy 🟢", "j": "just right 🟡", "h": "too hard 🔴"}
+        reply = f"Got it! I noted today's concept felt *{labels[user_message_clean]}*. I'll adjust future concepts accordingly. 📐"
+        await log_chat_message("user", user_message)
+        await log_chat_message("assistant", reply)
+        await loop.run_in_executor(None, lambda: send_whatsapp(reply))
+        return Response(content="<Response></Response>", media_type="text/xml")
+
+    # =========================================================================
+    # CODE REVIEW
+    # =========================================================================
+    if user_message_clean.startswith("review:"):
+        await log_chat_message("user", user_message)
+        code_snippet = user_message[7:].strip()
+        if not code_snippet:
+            await loop.run_in_executor(None, lambda: send_whatsapp("⚠️ Send: *review: <your code here>*"))
+            return Response(content="<Response></Response>", media_type="text/xml")
+        skill_level, recent_topics, _ = await get_db_state()
+        concept = recent_topics[0] if recent_topics else "AI Engineering"
+        try:
+            review_response = await anthropic_client.messages.create(
+                model=CLAUDE_MODEL, max_tokens=600, temperature=0.2,
+                messages=[{"role": "user", "content": (
+                    f"Review this code snippet for an {skill_level} student learning {concept}.\n"
+                    f"```\n{code_snippet}\n```\n"
+                    f"Give: 1) Correctness verdict, 2) One specific improvement, 3) One thing done well. "
+                    f"Keep it under 200 words. Use WhatsApp *bold* formatting."
+                )}]
+            )
+            review_msg = review_response.content[0].text.strip()
+        except Exception as e:
+            review_msg = f"⚠️ Code review unavailable: {e}"
+        await log_chat_message("assistant", review_msg)
+        await loop.run_in_executor(None, lambda: send_whatsapp(review_msg))
+        return Response(content="<Response></Response>", media_type="text/xml")
+
+    # =========================================================================
     # QUIZ ANSWER HANDLER
     # =========================================================================
     quiz_state = load_quiz_state()
     if quiz_state:
-        # End quiz early
-        if user_message_clean in ["end quiz", "end", "stop quiz", "finish"]:
+        # Confirm end quiz
+        if quiz_state.get("pending_end_confirm") and user_message_clean == "confirm":
             await log_chat_message("user", user_message)
+            quiz_state.pop("pending_end_confirm", None)
             result_msg = await finalize_quiz(quiz_state)
             clear_quiz_state()
             final = f"🛑 *Quiz ended early.*\n\n{result_msg}"
             await log_chat_message("assistant", final)
             await loop.run_in_executor(None, lambda: send_whatsapp(final))
+            return Response(content="<Response></Response>", media_type="text/xml")
+
+        # End quiz early — ask for confirmation first
+        if user_message_clean in ["end quiz", "end", "stop quiz", "finish"]:
+            await log_chat_message("user", user_message)
+            quiz_state["pending_end_confirm"] = True
+            save_quiz_state(quiz_state)
+            confirm_msg = (
+                f"⚠️ Are you sure you want to end the quiz?\n\n"
+                f"Current score: *{quiz_state.get('score', 0)}/{quiz_state.get('current_index', 0)}* answered\n\n"
+                f"Reply *confirm* to end and see results, or keep answering to continue."
+            )
+            await log_chat_message("assistant", confirm_msg)
+            await loop.run_in_executor(None, lambda: send_whatsapp(confirm_msg))
             return Response(content="<Response></Response>", media_type="text/xml")
 
         # Skip current question
@@ -1405,7 +1674,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             await loop.run_in_executor(None, lambda: send_whatsapp("✅ Quiz already completed today! Come back tomorrow for a new concept. 🌟"))
             return Response(content="<Response></Response>", media_type="text/xml")
 
-        concept = row[1] if row and row[1] else "Agentic Scaffolding Testing"
+        concept = row[1] if row and row[1] else _FALLBACK_CONCEPTS[0][0]
 
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("UPDATE daily_checkins SET learning_status='done' WHERE date=?", (today,))
@@ -1614,7 +1883,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
         elif "to *Foundational*" in ai_response:
             await update_db_skill("Foundational")
 
-        asyncio.create_task(extract_and_save_facts(user_message, ai_response))
+        await extract_and_save_facts(user_message, ai_response)
 
     except Exception as e:
         print(f"❌ Webhook LLM error: {e}")

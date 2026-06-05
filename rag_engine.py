@@ -88,14 +88,23 @@ def compute_bm25(query_tokens: list[str], documents: list[dict], k1: float = 1.5
 
 async def retrieve_relevant_context(query: str, limit: int = 3) -> list[dict]:
     """Fetches documents from SQLite and ranks them using BM25 relevance to the query."""
+    import logging
     query_tokens = tokenize(query)
     if not query_tokens:
         return []
-        
+
     documents = []
     try:
         async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT url, title, content FROM knowledge_store ORDER BY timestamp DESC LIMIT 50") as cursor:
+            # Prefer recent articles (last 30 days). Prune stale entries older than 30 days.
+            await db.execute(
+                "DELETE FROM knowledge_store WHERE saved_at < datetime('now', '-30 days')"
+            )
+            await db.commit()
+            # Fetch candidates, favouring recently saved articles first
+            async with db.execute(
+                "SELECT url, title, content FROM knowledge_store ORDER BY saved_at DESC LIMIT 50"
+            ) as cursor:
                 rows = await cursor.fetchall()
                 for row in rows:
                     documents.append({
@@ -104,14 +113,13 @@ async def retrieve_relevant_context(query: str, limit: int = 3) -> list[dict]:
                         "content": row[2]
                     })
     except Exception as e:
-        print(f"⚠️ RAG Engine: Error querying knowledge store database: {e}")
+        logging.warning(f"RAG Engine: Error querying knowledge store: {e}")
         return []
-        
+
     if not documents:
         return []
-        
+
     ranked_docs = compute_bm25(query_tokens, documents)
-    # Return documents that have a relevance score greater than 0
     matched_docs = [doc for doc, score in ranked_docs if score > 0]
-    
+
     return matched_docs[:limit]
