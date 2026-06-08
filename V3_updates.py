@@ -1371,7 +1371,6 @@ async def send_weekly_report():
 # ==========================================
 # 13. MORNING DIGEST ENDPOINT
 # ==========================================
-@app.post("/run-morning-digest")
 async def run_morning_digest():
     try:
         skill_level, recent_topics, _ = await get_db_state()
@@ -1450,6 +1449,11 @@ async def run_morning_digest():
         import traceback
         traceback.print_exc()
         return {"status": "Error running digest pipeline", "error": str(e)}
+
+
+@app.post("/run-morning-digest")
+async def morning_digest_endpoint():
+    return await run_morning_digest()
 
 
 # ==========================================
