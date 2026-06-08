@@ -649,10 +649,13 @@ def apply_mutations(code: str) -> list[str]:
     return unique
 
 def run_sandbox_silent(code: str, assert_lines: list) -> bool:
-    import math, json as jmod, re as rmod
-    full_code = code + "\n\n" + "\n".join(assert_lines)
+    import math, json as jmod, re as rmod, collections, itertools, functools
+    clean = _sanitize_reference_code(code)
+    full_code = clean + "\n\n" + "\n".join(assert_lines)
     sandbox_globals = {
         "math": math, "json": jmod, "re": rmod,
+        "collections": collections, "itertools": itertools, "functools": functools,
+        "__name__": "__main__",
         "__builtins__": {
             "abs": abs, "all": all, "any": any, "bool": bool, "dict": dict,
             "enumerate": enumerate, "float": float, "int": int,
@@ -704,12 +707,39 @@ def run_mutation_testing(reference_code: str, assert_lines: list) -> dict:
 # ==========================================
 # 7. EXECUTION SANDBOX
 # ==========================================
+def _sanitize_reference_code(code: str) -> str:
+    """Strip constructs that break sandbox exec: __name__ guards, markdown fences,
+    shebang lines, and bare ellipsis stubs that cause SyntaxError under exec."""
+    import re as _re
+    # Remove markdown code fences if Claude leaked them
+    code = _re.sub(r'^```[a-zA-Z]*\s*', '', code, flags=_re.MULTILINE)
+    code = _re.sub(r'^```\s*$', '', code, flags=_re.MULTILINE)
+    # Remove `if __name__ == "__main__":` blocks entirely — they break exec()
+    # because __name__ is undefined in a plain sandbox globals dict
+    code = _re.sub(r'if\s+__name__\s*==\s*["\']__main__["\']\s*:.*', '', code, flags=_re.DOTALL)
+    # Replace bare `...` stub bodies with `pass` so syntax is valid
+    code = _re.sub(r'(def\s+\w+[^:]+:)\s*\n(\s+)\.\.\.\s*\n', r'\1\n\2pass\n', code)
+    return code.strip()
+
+
 def run_code_sandbox(reference_code: str, assert_lines: list) -> tuple[bool, str]:
     print("🧪 [Sandbox]: Verifying assertions...")
-    import math, json as jmod, re as rmod
-    full_code = reference_code + "\n\n" + "\n".join(assert_lines)
+    import math, json as jmod, re as rmod, collections, itertools, functools
+    # Sanitize before compiling — removes __name__ guards and markdown leaks
+    clean_code = _sanitize_reference_code(reference_code)
+    # Validate syntax before attempting exec so we get a clear error message
+    try:
+        compile(clean_code, "<reference>", "exec")
+    except SyntaxError as e:
+        return False, f"SyntaxError in reference_code line {e.lineno}: {e.msg}"
+
+    full_code = clean_code + "\n\n" + "\n".join(assert_lines)
     sandbox_globals = {
+        # Standard modules Claude commonly uses in implementations
         "math": math, "json": jmod, "re": rmod,
+        "collections": collections, "itertools": itertools, "functools": functools,
+        # __name__ so `if __name__ == "__main__":` guards don't NameError if any survive
+        "__name__": "__main__",
         "__builtins__": {
             "abs": abs, "all": all, "any": any, "bin": bin, "bool": bool,
             "chr": chr, "dict": dict, "divmod": divmod, "enumerate": enumerate,
@@ -719,21 +749,35 @@ def run_code_sandbox(reference_code: str, assert_lines: list) -> tuple[bool, str
             "next": next, "object": object, "ord": ord, "pow": pow, "print": print,
             "range": range, "repr": repr, "reversed": reversed, "round": round,
             "set": set, "slice": slice, "sorted": sorted, "str": str, "sum": sum,
-            "tuple": tuple, "type": type, "zip": zip,
+            "tuple": tuple, "type": type, "zip": zip, "hash": hash, "hex": hex,
+            "oct": oct, "open": open, "vars": vars, "hasattr": hasattr,
+            "getattr": getattr, "setattr": setattr, "callable": callable,
             "AssertionError": AssertionError, "ValueError": ValueError,
             "TypeError": TypeError, "KeyError": KeyError, "IndexError": IndexError,
-            "Exception": Exception, "StopIteration": StopIteration, "RuntimeError": RuntimeError
+            "Exception": Exception, "StopIteration": StopIteration,
+            "RuntimeError": RuntimeError, "NotImplementedError": NotImplementedError,
+            "OverflowError": OverflowError, "ZeroDivisionError": ZeroDivisionError,
         }
     }
+    # Run assertions one-by-one to pinpoint which one fails and show context
     try:
-        exec(compile(full_code, "<sandbox>", "exec"), sandbox_globals)
-        return True, "All assertions passed."
-    except AssertionError as e:
-        return False, f"AssertionError: {str(e) if str(e) else 'Assert failed.'}"
-    except SyntaxError as e:
-        return False, f"SyntaxError line {e.lineno}: {e.msg}"
+        exec(compile(clean_code, "<sandbox>", "exec"), sandbox_globals)
     except Exception as e:
-        return False, f"{type(e).__name__}: {str(e)}"
+        return False, f"{type(e).__name__} in reference_code: {str(e)}"
+
+    for i, assertion in enumerate(assert_lines):
+        try:
+            exec(compile(assertion, "<assertion>", "exec"), sandbox_globals)
+        except AssertionError:
+            return False, (
+                f"AssertionError on assertion {i+1}/{len(assert_lines)}: `{assertion}` — "
+                f"the function returned a different value than expected. "
+                f"Fix the assertion so it matches the actual output of your reference implementation."
+            )
+        except Exception as e:
+            return False, f"{type(e).__name__} on assertion {i+1}: `{assertion}` — {str(e)}"
+
+    return True, "All assertions passed."
 
 
 # ==========================================
