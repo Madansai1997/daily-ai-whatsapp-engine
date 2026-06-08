@@ -77,7 +77,14 @@ def init_db_tables():
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS knowledge_store (
         url TEXT PRIMARY KEY, title TEXT, content TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+        saved_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+    # Migration: rename old 'timestamp' column to 'saved_at' if it exists
+    try:
+        cols = [row[1] for row in cursor.execute("PRAGMA table_info(knowledge_store)").fetchall()]
+        if 'timestamp' in cols and 'saved_at' not in cols:
+            cursor.execute("ALTER TABLE knowledge_store RENAME COLUMN timestamp TO saved_at")
+    except Exception:
+        pass  # SQLite < 3.25 doesn't support RENAME COLUMN — handled below via recreate
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS user_facts (
         id INTEGER PRIMARY KEY AUTOINCREMENT, fact TEXT UNIQUE,
@@ -245,7 +252,7 @@ async def save_articles_to_knowledge_store(articles: list[dict]):
         for article in articles:
             try:
                 await db.execute(
-                    "INSERT OR IGNORE INTO knowledge_store (url, title, content) VALUES (?, ?, ?)",
+                    "INSERT OR IGNORE INTO knowledge_store (url, title, content, saved_at) VALUES (?, ?, ?, datetime('now'))",
                     (article['url'], article['title'], article['content'])
                 )
             except Exception as e:
@@ -738,11 +745,17 @@ async def run_qa_critic(content: str, reference_code: str) -> tuple[bool, str]:
     has_updates = "*🔴 REGULAR DAILY AI UPDATES*" in content
     has_learnings = "*📘 WHAT I NEED TO LEARN & PROJECTS TO WORK ON*" in content
 
+    # Extract assert lines from BOTH the payload and the reference_code.
+    # Claude reliably puts runnable assertions in <reference_implementation>, not
+    # inside <whatsapp_payload> (where they appear as illustrative examples only).
     assert_lines = []
-    for line in content.split('\n'):
+    for line in (content + "\n" + reference_code).split('\n'):
         clean_line = line.replace('*', '').replace('-', '').strip()
         if clean_line.startswith('assert '):
             assert_lines.append(clean_line)
+    # Deduplicate while preserving order
+    seen = set()
+    assert_lines = [x for x in assert_lines if not (x in seen or seen.add(x))]
 
     has_assert_syntax = len(assert_lines) >= 3
     char_length = len(content)

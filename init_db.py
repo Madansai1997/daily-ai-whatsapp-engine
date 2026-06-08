@@ -33,6 +33,14 @@ def init_database():
                 saved_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Migration: rename legacy 'timestamp' column to 'saved_at' if the DB
+        # was created before this fix was deployed.
+        try:
+            cols = [row[1] for row in cursor.execute("PRAGMA table_info(knowledge_store)").fetchall()]
+            if 'timestamp' in cols and 'saved_at' not in cols:
+                cursor.execute("ALTER TABLE knowledge_store RENAME COLUMN timestamp TO saved_at")
+        except Exception:
+            pass  # SQLite < 3.25 doesn't support RENAME COLUMN
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS review_queue (
