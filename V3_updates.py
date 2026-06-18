@@ -46,8 +46,16 @@ SCHEDULE_CONFIG = {
 }
 
 
-OPENROUTER_MODEL = "nvidia/nemotron-3-super:free"
-OPENROUTER_MODEL_FAST = "nvidia/nemotron-3-super:free"  # same model; swap if a cheaper fast model is available
+OPENROUTER_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+OPENROUTER_MODEL_FAST = "nvidia/nemotron-3-super-120b-a12b:free"
+
+FREE_MODELS = [
+    "nvidia/nemotron-3-super-120b-a12b:free",   # Nemotron Super — best for agents
+    "nvidia/nemotron-3-ultra:free",              # Nemotron Ultra — 1M context
+    "google/gemma-4-31b-it:free",               # Gemma 4 — highest quality score
+    "openai/gpt-oss-120b:free",                 # GPT OSS — solid fallback
+    "meta-llama/llama-4-maverick:free",         # Llama 4 — reliable backup
+]
 
 def get_llm_client() -> AsyncOpenAI:
     key = os.environ.get("OPENROUTER_API_KEY", "")
@@ -59,6 +67,24 @@ def get_llm_client() -> AsyncOpenAI:
     )
 
 anthropic_client = get_llm_client()  # kept same name so all call sites work unchanged
+
+async def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 1000) -> str:
+    """Call LLM with automatic fallback through FREE_MODELS on rate limit or error."""
+    for model in FREE_MODELS:
+        try:
+            response = await anthropic_client.chat.completions.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ]
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"⚠️ Model {model} failed: {e}. Trying next...")
+            continue
+    raise Exception("All free models failed")
 
 
 def init_db_tables():
