@@ -210,6 +210,39 @@ init_db_tables()
 
 
 # ==========================================
+# USER SETTINGS HELPERS (sync, single-user)
+# ==========================================
+def _get_db_conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def get_setting(key: str, default=None):
+    """Get a value from user_settings table."""
+    try:
+        conn = _get_db_conn()
+        row = conn.execute("SELECT value FROM user_settings WHERE key = ?", (key,)).fetchone()
+        conn.close()
+        return row["value"] if row else default
+    except Exception as e:
+        print(f"⚠️ get_setting error: {e}")
+        return default
+
+def save_setting(key: str, value: str):
+    """Save or update a value in user_settings table."""
+    try:
+        conn = _get_db_conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO user_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+            (key, value)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ save_setting error: {e}")
+
+
+# ==========================================
 # LIFESPAN & SCHEDULER
 # ==========================================
 @asynccontextmanager
@@ -732,33 +765,21 @@ async def run_curriculum_planner(skill_level, history_concepts):
 
     exclusions = history_concepts
 
-    # Read persistent topic domain from user_settings (set via SET TOPIC:)
-    current_topic = None
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT value FROM user_settings WHERE key='current_topic'") as cursor:
-            ct_row = await cursor.fetchone()
-    if ct_row:
-        current_topic = ct_row[0].strip()
+    current_topic = get_setting("topic", "")
+    domain_display = get_setting("domain_display", "general knowledge")
 
     system_prompt = """You are a curriculum planner for a curious learner.
 You can suggest concepts from ANY field of knowledge — not just technology.
 Return only valid JSON. No thinking. No explanation. No markdown. No preamble.
 Your entire response must be valid JSON starting with { and ending with }."""
 
-    user_prompt = f"""Output this JSON filled in for a {skill_level} student.
-Previously covered topics: {exclusions if exclusions else 'none'}.
-Current topic set by user: {current_topic if current_topic else 'open — pick anything interesting'}.
-
-If current_topic is set: pick a specific concept or subtopic within that domain.
-If current_topic is not set: pick ANY interesting concept from ANY field —
-science, history, mathematics, philosophy, coding, psychology, economics,
-physics, biology, literature, engineering, or anything else.
-
-Do NOT repeat previously covered topics.
-Pick something genuinely useful and interesting to learn today.
-
+    user_prompt = f"""Output JSON for a {skill_level} student.
+Domain: {domain_display}.
+Topic focus: {current_topic if current_topic else 'pick an interesting concept from ' + domain_display}.
+Previously covered: {exclusions if exclusions else 'none'}.
+Do not repeat previous topics.
 OUTPUT ONLY THIS JSON, NOTHING ELSE:
-{{"concept": "FILL IN - specific concept name", "pedagogical_focus": "FILL IN - what exactly to learn about it in one sentence", "assert_template": "FILL IN - a simple exercise or question to test understanding"}}"""
+{{"concept": "FILL IN", "pedagogical_focus": "FILL IN one sentence", "assert_template": "FILL IN a simple exercise"}}"""
 
     try:
         response = await anthropic_client.chat.completions.create(
@@ -1823,7 +1844,8 @@ async def send_weekly_report():
 async def run_morning_digest():
     await _log_job("run_morning_digest", "started")
     try:
-        skill_level, recent_topics, _ = await get_db_state()
+        _, recent_topics, _ = await get_db_state()
+        skill_level = get_setting("skill_level", "intermediate")
 
         # Planner must run first — RAG needs the concept it returns
         planner_context = await run_curriculum_planner(skill_level, recent_topics)
@@ -1940,6 +1962,116 @@ async def morning_digest_endpoint():
 
 
 # ==========================================
+# ONBOARDING HANDLER
+# ==========================================
+async def handle_onboarding(incoming_message: str) -> str:
+    """
+    Manages a 3-step onboarding conversation.
+    Returns the reply message to send back to the user.
+    """
+    msg = incoming_message.strip().upper()
+    step = int(get_setting("onboarding_step", "0"))
+
+    # ── STEP 0: Brand new — send welcome + domain question ──
+    if step == 0:
+        save_setting("onboarding_step", "1")
+        return (
+            "👋 *Welcome to your personal learning engine!*\n\n"
+            "I'll send you one concept to learn every day, a quiz, and a mini project — "
+            "all tailored to you.\n\n"
+            "First, pick your learning domain:\n\n"
+            "A) 💻 Technology & Programming\n"
+            "B) 🤖 Data Science & AI\n"
+            "C) 🔐 Cybersecurity\n"
+            "D) 💼 Business & Finance\n"
+            "E) 🔬 Science & Mathematics\n"
+            "F) 📜 History & Philosophy\n"
+            "G) 📣 Marketing & Product\n"
+            "H) ✏️ Other — type your own"
+        )
+
+    # ── STEP 1: Waiting for domain answer ──
+    if step == 1:
+        domain_map = {
+            "A": ("technology", "Technology & Programming"),
+            "B": ("data_science", "Data Science & AI"),
+            "C": ("cybersecurity", "Cybersecurity"),
+            "D": ("business", "Business & Finance"),
+            "E": ("science", "Science & Mathematics"),
+            "F": ("philosophy", "History & Philosophy"),
+            "G": ("marketing", "Marketing & Product"),
+        }
+        if msg in domain_map:
+            domain, domain_display = domain_map[msg]
+        else:
+            domain = incoming_message.strip().lower().replace(" ", "_")
+            domain_display = incoming_message.strip().title()
+
+        save_setting("domain", domain)
+        save_setting("domain_display", domain_display)
+        save_setting("onboarding_step", "2")
+        return (
+            f"Got it — *{domain_display}* 👍\n\n"
+            "Now pick your skill level:\n\n"
+            "A) 🌱 Beginner — just starting out\n"
+            "B) 📈 Intermediate — know the basics\n"
+            "C) 🔥 Advanced — want deep content\n"
+            "D) ⚡ Pro — challenge me hard"
+        )
+
+    # ── STEP 2: Waiting for skill level answer ──
+    if step == 2:
+        skill_map = {
+            "A": "beginner",
+            "B": "intermediate",
+            "C": "advanced",
+            "D": "pro"
+        }
+        skill_level = skill_map.get(msg, "intermediate")
+        save_setting("skill_level", skill_level)
+        save_setting("onboarding_step", "3")
+        domain_display = get_setting("domain_display", "your chosen domain")
+        return (
+            f"Perfect! Last question 🎯\n\n"
+            f"What specific topic within *{domain_display}* do you want to focus on?\n\n"
+            f"Be specific: 'neural networks', 'stoic philosophy', 'options trading'\n"
+            f"Or reply *surprise me* and I'll pick something great every day 🎲"
+        )
+
+    # ── STEP 3: Waiting for topic answer ──
+    if step == 3:
+        if incoming_message.strip().lower() == "surprise me":
+            topic = ""
+            topic_display = "Surprise me daily 🎲"
+        else:
+            topic = incoming_message.strip()
+            topic_display = topic
+
+        save_setting("topic", topic)
+        save_setting("onboarded", "1")
+        save_setting("onboarding_step", "4")
+        domain_display = get_setting("domain_display", "your domain")
+        skill_level = get_setting("skill_level", "intermediate")
+        return (
+            f"✅ *You're all set!*\n\n"
+            f"📚 Domain: {domain_display}\n"
+            f"📊 Level: {skill_level.capitalize()}\n"
+            f"🎯 Topic: {topic_display}\n\n"
+            f"Your first digest arrives tomorrow morning.\n"
+            f"Until then, try:\n\n"
+            f"*digest* — get today's learning now\n"
+            f"*quiz* — take a quiz\n"
+            f"*EXPLAIN: anything* — instant explanation\n"
+            f"*SET TOPIC: anything* — change your topic\n"
+            f"*HELP* — see all commands\n\n"
+            f"Welcome aboard! 🚀"
+        )
+
+    # Should not reach here
+    return "Type *RESET* to start setup again."
+
+
+# ==========================================
 # 14. WHATSAPP WEBHOOK
 # ==========================================
 @app.post("/whatsapp-webhook")
@@ -1955,29 +2087,46 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
         send_whatsapp_chunked(msg)
 
     # =========================================================================
+    # ONBOARDING GATE — runs before every other command
+    # =========================================================================
+    # RESET is always allowed, even mid-onboarding
+    if user_message_clean == "reset":
+        save_setting("onboarded", "0")
+        save_setting("onboarding_step", "0")
+        save_setting("domain", "")
+        save_setting("domain_display", "")
+        save_setting("skill_level", "")
+        save_setting("topic", "")
+        await loop.run_in_executor(None, lambda: send_whatsapp("♻️ Profile reset! Send any message to start fresh."))
+        return Response(content="<Response></Response>", media_type="text/xml")
+
+    onboarded = get_setting("onboarded", "0")
+    if onboarded != "1":
+        reply = await handle_onboarding(user_message)
+        await loop.run_in_executor(None, lambda: send_whatsapp(reply))
+        return Response(content="<Response></Response>", media_type="text/xml")
+
+    # ── Normal command processing continues below ──
+
+    # =========================================================================
     # GREETING / HELP MENU
     # =========================================================================
     if user_message_clean in ["hi", "hello", "hey", "start", "help", "menu", "commands"]:
         await log_chat_message("user", user_message)
         help_msg = (
-            "👋 *Welcome to your Daily AI Learning Assistant!*\n\n"
-            "*Available Commands:*\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "✅ *done* — Mark today's learning complete & start quiz\n"
-            "📊 *status* — View your learning progress & streak\n"
-            "📰 *digest* — Trigger today's morning digest manually\n"
-            "📈 *report* — Get your weekly performance report\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "*During Quiz:*\n"
-            "▶️ *A / B / C / D* — Answer a question\n"
-            "⏭️ *skip* — Skip current question\n"
-            "🛑 *end quiz* — End quiz and see results\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "*Feedback:*\n"
-            "🟢 *E* — Today's concept was too easy\n"
-            "🟡 *J* — Just right\n"
-            "🔴 *H* — Too hard\n\n"
-            "Or just chat with me — I'm your AI coach! 💬"
+            "📖 *Commands*\n\n"
+            "*digest* — Today's learning now\n"
+            "*quiz* — Start a quiz\n"
+            "*EXPLAIN: topic* — Explain anything\n"
+            "*SET TOPIC: topic* — Change your focus\n"
+            "*too easy* — Make content harder\n"
+            "*too hard* — Make content easier\n"
+            "*bad content* — Flag bad quality\n"
+            "*wrong answer* — Flag wrong quiz answer\n"
+            "*RESET* — Start setup again\n"
+            "*done* — Mark today complete\n"
+            "*skip* — Skip quiz question\n"
+            "*end quiz* — End quiz early"
         )
         await loop.run_in_executor(None, lambda: send_whatsapp(help_msg))
         return Response(content="<Response></Response>", media_type="text/xml")
