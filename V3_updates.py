@@ -183,7 +183,7 @@ async def lifespan(app: FastAPI):
     missing_env = []
     if not TWILIO_SID: missing_env.append("TWILIO_SID")
     if not TWILIO_TOKEN: missing_env.append("TWILIO_TOKEN")
-    if not CLAUDE_API_KEY: missing_env.append("CLAUDE_API_KEY")
+    if not os.environ.get("OPENROUTER_API_KEY"): missing_env.append("OPENROUTER_API_KEY")
 
     if missing_env:
         print(f"⚠️ STARTUP WARNING: Missing: {', '.join(missing_env)}")
