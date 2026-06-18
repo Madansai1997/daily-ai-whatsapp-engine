@@ -14,15 +14,12 @@ from fastapi import FastAPI, Response, Form
 from twilio.rest import Client
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from contextlib import asynccontextmanager
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 from rag_engine import retrieve_relevant_context
 
 # Core Credentials
 TWILIO_SID = os.getenv("TWILIO_SID")
 TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
-CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
-CLAUDE_MODEL = "claude-sonnet-4-6"
-CLAUDE_MODEL_FAST = "claude-haiku-4-5-20251001"  # cheap/fast: quizzes, short ops
 FROM_WHATSAPP = "whatsapp:+14155238886"
 TO_WHATSAPP = "whatsapp:+919963214141"
 
@@ -49,14 +46,19 @@ SCHEDULE_CONFIG = {
 }
 
 
-def get_anthropic_client():
-    key = os.getenv("CLAUDE_API_KEY")
-    if not key:
-        print("⚠️ WARNING: CLAUDE_API_KEY not set!")
-        return AsyncAnthropic(api_key="dummy_key_for_compilation_safety", max_retries=0)
-    return AsyncAnthropic(api_key=key, max_retries=5)
+OPENROUTER_MODEL = "nvidia/nemotron-3-super:free"
+OPENROUTER_MODEL_FAST = "nvidia/nemotron-3-super:free"  # same model; swap if a cheaper fast model is available
 
-anthropic_client = get_anthropic_client()
+def get_llm_client() -> AsyncOpenAI:
+    key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not key:
+        print("⚠️ WARNING: OPENROUTER_API_KEY not set!")
+    return AsyncOpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=key or "missing",
+    )
+
+anthropic_client = get_llm_client()  # kept same name so all call sites work unchanged
 
 
 def init_db_tables():
@@ -154,6 +156,18 @@ def init_db_tables():
         mutation_survived INTEGER DEFAULT 0,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
+    cursor.execute('''CREATE TABLE IF NOT EXISTS job_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_name TEXT,
+        status TEXT,
+        message TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+    cursor.execute('''CREATE TABLE IF NOT EXISTS user_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
     conn.commit()
     conn.close()
     print("✅ State Engine: All database tables verified and ready.")
@@ -191,6 +205,37 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+def _split_message(text: str, limit: int = 1500) -> list[str]:
+    """Split a long string into ≤limit-char chunks at sentence boundaries."""
+    if len(text) <= limit:
+        return [text]
+    parts = []
+    remaining = text
+    while len(remaining) > limit:
+        cut = remaining.rfind('. ', 0, limit)
+        if cut == -1:
+            cut = remaining.rfind('\n', 0, limit)
+        if cut == -1:
+            cut = limit
+        else:
+            cut += 1  # include the period
+        parts.append(remaining[:cut].strip())
+        remaining = remaining[cut:].strip()
+    if remaining:
+        parts.append(remaining)
+    return parts
+
+
+def send_whatsapp_chunked(body: str):
+    """Send a WhatsApp message, splitting into multiple parts if over 1500 chars."""
+    parts = _split_message(body, limit=1500)
+    total = len(parts)
+    client = Client(TWILIO_SID, TWILIO_TOKEN)
+    for i, part in enumerate(parts, 1):
+        text = part + (f" ({i}/{total})" if total > 1 else "")
+        client.messages.create(body=text, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
+
+
 @app.get("/")
 def health_check():
     return {"status": "healthy", "message": "Engine is awake"}
@@ -198,8 +243,7 @@ def health_check():
 
 @app.get("/ping")
 def ping():
-    """Lightweight keep-alive endpoint for cron-job.org / UptimeRobot."""
-    return "pong"
+    return {"status": "alive", "timestamp": dt.datetime.utcnow().isoformat()}
 
 
 @app.get("/admin", response_class=Response)
@@ -414,11 +458,11 @@ Ignore greetings, acknowledgments, temporary state.
 Output raw JSON array of strings only. If no facts, output [].
 """
     try:
-        response = await anthropic_client.messages.create(
-            model=CLAUDE_MODEL, max_tokens=300, temperature=0.0,
+        response = await anthropic_client.chat.completions.create(
+            model=OPENROUTER_MODEL, max_tokens=300, temperature=0.0,
             messages=[{"role": "user", "content": prompt}]
         )
-        text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.content[0].text.strip(), flags=re.MULTILINE).strip()
+        text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.choices[0].message.content.strip(), flags=re.MULTILINE).strip()
         facts = json.loads(text)
         if isinstance(facts, list) and facts:
             for fact in facts:
@@ -453,9 +497,11 @@ def fetch_live_internet_updates() -> list[dict]:
 
     print("🕷️ Ingestion: Scraping from DuckDuckGo...")
     try:
+        import socket
+        socket.setdefaulttimeout(5)
         res = requests.get(
             f"https://html.duckduckgo.com/html/?q={unified_query.replace(' ', '+')}",
-            headers={"User-Agent": "Mozilla/5.0 (compatible; DailyAIBot/1.0)"}, timeout=7
+            headers={"User-Agent": "Mozilla/5.0 (compatible; DailyAIBot/1.0)"}, timeout=5
         )
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
@@ -468,7 +514,7 @@ def fetch_live_internet_updates() -> list[dict]:
                         url = "https://" + url
                     articles.append({"url": url, "title": a.text.strip(), "content": snippet.text.strip() if snippet else ""})
     except Exception as e:
-        print(f"⚠️ DuckDuckGo failed: {e}")
+        print(f"DuckDuckGo search failed, continuing without web results")
 
     if not articles:
         articles = [
@@ -482,11 +528,21 @@ def fetch_live_internet_updates() -> list[dict]:
 # 3. CURRICULUM PLANNER AGENT
 # ==========================================
 _FALLBACK_CONCEPTS = [
-    ("RAG QA Testing", "Build evaluation harnesses that test retrieval quality and answer faithfulness."),
-    ("Multi-Agent Systems Testing", "Write integration tests that validate agent handoff and task routing logic."),
-    ("LLM Guardrails & Evals", "Implement policy checks and eval suites to catch unsafe or off-topic LLM outputs."),
-    ("Advanced Prompting Scaffolding", "Master prompt chaining and few-shot patterns to control LLM behaviour reliably."),
-    ("Agentic Scaffolding Testing", "Test control flow logic of complex agentic scaffolding with deterministic assertions."),
+    ("Transformer Architecture", "Understand self-attention, positional encoding, and the encoder-decoder structure."),
+    ("RAG Pipelines", "Build retrieval-augmented generation systems with vector stores and re-rankers."),
+    ("Fine-tuning LLMs", "Apply LoRA and QLoRA to adapt large language models to specific tasks."),
+    ("Vector Databases", "Index and query high-dimensional embeddings with FAISS, Pinecone, or Chroma."),
+    ("Multi-Agent Systems", "Design systems where multiple AI agents collaborate, hand off tasks, and share state."),
+    ("LLM Evaluation & Evals", "Measure LLM output quality with automated metrics, human eval, and benchmark suites."),
+    ("MLOps Fundamentals", "Automate model training, versioning, deployment, and monitoring pipelines."),
+    ("Prompt Engineering", "Master few-shot prompting, chain-of-thought, and structured output techniques."),
+    ("Reinforcement Learning from Human Feedback", "Understand RLHF, reward modelling, and PPO as used in LLM alignment."),
+    ("Neural Network Fundamentals", "Backpropagation, gradient descent, activation functions, and regularisation."),
+    ("Data Pipelines & Feature Stores", "Build reliable data ingestion and feature engineering pipelines for ML."),
+    ("Diffusion Models", "Learn the math and implementation of DDPM and score-based generative models."),
+    ("Attention Mechanisms", "Deep-dive into multi-head attention, cross-attention, and Flash Attention."),
+    ("Model Quantisation & Compression", "Reduce model size with INT8/INT4 quantisation, pruning, and distillation."),
+    ("Computer Vision with CNNs", "Build and train convolutional networks for image classification and detection."),
 ]
 
 async def run_curriculum_planner(skill_level, history_concepts):
@@ -522,25 +578,21 @@ async def run_curriculum_planner(skill_level, history_concepts):
         }
 
     prompt = f"""
-You are the Lead Curriculum Planner for an engineer transitioning to Agentic AI Quality Engineering.
+You are a Curriculum Planner for an AI/Data Science learner.
 Student skill track: {skill_level}
 Previously covered concepts: {history_concepts}
 
-Select the next logical learning concept from:
-1. Advanced Prompting/Scaffolding
-2. RAG QA Testing
-3. Multi-Agent Systems Testing
-4. LLM Guardrails & Evals
+Pick the next best concept to learn. It can be ANYTHING relevant to AI, machine learning, data science, or software engineering — for example: neural network architectures, LLM fine-tuning, vector databases, attention mechanisms, reinforcement learning, data pipelines, MLOps, statistical concepts, Python libraries, agentic systems, computer vision, NLP, evaluation methods, etc. Do NOT restrict yourself to any fixed list. Choose something fresh that hasn't been covered yet and builds on the student's existing knowledge.
 
 Output raw valid JSON only inside <plan> tags.
 Example: <plan>{{"concept": "...", "pedagogical_focus": "...", "assert_template": "..."}}</plan>
 """
     try:
-        response = await anthropic_client.messages.create(
-            model=CLAUDE_MODEL, max_tokens=300, temperature=0.4,
+        response = await anthropic_client.chat.completions.create(
+            model=OPENROUTER_MODEL, max_tokens=300, temperature=0.4,
             messages=[{"role": "user", "content": prompt}]
         )
-        text = response.content[0].text.strip()
+        text = response.choices[0].message.content.strip()
         plan_match = re.search(r'<plan>\s*(.*?)\s*</plan>', text, re.DOTALL | re.IGNORECASE)
         plan_content = plan_match.group(1).strip() if plan_match else text.strip()
         plan_content = re.sub(r'^```(?:json)?\s*|\s*```$', '', plan_content, flags=re.MULTILINE).strip()
@@ -638,11 +690,11 @@ Output raw JSON only:
 }}
 """
     try:
-        response = await anthropic_client.messages.create(
-            model=CLAUDE_MODEL, max_tokens=800, temperature=0.3,
+        response = await anthropic_client.chat.completions.create(
+            model=OPENROUTER_MODEL, max_tokens=800, temperature=0.3,
             messages=[{"role": "user", "content": prompt}]
         )
-        text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.content[0].text.strip(), flags=re.MULTILINE).strip()
+        text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.choices[0].message.content.strip(), flags=re.MULTILINE).strip()
         project_data = json.loads(text)
 
         async with aiosqlite.connect(DB_PATH) as db:
@@ -705,11 +757,11 @@ Output raw JSON only:
 Verdict is PASS if average_score >= 6.0, otherwise FAIL.
 """
     try:
-        response = await anthropic_client.messages.create(
-            model=CLAUDE_MODEL, max_tokens=600, temperature=0.0,
+        response = await anthropic_client.chat.completions.create(
+            model=OPENROUTER_MODEL, max_tokens=600, temperature=0.0,
             messages=[{"role": "user", "content": prompt}]
         )
-        text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.content[0].text.strip(), flags=re.MULTILINE).strip()
+        text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.choices[0].message.content.strip(), flags=re.MULTILINE).strip()
         result = json.loads(text)
         print(f"📊 Assertion Quality: {result.get('average_score', 0):.1f}/10 — {result.get('verdict')}")
         return result
@@ -1037,12 +1089,12 @@ Structure the <reference_implementation> as valid Python code with function defi
     if feedback_loop_msg:
         prompt += f"\n\n⚠️ CRITICAL CORRECTION REQUIRED:\n{feedback_loop_msg}"
 
-    response = await anthropic_client.messages.create(
-        model=CLAUDE_MODEL, max_tokens=2000, temperature=0.2,
+    response = await anthropic_client.chat.completions.create(
+        model=OPENROUTER_MODEL, max_tokens=2000, temperature=0.2,
         messages=[{"role": "user", "content": prompt}]
     )
 
-    text = response.content[0].text
+    text = response.choices[0].message.content
     whatsapp_payload = ""
     reference_code = ""
 
@@ -1121,11 +1173,11 @@ Output raw JSON array only — no markdown, no backticks, no extra text:
 Generate all 10 questions following this exact structure.
 """
     try:
-        response = await anthropic_client.messages.create(
-            model=CLAUDE_MODEL_FAST, max_tokens=2000, temperature=0.3,
+        response = await anthropic_client.chat.completions.create(
+            model=OPENROUTER_MODEL_FAST, max_tokens=2000, temperature=0.3,
             messages=[{"role": "user", "content": prompt}]
         )
-        text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.content[0].text.strip(), flags=re.MULTILINE).strip()
+        text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.choices[0].message.content.strip(), flags=re.MULTILINE).strip()
         questions = json.loads(text)
 
         # Validate structure — discard malformed questions
@@ -1300,11 +1352,11 @@ Output raw JSON only:
 ]
 """
         try:
-            response = await anthropic_client.messages.create(
-                model=CLAUDE_MODEL, max_tokens=400, temperature=0.2,
+            response = await anthropic_client.chat.completions.create(
+                model=OPENROUTER_MODEL, max_tokens=400, temperature=0.2,
                 messages=[{"role": "user", "content": prompt}]
             )
-            text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.content[0].text.strip(), flags=re.MULTILINE).strip()
+            text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.choices[0].message.content.strip(), flags=re.MULTILINE).strip()
             resources = json.loads(text)
             resources_section = "\n*📚 Resources to Study:*\n" + "\n".join([f"- *{r['title']}*\n  {r['url']}\n  _{r['why']}_" for r in resources])
         except Exception as e:
@@ -1342,11 +1394,25 @@ Output raw JSON only:
     return header + missed_section + concepts_section + resources_section + footer + streak_msg
 
 
+async def _log_job(job_name: str, status: str, message: str = ""):
+    """Write a single row to job_logs. Fire-and-forget — never raises."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)",
+                (job_name, status, message)
+            )
+            await db.commit()
+    except Exception:
+        pass
+
+
 # ==========================================
 # 11. CHECK-IN REMINDER ENGINE
 # — Asks about today's learning topic AND today's project subtask
 # ==========================================
 async def send_checkin_reminder(reminder_number: int):
+    await _log_job("send_checkin_reminder", "started", f"reminder #{reminder_number}")
     today = date.today().isoformat()
     loop = asyncio.get_event_loop()
 
@@ -1425,10 +1491,8 @@ async def send_checkin_reminder(reminder_number: int):
         )
         await db.commit()
 
-    def send_msg():
-        Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=msg, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
-
-    await loop.run_in_executor(None, send_msg)
+    await loop.run_in_executor(None, lambda: send_whatsapp_chunked(msg))
+    await _log_job("send_checkin_reminder", "completed", f"reminder #{reminder_number} sent")
     print(f"⏰ Check-in reminder {reminder_number} sent.")
 
     if reminder_number == 5:
@@ -1478,9 +1542,7 @@ async def auto_trigger_quiz():
         await db.commit()
 
     loop = asyncio.get_event_loop()
-    def send_msg():
-        Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=intro + first_question, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
-    await loop.run_in_executor(None, send_msg)
+    await loop.run_in_executor(None, lambda: send_whatsapp_chunked(intro + first_question))
     print("🧠 Auto-triggered quiz after final reminder.")
 
 
@@ -1488,6 +1550,7 @@ async def auto_trigger_quiz():
 # 12. WEEKLY PERFORMANCE REPORT
 # ==========================================
 async def send_weekly_report():
+    await _log_job("send_weekly_report", "started")
     loop = asyncio.get_event_loop()
     today = date.today()
     week_ago = (today - dt.timedelta(days=7)).isoformat()
@@ -1501,9 +1564,7 @@ async def send_weekly_report():
 
     if not rows:
         msg = "📊 *Weekly Report*\n\nNo quiz data this week yet. Keep learning and completing your daily quizzes! 💪"
-        def send_msg():
-            Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=msg, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
-        await loop.run_in_executor(None, send_msg)
+        await loop.run_in_executor(None, lambda: send_whatsapp_chunked(msg))
         return
 
     total_score = sum(r[2] for r in rows)
@@ -1526,9 +1587,8 @@ async def send_weekly_report():
         f"Keep pushing — you are building something great! 🚀"
     )
 
-    def send_msg():
-        Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=report, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
-    await loop.run_in_executor(None, send_msg)
+    await loop.run_in_executor(None, lambda: send_whatsapp_chunked(report))
+    await _log_job("send_weekly_report", "completed")
     print("📊 Weekly report sent.")
 
 
@@ -1536,6 +1596,7 @@ async def send_weekly_report():
 # 13. MORNING DIGEST ENDPOINT
 # ==========================================
 async def run_morning_digest():
+    await _log_job("run_morning_digest", "started")
     try:
         skill_level, recent_topics, _ = await get_db_state()
         planner_context = await run_curriculum_planner(skill_level, recent_topics)
@@ -1592,26 +1653,26 @@ async def run_morning_digest():
         if is_valid_run:
             await log_sent_concept(concept, final_text)
             try:
-                def send_twilio():
-                    Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=final_text, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
-                await loop.run_in_executor(None, send_twilio)
+                await loop.run_in_executor(None, lambda: send_whatsapp_chunked(final_text))
                 # Difficulty feedback prompt — separate message so digest stays clean
                 feedback_prompt = (
                     f"📐 *Quick feedback:* Was today's concept (*{concept}*) the right difficulty?\n"
                     f"Reply *E* (too easy) · *J* (just right) · *H* (too hard)"
                 )
-                def send_feedback_prompt():
-                    Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=feedback_prompt, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
-                await loop.run_in_executor(None, send_feedback_prompt)
+                await loop.run_in_executor(None, lambda: send_whatsapp_chunked(feedback_prompt))
+                await _log_job("run_morning_digest", "completed", f"concept: {concept}")
                 return {"status": "Digest approved and dispatched.", "concept": concept}
             except Exception as e:
+                await _log_job("run_morning_digest", "failed", f"Twilio error: {str(e)}")
                 return {"status": "QA Passed but Twilio failed", "error": str(e)}
         else:
+            await _log_job("run_morning_digest", "failed", f"QA rejected: {feedback}")
             return {"status": "Aborted. Failed structural validation.", "errors": feedback}
 
     except Exception as e:
         import traceback
         traceback.print_exc()
+        await _log_job("run_morning_digest", "failed", str(e))
         return {"status": "Error running digest pipeline", "error": str(e)}
 
 
@@ -1633,7 +1694,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
     print(f"📥 [Incoming]: '{user_message_clean}'")
 
     def send_whatsapp(msg):
-        Client(TWILIO_SID, TWILIO_TOKEN).messages.create(body=msg, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
+        send_whatsapp_chunked(msg)
 
     # =========================================================================
     # GREETING / HELP MENU
@@ -1672,14 +1733,19 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
         new_topic = user_message[len("set topic:"):].strip()
         if new_topic:
             async with aiosqlite.connect(DB_PATH) as db:
+                # Write to both user_settings (spec) and user_profile (curriculum planner reads it)
+                await db.execute(
+                    "INSERT OR REPLACE INTO user_settings (key, value, updated_at) VALUES ('current_topic', ?, datetime('now'))",
+                    (new_topic,)
+                )
                 await db.execute(
                     "INSERT OR REPLACE INTO user_profile (key, value) VALUES ('override_topic', ?)",
                     (new_topic,)
                 )
                 await db.commit()
-            reply = f"✅ *Topic override set!*\nTomorrow's digest will focus on:\n_{new_topic}_\n\nSend *clear topic* to revert to auto-selection."
+            reply = f"Got it! Your learning topic is now set to: {new_topic}. Your next morning digest will be about this topic."
         else:
-            reply = "⚠️ Usage: `set topic: <your topic here>`\nExample: `set topic: Reinforcement Learning`"
+            reply = "⚠️ Usage: SET TOPIC: <your topic here>\nExample: SET TOPIC: Reinforcement Learning"
         await loop.run_in_executor(None, lambda: send_whatsapp(reply))
         return Response(content="<Response></Response>", media_type="text/xml")
 
@@ -1689,6 +1755,33 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             await db.execute("DELETE FROM user_profile WHERE key='override_topic'")
             await db.commit()
         await loop.run_in_executor(None, lambda: send_whatsapp("✅ Topic override cleared. Auto-selection resumes tomorrow."))
+        return Response(content="<Response></Response>", media_type="text/xml")
+
+    # =========================================================================
+    # EXPLAIN — instant concept explanation
+    # Usage: "EXPLAIN: transformer attention mechanism"
+    # =========================================================================
+    if user_message_clean.startswith("explain:"):
+        await log_chat_message("user", user_message)
+        concept_to_explain = user_message[len("explain:"):].strip()
+        if not concept_to_explain:
+            await loop.run_in_executor(None, lambda: send_whatsapp("⚠️ Usage: EXPLAIN: <concept>\nExample: EXPLAIN: transformer attention"))
+            return Response(content="<Response></Response>", media_type="text/xml")
+        try:
+            explain_prompt = (
+                "You are a technical educator. Explain concepts clearly for a developer learning AI and software engineering. "
+                "Keep explanations under 1000 characters total so they fit in WhatsApp. "
+                "Always include: one plain English explanation, one real-world analogy, and one minimal code example if relevant.\n\n"
+                f"Explain this concept clearly: {concept_to_explain}"
+            )
+            explain_response = await anthropic_client.chat.completions.create(
+                model=OPENROUTER_MODEL, max_tokens=400, temperature=0.3,
+                messages=[{"role": "user", "content": explain_prompt}]
+            )
+            explanation = explain_response.choices[0].message.content.strip()
+            await loop.run_in_executor(None, lambda: send_whatsapp(explanation))
+        except Exception as e:
+            await loop.run_in_executor(None, lambda: send_whatsapp(f"⚠️ Could not explain that right now: {str(e)}"))
         return Response(content="<Response></Response>", media_type="text/xml")
 
     # =========================================================================
@@ -1754,8 +1847,8 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
         skill_level, recent_topics, _ = await get_db_state()
         concept = recent_topics[0] if recent_topics else "AI Engineering"
         try:
-            review_response = await anthropic_client.messages.create(
-                model=CLAUDE_MODEL, max_tokens=600, temperature=0.2,
+            review_response = await anthropic_client.chat.completions.create(
+                model=OPENROUTER_MODEL, max_tokens=600, temperature=0.2,
                 messages=[{"role": "user", "content": (
                     f"Review this code snippet for an {skill_level} student learning {concept}.\n"
                     f"```\n{code_snippet}\n```\n"
@@ -1763,7 +1856,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
                     f"Keep it under 200 words. Use WhatsApp *bold* formatting."
                 )}]
             )
-            review_msg = review_response.content[0].text.strip()
+            review_msg = review_response.choices[0].message.content.strip()
         except Exception as e:
             review_msg = f"⚠️ Code review unavailable: {e}"
         await log_chat_message("assistant", review_msg)
@@ -1998,8 +2091,8 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
 
             print("🧠 [AI Architect]: Generating surgical patch...")
 
-            patch_response = await anthropic_client.messages.create(
-                model=CLAUDE_MODEL, max_tokens=1500, temperature=0.1,
+            patch_response = await anthropic_client.chat.completions.create(
+                model=OPENROUTER_MODEL, max_tokens=1500, temperature=0.1,
                 system=(
                     "You are an expert Python code surgeon. "
                     "Given a user instruction and a Python file, identify the exact snippet to change. "
@@ -2014,7 +2107,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
                 )}]
             )
 
-            raw_text = re.sub(r'^```(?:json)?\s*|\s*```$', '', patch_response.content[0].text.strip(), flags=re.MULTILINE).strip()
+            raw_text = re.sub(r'^```(?:json)?\s*|\s*```$', '', patch_response.choices[0].message.content.strip(), flags=re.MULTILINE).strip()
             print(f"🔍 PATCH RESPONSE:\n{raw_text}")
 
             patch_data = json.loads(raw_text)
@@ -2061,8 +2154,8 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
         context_str = "\n".join([f"- {c['content']}" for c in relevant_context])
         facts_str = "\n".join([f"- {f}" for f in user_facts])
 
-        response = await anthropic_client.messages.create(
-            model=CLAUDE_MODEL, max_tokens=800,
+        response = await anthropic_client.chat.completions.create(
+            model=OPENROUTER_MODEL, max_tokens=800,
             system=(
                 f"You are the user's Curriculum Coach and AI Architect.\n"
                 f"Facts about user:\n{facts_str}\n\nContext:\n{context_str}\n\n"
@@ -2071,7 +2164,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             messages=chat_history + [{"role": "user", "content": user_message}]
         )
 
-        ai_response = response.content[0].text.strip()
+        ai_response = response.choices[0].message.content.strip()
         await log_chat_message("assistant", ai_response)
 
         if "to *Advanced*" in ai_response:
