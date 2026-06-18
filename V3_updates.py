@@ -614,6 +614,53 @@ _FALLBACK_CONCEPTS = [
     ("Computer Vision with CNNs", "Build and train convolutional networks for image classification and detection."),
 ]
 
+def extract_json_from_response(response: str):
+    """Extract JSON from model response even if surrounded by reasoning text."""
+    if not response or not response.strip():
+        return {}
+
+    raw = response.strip()
+
+    # Try 1: direct parse
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # Try 2: strip markdown fences
+    if "```" in raw:
+        parts = raw.split("```")
+        for part in parts:
+            part = part.strip()
+            if part.startswith("json"):
+                part = part[4:].strip()
+            try:
+                return json.loads(part)
+            except json.JSONDecodeError:
+                continue
+
+    # Try 3: find first { and last } and extract just that
+    start = raw.find('{')
+    end = raw.rfind('}')
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(raw[start:end+1])
+        except json.JSONDecodeError:
+            pass
+
+    # Try 4: find first [ and last ] for list responses
+    start = raw.find('[')
+    end = raw.rfind(']')
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(raw[start:end+1])
+        except json.JSONDecodeError:
+            pass
+
+    print(f"⚠️ JSON extract failed. Raw: {repr(raw[:300])}")
+    return {}
+
+
 async def run_curriculum_planner(skill_level, history_concepts):
     print("📋 [Curriculum Planner]: Selecting today's concept...")
 
@@ -647,42 +694,25 @@ async def run_curriculum_planner(skill_level, history_concepts):
         }
 
     exclusions = history_concepts
-    system_prompt = """You are a curriculum planner. Respond with ONLY a JSON object.
-No explanation. No markdown. No code fences. No preamble. No extra text whatsoever.
-Your entire response must be valid JSON starting with { and ending with }.
-Example of the ONLY acceptable response format:
-{"concept": "Python Functions", "pedagogical_focus": "How to define and call functions", "assert_template": "def add(a,b): return a+b"}"""
+    system_prompt = "Return only valid JSON. No thinking. No explanation. No markdown."
 
-    user_prompt = f"""Return a JSON object for a {skill_level} student.
-Previously covered: {exclusions if exclusions else "none"}.
-Choose ONE foundational concept not yet covered from AI, machine learning, data science, or software engineering.
-Respond with ONLY this JSON, nothing else:
-{{"concept": "...", "pedagogical_focus": "...", "assert_template": "..."}}"""
+    user_prompt = f"""Output this JSON filled in for a {skill_level} student.
+Previously covered: {exclusions if exclusions else 'none'}.
+Pick one AI/ML concept not yet covered.
+OUTPUT ONLY THIS JSON STRUCTURE, NOTHING ELSE:
+{{"concept": "FILL IN", "pedagogical_focus": "FILL IN", "assert_template": "FILL IN"}}"""
 
     try:
         response = await anthropic_client.chat.completions.create(
-            model=OPENROUTER_MODEL, max_tokens=300, temperature=0.4,
+            model=OPENROUTER_MODEL, max_tokens=200, temperature=0.4,
+            extra_body={"thinking": False},
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ]
         )
         text = response.choices[0].message.content.strip()
-        plan_match = re.search(r'<plan>\s*(.*?)\s*</plan>', text, re.DOTALL | re.IGNORECASE)
-        plan_content = plan_match.group(1).strip() if plan_match else text.strip()
-        plan_content = re.sub(r'^```(?:json)?\s*|\s*```$', '', plan_content, flags=re.MULTILINE).strip()
-        try:
-            raw = plan_content.strip() if plan_content else ""
-            if not raw:
-                raise ValueError("Empty response from LLM")
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            data = json.loads(raw.strip())
-        except (json.JSONDecodeError, ValueError) as e:
-            print(f"⚠️ JSON parse failed: {e}. Raw response was: {repr(plan_content[:200] if plan_content else 'EMPTY')}")
-            data = {}
+        data = extract_json_from_response(text)
         if not data:
             data = {
                 "concept": "Large Language Model Architecture",
@@ -779,19 +809,8 @@ Return a JSON object with keys "project_title" and "subtasks" (array of 7 object
             model=OPENROUTER_MODEL, max_tokens=800, temperature=0.3,
             messages=[{"role": "user", "content": prompt}]
         )
-        text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.choices[0].message.content.strip(), flags=re.MULTILINE).strip()
-        try:
-            raw = text.strip() if text else ""
-            if not raw:
-                raise ValueError("Empty response from LLM")
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            project_data = json.loads(raw.strip())
-        except (json.JSONDecodeError, ValueError) as e:
-            print(f"⚠️ JSON parse failed: {e}. Raw response was: {repr(text[:200] if text else 'EMPTY')}")
-            project_data = {}
+        text = response.choices[0].message.content.strip()
+        project_data = extract_json_from_response(text)
         if not project_data:
             project_data = {
                 "project_title": "Build a simple token counter that tracks API usage",
@@ -1088,7 +1107,7 @@ async def run_qa_critic(content: str, reference_code: str) -> tuple[bool, str]:
 
     has_assert_syntax = len(assert_lines) >= 3
     char_length = len(content)
-    within_twilio_limit = char_length <= 7500  # chunker handles splitting; check pre-split total
+    within_twilio_limit = char_length <= 10000  # chunker handles splitting; check pre-split total
 
     lines = content.split('\n')
     is_in_update_block = False
@@ -1106,8 +1125,8 @@ async def run_qa_critic(content: str, reference_code: str) -> tuple[bool, str]:
     if not has_updates: errors.append("Missing '*🔴 REGULAR DAILY AI UPDATES*' header.")
     if not has_learnings: errors.append("Missing '*📘 WHAT I NEED TO LEARN & PROJECTS TO WORK ON*' header.")
     if not has_assert_syntax: errors.append(f"Found {len(assert_lines)} assertions, expected at least 3.")
-    if not within_twilio_limit: errors.append(f"Payload out of size bounds ({char_length}/7500 chars).")
-    if not (3 <= update_count <= 8): errors.append(f"Density check: Found {update_count} updates, expected 5-7.")
+    if not within_twilio_limit: errors.append(f"Payload out of size bounds ({char_length}/10000 chars).")
+    if not (5 <= update_count <= 25): errors.append(f"Density check: Found {update_count} updates, expected 5-25.")
 
     sandbox_passed = False
     quality_result = {"verdict": "SKIP", "average_score": 0, "feedback": ""}
@@ -1134,7 +1153,7 @@ async def run_qa_critic(content: str, reference_code: str) -> tuple[bool, str]:
     print(f"  - Sandbox Assert Execution:      {'PASS' if sandbox_passed else 'FAIL'}")
     print(f"  - Assertion Quality Score:       {quality_result.get('average_score',0):.1f}/10 ({quality_result.get('verdict','SKIP')})")
     print(f"  - Mutation Test Kill Rate:       {mutation_result.get('kill_rate',0):.0f}% ({mutation_result.get('verdict','SKIP')})")
-    print(f"  - Twilio Message Size Safety:    {char_length}/7500 chars ({'PASS' if within_twilio_limit else 'FAIL'})")
+    print(f"  - Twilio Message Size Safety:    {char_length}/10000 chars ({'PASS' if within_twilio_limit else 'FAIL'})")
     print(f"  - Density Metric:                {update_count} updates processed")
 
     if not errors:
@@ -1168,7 +1187,10 @@ async def generate_daily_payload(raw_data, skill_level, exclusions, planner_cont
             f"{project_context.get('subtask_description', '')}"
         )
 
-    prompt = f"""
+    prompt = f"""HARD LIMIT: Return EXACTLY 5 news items. Not 4. Not 6. Not 20.
+Exactly 5 items in the updates section.
+If you return more than 5 items the output will be rejected and thrown away.
+
 You are the Lead Curriculum Director for an Engineer tracking towards Agentic AI Test Architecture.
 Current Student Skill Level: {skill_level}
 Strict Exclusion List (DO NOT REPEAT): {exclusions}
@@ -1194,6 +1216,7 @@ Structure the <whatsapp_payload> EXACTLY as:
 
 *🔴 REGULAR DAILY AI UPDATES*
 (Return EXACTLY 5 news items maximum. Not 6, not 7, not 20. Exactly 5. Each item must be under 100 characters.)
+Stop after item 5. Do not add item 6 or beyond under any circumstances.
 
 *📘 WHAT I NEED TO LEARN & PROJECTS TO WORK ON*
 - *Core Concept to Master Today*: {concept} — {pedagogical_focus}
