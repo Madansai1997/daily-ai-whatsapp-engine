@@ -22,6 +22,7 @@ TWILIO_SID = os.getenv("TWILIO_SID")
 TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 CLAUDE_MODEL = "claude-sonnet-4-6"
+CLAUDE_MODEL_FAST = "claude-haiku-4-5-20251001"  # cheap/fast: quizzes, short ops
 FROM_WHATSAPP = "whatsapp:+14155238886"
 TO_WHATSAPP = "whatsapp:+919963214141"
 
@@ -195,6 +196,95 @@ def health_check():
     return {"status": "healthy", "message": "Engine is awake"}
 
 
+@app.get("/ping")
+def ping():
+    """Lightweight keep-alive endpoint for cron-job.org / UptimeRobot."""
+    return "pong"
+
+
+@app.get("/admin", response_class=Response)
+async def admin_panel():
+    """Hermes control panel — overview of engine state."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT value FROM user_profile WHERE key='skill_level'") as c:
+            row = await c.fetchone(); skill = row[0] if row else "?"
+        async with db.execute("SELECT value FROM user_profile WHERE key='study_streak'") as c:
+            row = await c.fetchone(); streak = row[0] if row else "0"
+        async with db.execute("SELECT COUNT(*) FROM sent_history") as c:
+            row = await c.fetchone(); total_concepts = row[0] if row else 0
+        async with db.execute("SELECT concept, timestamp FROM sent_history ORDER BY timestamp DESC LIMIT 5") as c:
+            recent = await c.fetchall()
+        async with db.execute("SELECT date, quiz_score, max_score, concept FROM performance_log ORDER BY date DESC LIMIT 5") as c:
+            quiz_rows = await c.fetchall()
+        async with db.execute("SELECT COUNT(*) FROM review_queue WHERE completed=0") as c:
+            row = await c.fetchone(); pending_reviews = row[0] if row else 0
+        async with db.execute("SELECT value FROM user_profile WHERE key='override_topic'") as c:
+            row = await c.fetchone(); override = row[0] if row else None
+        async with db.execute("SELECT value FROM user_profile WHERE key='difficulty_preference'") as c:
+            row = await c.fetchone(); diff_pref = row[0] if row else "not set"
+
+    recent_html = "".join(f"<li>{r[0]} <small style='color:#888'>({r[1][:10]})</small></li>" for r in recent) or "<li>None yet</li>"
+    quiz_html = "".join(f"<li>{r[0]}: <b>{r[1]}/{r[2]}</b> — {r[3]}</li>" for r in quiz_rows) or "<li>No quizzes yet</li>"
+    override_html = f"<span style='color:#e67e22'>⚠️ Topic override active: <b>{override}</b></span>" if override else "<span style='color:#27ae60'>Auto-selection active</span>"
+
+    html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
+<title>Hermes Control Center</title>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+  body{{font-family:system-ui,sans-serif;background:#0f1117;color:#e0e0e0;margin:0;padding:20px}}
+  h1{{color:#7c3aed;margin-bottom:4px}}
+  .subtitle{{color:#888;font-size:13px;margin-bottom:24px}}
+  .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:24px}}
+  .card{{background:#1a1d27;border-radius:10px;padding:16px;border:1px solid #2a2d3a}}
+  .card h3{{margin:0 0 8px;font-size:13px;color:#888;text-transform:uppercase;letter-spacing:.5px}}
+  .card .val{{font-size:28px;font-weight:700;color:#a78bfa}}
+  .card .sub{{font-size:12px;color:#666;margin-top:4px}}
+  .section{{background:#1a1d27;border-radius:10px;padding:16px;margin-bottom:16px;border:1px solid #2a2d3a}}
+  .section h2{{margin:0 0 12px;font-size:15px;color:#c4b5fd}}
+  ul{{margin:0;padding-left:18px;line-height:1.8}}
+  li small{{font-size:11px}}
+  .btn{{display:inline-block;padding:8px 18px;background:#7c3aed;color:#fff;border-radius:6px;
+        text-decoration:none;font-size:13px;margin-right:8px;margin-top:8px}}
+  .btn:hover{{background:#6d28d9}}
+  .pill{{display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;
+         background:#2a2d3a;color:#a78bfa;margin-left:6px}}
+</style></head><body>
+<h1>⚡ Hermes Control Center</h1>
+<div class='subtitle'>Daily AI Learning Engine — live status</div>
+
+<div class='grid'>
+  <div class='card'><h3>Skill Level</h3><div class='val'>{skill}</div><div class='sub'>current track</div></div>
+  <div class='card'><h3>Study Streak</h3><div class='val'>{streak} 🔥</div><div class='sub'>days in a row</div></div>
+  <div class='card'><h3>Concepts Sent</h3><div class='val'>{total_concepts}</div><div class='sub'>total digests</div></div>
+  <div class='card'><h3>Pending Reviews</h3><div class='val'>{pending_reviews}</div><div class='sub'>spaced repetition queue</div></div>
+</div>
+
+<div class='section'>
+  <h2>📡 Topic Control</h2>
+  <p style='margin:0 0 8px'>{override_html}</p>
+  <p style='margin:0;font-size:13px;color:#888'>Difficulty preference: <span class='pill'>{diff_pref}</span></p>
+  <p style='margin:8px 0 0;font-size:12px;color:#555'>To override next topic, send WhatsApp: <code>set topic: &lt;topic name&gt;</code></p>
+</div>
+
+<div class='section'>
+  <h2>📚 Recent Digests</h2>
+  <ul>{recent_html}</ul>
+</div>
+
+<div class='section'>
+  <h2>🏆 Recent Quiz Scores</h2>
+  <ul>{quiz_html}</ul>
+</div>
+
+<div class='section'>
+  <h2>🚀 Manual Triggers</h2>
+  <a class='btn' href='/run-morning-digest' onclick="this.textContent='Running…';fetch('/run-morning-digest',{{method:'POST'}}).then(r=>r.json()).then(d=>this.textContent=d.status||'Done');return false;">▶ Run Morning Digest</a>
+  <a class='btn' href='/ping' style='background:#374151'>🏓 Ping</a>
+</div>
+</body></html>"""
+    return Response(content=html, media_type="text/html")
+
+
 # ==========================================
 # 1. DATABASE STATE UTILITIES
 # ==========================================
@@ -365,7 +455,7 @@ def fetch_live_internet_updates() -> list[dict]:
     try:
         res = requests.get(
             f"https://html.duckduckgo.com/html/?q={unified_query.replace(' ', '+')}",
-            headers={"User-Agent": "Mozilla/5.0"}, timeout=12
+            headers={"User-Agent": "Mozilla/5.0 (compatible; DailyAIBot/1.0)"}, timeout=7
         )
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
@@ -401,6 +491,23 @@ _FALLBACK_CONCEPTS = [
 
 async def run_curriculum_planner(skill_level, history_concepts):
     print("📋 [Curriculum Planner]: Selecting today's concept...")
+
+    # Check for manual topic override set via WhatsApp "set topic: ..."
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT value FROM user_profile WHERE key='override_topic'") as cursor:
+            row = await cursor.fetchone()
+    if row:
+        override = row[0].strip()
+        # Consume the override — one-shot, cleared after use
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM user_profile WHERE key='override_topic'")
+            await db.commit()
+        print(f"🎯 Using manual topic override: '{override}'")
+        return {
+            "concept": override,
+            "pedagogical_focus": f"Deep dive into {override} with practical implementation.",
+            "assert_template": "Write assertions that verify the core behaviour of the implementation."
+        }
 
     # Check review queue first — re-test weak areas before new content
     today_str = date.today().isoformat()
@@ -1015,7 +1122,7 @@ Generate all 10 questions following this exact structure.
 """
     try:
         response = await anthropic_client.messages.create(
-            model=CLAUDE_MODEL, max_tokens=2000, temperature=0.3,
+            model=CLAUDE_MODEL_FAST, max_tokens=2000, temperature=0.3,
             messages=[{"role": "user", "content": prompt}]
         )
         text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.content[0].text.strip(), flags=re.MULTILINE).strip()
@@ -1554,6 +1661,34 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             "Or just chat with me — I'm your AI coach! 💬"
         )
         await loop.run_in_executor(None, lambda: send_whatsapp(help_msg))
+        return Response(content="<Response></Response>", media_type="text/xml")
+
+    # =========================================================================
+    # SET TOPIC — override what the bot teaches next morning
+    # Usage: "set topic: Reinforcement Learning from Human Feedback"
+    # =========================================================================
+    if user_message_clean.startswith("set topic:"):
+        await log_chat_message("user", user_message)
+        new_topic = user_message[len("set topic:"):].strip()
+        if new_topic:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "INSERT OR REPLACE INTO user_profile (key, value) VALUES ('override_topic', ?)",
+                    (new_topic,)
+                )
+                await db.commit()
+            reply = f"✅ *Topic override set!*\nTomorrow's digest will focus on:\n_{new_topic}_\n\nSend *clear topic* to revert to auto-selection."
+        else:
+            reply = "⚠️ Usage: `set topic: <your topic here>`\nExample: `set topic: Reinforcement Learning`"
+        await loop.run_in_executor(None, lambda: send_whatsapp(reply))
+        return Response(content="<Response></Response>", media_type="text/xml")
+
+    if user_message_clean == "clear topic":
+        await log_chat_message("user", user_message)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM user_profile WHERE key='override_topic'")
+            await db.commit()
+        await loop.run_in_executor(None, lambda: send_whatsapp("✅ Topic override cleared. Auto-selection resumes tomorrow."))
         return Response(content="<Response></Response>", media_type="text/xml")
 
     # =========================================================================
