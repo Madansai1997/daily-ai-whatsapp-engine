@@ -3,6 +3,7 @@ import sqlite3
 import aiosqlite
 import asyncio
 import json
+import random
 import requests
 import subprocess
 import re
@@ -596,6 +597,19 @@ def fetch_live_internet_updates() -> list[dict]:
 # ==========================================
 # 3. CURRICULUM PLANNER AGENT
 # ==========================================
+FALLBACK_TOPICS = [
+    {"concept": "The Feynman Technique", "pedagogical_focus": "How to learn anything deeply by teaching it simply", "assert_template": "Explain quantum entanglement as if to a 10-year-old"},
+    {"concept": "Bayes Theorem", "pedagogical_focus": "How to update beliefs with new evidence", "assert_template": "If a test is 99% accurate and disease affects 1% of people, what is P(disease|positive test)?"},
+    {"concept": "Asymptotic Complexity", "pedagogical_focus": "How to measure algorithm efficiency with Big O notation", "assert_template": "What is the time complexity of binary search and why?"},
+    {"concept": "Supply and Demand", "pedagogical_focus": "How prices emerge from buyer and seller behaviour", "assert_template": "What happens to price when supply drops but demand stays constant?"},
+    {"concept": "Cognitive Biases", "pedagogical_focus": "How confirmation bias affects decision making", "assert_template": "Give a real-world example where confirmation bias led to a bad decision"},
+    {"concept": "Neural Networks", "pedagogical_focus": "How layers of weights transform inputs to outputs", "assert_template": "Draw and label a simple 3-layer neural network"},
+    {"concept": "The Socratic Method", "pedagogical_focus": "How to find truth through disciplined questioning", "assert_template": "List 3 Socratic questions you would ask to challenge the claim: AI will replace all jobs"},
+    {"concept": "Compounding Interest", "pedagogical_focus": "How exponential growth works with money over time", "assert_template": "Calculate the value of 10000 rupees after 10 years at 8% annual compound interest"},
+    {"concept": "First Principles Thinking", "pedagogical_focus": "How to break problems down to fundamental truths", "assert_template": "Use first principles to rethink how you would design a better chair"},
+    {"concept": "The Unix Philosophy", "pedagogical_focus": "Do one thing well, chain simple tools together", "assert_template": "Write a one-line bash command that counts unique words in a text file"},
+]
+
 _FALLBACK_CONCEPTS = [
     ("Transformer Architecture", "Understand self-attention, positional encoding, and the encoder-decoder structure."),
     ("RAG Pipelines", "Build retrieval-augmented generation systems with vector stores and re-rankers."),
@@ -657,6 +671,29 @@ def extract_json_from_response(response: str):
         except json.JSONDecodeError:
             pass
 
+    # Try 5: response was truncated mid-JSON — attempt to repair it
+    if start != -1:
+        fragment = raw[start:]
+        # Count open vs close braces to detect truncation
+        open_count = fragment.count('{')
+        close_count = fragment.count('}')
+        if open_count > close_count:
+            # Add missing closing braces
+            fragment = fragment + ('}' * (open_count - close_count))
+            try:
+                return json.loads(fragment)
+            except json.JSONDecodeError:
+                # Try trimming to last complete key-value pair
+                last_comma = fragment.rfind(',')
+                last_quote = fragment.rfind('"')
+                trim_at = max(last_comma, last_quote)
+                if trim_at > start:
+                    try:
+                        repaired = fragment[:trim_at] + "}"
+                        return json.loads(repaired)
+                    except json.JSONDecodeError:
+                        pass
+
     print(f"⚠️ JSON extract failed. Raw: {repr(raw[:300])}")
     return {}
 
@@ -694,17 +731,38 @@ async def run_curriculum_planner(skill_level, history_concepts):
         }
 
     exclusions = history_concepts
-    system_prompt = "Return only valid JSON. No thinking. No explanation. No markdown."
+
+    # Read persistent topic domain from user_settings (set via SET TOPIC:)
+    current_topic = None
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT value FROM user_settings WHERE key='current_topic'") as cursor:
+            ct_row = await cursor.fetchone()
+    if ct_row:
+        current_topic = ct_row[0].strip()
+
+    system_prompt = """You are a curriculum planner for a curious learner.
+You can suggest concepts from ANY field of knowledge — not just technology.
+Return only valid JSON. No thinking. No explanation. No markdown. No preamble.
+Your entire response must be valid JSON starting with { and ending with }."""
 
     user_prompt = f"""Output this JSON filled in for a {skill_level} student.
-Previously covered: {exclusions if exclusions else 'none'}.
-Pick one AI/ML concept not yet covered.
-OUTPUT ONLY THIS JSON STRUCTURE, NOTHING ELSE:
-{{"concept": "FILL IN", "pedagogical_focus": "FILL IN", "assert_template": "FILL IN"}}"""
+Previously covered topics: {exclusions if exclusions else 'none'}.
+Current topic set by user: {current_topic if current_topic else 'open — pick anything interesting'}.
+
+If current_topic is set: pick a specific concept or subtopic within that domain.
+If current_topic is not set: pick ANY interesting concept from ANY field —
+science, history, mathematics, philosophy, coding, psychology, economics,
+physics, biology, literature, engineering, or anything else.
+
+Do NOT repeat previously covered topics.
+Pick something genuinely useful and interesting to learn today.
+
+OUTPUT ONLY THIS JSON, NOTHING ELSE:
+{{"concept": "FILL IN - specific concept name", "pedagogical_focus": "FILL IN - what exactly to learn about it in one sentence", "assert_template": "FILL IN - a simple exercise or question to test understanding"}}"""
 
     try:
         response = await anthropic_client.chat.completions.create(
-            model=OPENROUTER_MODEL, max_tokens=200, temperature=0.4,
+            model=OPENROUTER_MODEL, max_tokens=500, temperature=0.4,
             extra_body={"thinking": False},
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -714,12 +772,8 @@ OUTPUT ONLY THIS JSON STRUCTURE, NOTHING ELSE:
         text = response.choices[0].message.content.strip()
         data = extract_json_from_response(text)
         if not data:
-            data = {
-                "concept": "Large Language Model Architecture",
-                "pedagogical_focus": "How transformers and attention mechanisms work",
-                "assert_template": "Write assertions that verify the core behaviour of the implementation."
-            }
-            print("📋 [Planner fallback]: Using default topic")
+            data = random.choice(FALLBACK_TOPICS)
+            print("📋 [Planner fallback]: Using random fallback topic")
         print(f"🎯 Concept selected: '{data.get('concept')}'")
         return data
     except Exception as e:
@@ -806,7 +860,7 @@ Return a JSON object with keys "project_title" and "subtasks" (array of 7 object
 """
     try:
         response = await anthropic_client.chat.completions.create(
-            model=OPENROUTER_MODEL, max_tokens=800, temperature=0.3,
+            model=OPENROUTER_MODEL, max_tokens=1500, temperature=0.3,
             messages=[{"role": "user", "content": prompt}]
         )
         text = response.choices[0].message.content.strip()
@@ -1947,7 +2001,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
                     (new_topic,)
                 )
                 await db.commit()
-            reply = f"Got it! Your learning topic is now set to: {new_topic}. Your next morning digest will be about this topic."
+            reply = f"Got it! Your learning topic is now: *{new_topic}*\nI'll teach you concepts from this domain daily. Type SET TOPIC: anything to change it anytime — it can be literally any subject."
         else:
             reply = "⚠️ Usage: SET TOPIC: <your topic here>\nExample: SET TOPIC: Reinforcement Learning"
         await loop.run_in_executor(None, lambda: send_whatsapp(reply))
@@ -1972,15 +2026,23 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             await loop.run_in_executor(None, lambda: send_whatsapp("⚠️ Usage: EXPLAIN: <concept>\nExample: EXPLAIN: transformer attention"))
             return Response(content="<Response></Response>", media_type="text/xml")
         try:
-            explain_prompt = (
-                "You are a technical educator. Explain concepts clearly for a developer learning AI and software engineering. "
-                "Keep explanations under 1000 characters total so they fit in WhatsApp. "
-                "Always include: one plain English explanation, one real-world analogy, and one minimal code example if relevant.\n\n"
-                f"Explain this concept clearly: {concept_to_explain}"
-            )
+            explain_system = """You are a world-class educator who can explain any concept
+from any field — science, math, history, coding, philosophy, economics,
+psychology, engineering, art, music, or anything else.
+
+When explaining:
+1. Start with a plain English explanation anyone can understand
+2. Give one memorable real-world analogy
+3. Give one concrete example or mini exercise
+4. Keep the total response under 1400 characters so it fits in WhatsApp
+
+You are not limited to any domain. Explain whatever the user asks."""
             explain_response = await anthropic_client.chat.completions.create(
-                model=OPENROUTER_MODEL, max_tokens=400, temperature=0.3,
-                messages=[{"role": "user", "content": explain_prompt}]
+                model=OPENROUTER_MODEL, max_tokens=500, temperature=0.3,
+                messages=[
+                    {"role": "system", "content": explain_system},
+                    {"role": "user", "content": f"Explain this concept clearly: {concept_to_explain}"},
+                ]
             )
             explanation = explain_response.choices[0].message.content.strip()
             await loop.run_in_executor(None, lambda: send_whatsapp(explanation))
