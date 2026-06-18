@@ -1841,6 +1841,58 @@ async def send_weekly_report():
 # ==========================================
 # 13. MORNING DIGEST ENDPOINT
 # ==========================================
+def enforce_content_limits(text: str, max_items: int = 5, max_chars: int = 7000) -> str:
+    """
+    Hard-cap the number of news/update items and total length.
+    Runs after LLM generation, before QA check.
+    """
+    lines = text.split('\n')
+
+    item_count = 0
+    output_lines = []
+    in_updates_section = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Detect updates section header
+        if 'DAILY UPDATES' in stripped.upper() or 'NEWS' in stripped.upper():
+            in_updates_section = True
+
+        # Detect learning section — stop counting items
+        if 'LEARN' in stripped.upper() or 'PROJECT' in stripped.upper():
+            in_updates_section = False
+
+        # Count items in updates section only
+        is_item = (
+            stripped.startswith('•') or
+            stripped.startswith('-') or
+            stripped.startswith('*') or
+            (len(stripped) > 2 and stripped[0].isdigit() and stripped[1] in '.)')
+        )
+
+        if in_updates_section and is_item:
+            item_count += 1
+            if item_count > max_items:
+                continue  # skip items beyond the limit
+
+        output_lines.append(line)
+
+    result = '\n'.join(output_lines)
+
+    # Hard cap total length
+    if len(result) > max_chars:
+        result = result[:max_chars]
+        # Find last complete sentence
+        last_period = result.rfind('.')
+        if last_period > max_chars * 0.8:
+            result = result[:last_period + 1]
+        result += "\n\n_(Content trimmed for delivery)_"
+
+    print(f"✅ Content enforcer: {item_count} items found, capped at {max_items}. Final size: {len(result)} chars")
+    return result
+
+
 async def run_morning_digest():
     await _log_job("run_morning_digest", "started")
     try:
@@ -1903,6 +1955,7 @@ async def run_morning_digest():
                 final_text, reference_code = await generate_daily_payload(
                     news_context, skill_level, exclusions, planner_context, project_context, feedback_loop_msg=feedback
                 )
+                final_text = enforce_content_limits(final_text)
                 is_valid_run, feedback = await run_qa_critic(final_text, reference_code)
                 if is_valid_run:
                     break
