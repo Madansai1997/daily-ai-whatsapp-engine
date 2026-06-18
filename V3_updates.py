@@ -194,6 +194,13 @@ def init_db_tables():
         value TEXT,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
+    cursor.execute('''CREATE TABLE IF NOT EXISTS digest_cache (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT,
+        content TEXT,
+        generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        sent INTEGER DEFAULT 0)''')
+
     conn.commit()
     conn.close()
     print("✅ State Engine: All database tables verified and ready.")
@@ -560,10 +567,10 @@ def fetch_live_internet_updates() -> list[dict]:
     print("🕷️ Ingestion: Scraping from DuckDuckGo...")
     try:
         import socket
-        socket.setdefaulttimeout(5)
+        socket.setdefaulttimeout(3)
         res = requests.get(
             f"https://html.duckduckgo.com/html/?q={unified_query.replace(' ', '+')}",
-            headers={"User-Agent": "Mozilla/5.0 (compatible; DailyAIBot/1.0)"}, timeout=5
+            headers={"User-Agent": "Mozilla/5.0 (compatible; DailyAIBot/1.0)"}, timeout=3
         )
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
@@ -1740,14 +1747,31 @@ async def run_morning_digest():
     await _log_job("run_morning_digest", "started")
     try:
         skill_level, recent_topics, _ = await get_db_state()
+
+        # Planner must run first — RAG needs the concept it returns
         planner_context = await run_curriculum_planner(skill_level, recent_topics)
         concept = planner_context.get("concept", "Agentic Scaffolding Testing")
 
         loop = asyncio.get_running_loop()
-        raw_news = await loop.run_in_executor(None, fetch_live_internet_updates)
-        await save_articles_to_knowledge_store(raw_news)
 
-        relevant_articles = await retrieve_relevant_context(concept, limit=3)
+        async def _fetch_and_save_news():
+            articles = await loop.run_in_executor(None, fetch_live_internet_updates)
+            await save_articles_to_knowledge_store(articles)
+            return articles
+
+        # News fetch + RAG retrieval run in parallel
+        raw_news, relevant_articles = await asyncio.gather(
+            _fetch_and_save_news(),
+            retrieve_relevant_context(concept, limit=3),
+            return_exceptions=True,
+        )
+        if isinstance(raw_news, Exception):
+            print(f"⚠️ News fetch failed: {raw_news}")
+            raw_news = []
+        if isinstance(relevant_articles, Exception):
+            print(f"⚠️ RAG retrieval failed: {relevant_articles}")
+            relevant_articles = []
+
         if relevant_articles:
             context_blocks = [f"[{i+1}] Title: {a['title']}\nURL: {a['url']}\nSnippet: {a['content']}" for i, a in enumerate(relevant_articles)]
         else:
@@ -1767,7 +1791,7 @@ async def run_morning_digest():
             )
             await db.commit()
 
-        max_retries = 3
+        max_retries = 1
         current_attempt = 1
         feedback = ""
         final_text = ""
@@ -1793,8 +1817,24 @@ async def run_morning_digest():
 
         if is_valid_run:
             await log_sent_concept(concept, final_text)
+            today_str = date.today().isoformat()
+            # Save to cache before sending
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "INSERT INTO digest_cache (date, content, sent) VALUES (?, ?, 0)",
+                    (today_str, final_text)
+                )
+                await db.commit()
+            print(f"💾 [Digest Cache]: Saved digest for {today_str}")
             try:
                 await loop.run_in_executor(None, lambda: send_whatsapp_chunked(final_text))
+                # Mark as sent in cache
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE digest_cache SET sent=1 WHERE date=? AND sent=0",
+                        (today_str,)
+                    )
+                    await db.commit()
                 # Difficulty feedback prompt — separate message so digest stays clean
                 feedback_prompt = (
                     f"📐 *Quick feedback:* Was today's concept (*{concept}*) the right difficulty?\n"
@@ -2197,9 +2237,34 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
 
     if user_message_clean in ["digest", "refresh", "force digest"]:
         await log_chat_message("user", user_message)
-        print("⚡ [Manual Override]: Triggering morning engine...")
-        digest_status = await run_morning_digest()
-        await log_chat_message("assistant", f"Manual trigger done. Status: {digest_status.get('status')}")
+        today_str = date.today().isoformat()
+        # Check cache for today's pre-generated digest
+        cached_content = None
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT content FROM digest_cache WHERE date=? AND sent=0 ORDER BY generated_at DESC LIMIT 1",
+                (today_str,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    cached_content = row[0]
+        if cached_content:
+            print("⚡ [Cache HIT]: Sending pre-generated digest")
+            await loop.run_in_executor(None, lambda: send_whatsapp_chunked(cached_content))
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE digest_cache SET sent=1 WHERE date=? AND sent=0",
+                    (today_str,)
+                )
+                await db.commit()
+            await log_chat_message("assistant", "Cache HIT: sent pre-generated digest instantly")
+        else:
+            print("⚡ [Cache MISS]: Generating fresh digest, ~30 seconds...")
+            await loop.run_in_executor(None, lambda: send_whatsapp_chunked(
+                "⚡ Digest requested! Generating your update now — arrives in ~30 seconds..."
+            ))
+            digest_status = await run_morning_digest()
+            await log_chat_message("assistant", f"Cache MISS: fresh digest done. Status: {digest_status.get('status')}")
         return Response(content="<Response></Response>", media_type="text/xml")
 
     if user_message_clean in ["weekly report", "report", "my progress"]:
