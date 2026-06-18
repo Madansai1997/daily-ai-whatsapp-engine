@@ -252,14 +252,39 @@ def _split_message(text: str, limit: int = 1500) -> list[str]:
     return parts
 
 
-def send_whatsapp_chunked(body: str):
-    """Send a WhatsApp message, splitting into multiple parts if over 1500 chars."""
-    parts = _split_message(body, limit=1500)
-    total = len(parts)
-    client = Client(TWILIO_SID, TWILIO_TOKEN)
-    for i, part in enumerate(parts, 1):
-        text = part + (f" ({i}/{total})" if total > 1 else "")
-        client.messages.create(body=text, from_=FROM_WHATSAPP, to=TO_WHATSAPP)
+def send_whatsapp_chunked(body: str, to_number: str = None, from_number: str = None):
+    """Send a WhatsApp message, splitting into chunks if over 1500 chars."""
+    import time
+    MAX_CHARS = 1500
+    to_number = to_number or TO_WHATSAPP
+    from_number = from_number or FROM_WHATSAPP
+    twilio_client = Client(TWILIO_SID, TWILIO_TOKEN)
+
+    if len(body) <= MAX_CHARS:
+        twilio_client.messages.create(body=body, from_=from_number, to=to_number)
+        print(f"✅ Sent single message: {len(body)} chars")
+        return
+
+    # Split into chunks at sentence boundaries
+    chunks = []
+    remaining = body
+    while len(remaining) > MAX_CHARS:
+        split_at = remaining.rfind('. ', 0, MAX_CHARS)
+        if split_at == -1:
+            split_at = remaining.rfind(' ', 0, MAX_CHARS)
+        if split_at == -1:
+            split_at = MAX_CHARS
+        chunks.append(remaining[:split_at + 1].strip())
+        remaining = remaining[split_at + 1:].strip()
+    if remaining:
+        chunks.append(remaining)
+
+    total = len(chunks)
+    for i, chunk in enumerate(chunks, 1):
+        part_label = f"\n\n({i}/{total})" if total > 1 else ""
+        twilio_client.messages.create(body=chunk + part_label, from_=from_number, to=to_number)
+        print(f"✅ Sent chunk {i}/{total}: {len(chunk)} chars")
+        time.sleep(1)
 
 
 @app.get("/")
@@ -614,23 +639,26 @@ async def run_curriculum_planner(skill_level, history_concepts):
             "assert_template": "Write assertions that specifically test the areas you previously struggled with."
         }
 
-    prompt = f"""
-You are a Curriculum Planner for an AI/Data Science learner.
-Student skill track: {skill_level}
-Previously covered concepts: {history_concepts}
+    exclusions = history_concepts
+    system_prompt = """You are a curriculum planner. Respond with ONLY a JSON object.
+No explanation. No markdown. No code fences. No preamble. No extra text whatsoever.
+Your entire response must be valid JSON starting with { and ending with }.
+Example of the ONLY acceptable response format:
+{"concept": "Python Functions", "pedagogical_focus": "How to define and call functions", "assert_template": "def add(a,b): return a+b"}"""
 
-Pick the next best concept to learn. It can be ANYTHING relevant to AI, machine learning, data science, or software engineering — for example: neural network architectures, LLM fine-tuning, vector databases, attention mechanisms, reinforcement learning, data pipelines, MLOps, statistical concepts, Python libraries, agentic systems, computer vision, NLP, evaluation methods, etc. Do NOT restrict yourself to any fixed list. Choose something fresh that hasn't been covered yet and builds on the student's existing knowledge.
+    user_prompt = f"""Return a JSON object for a {skill_level} student.
+Previously covered: {exclusions if exclusions else "none"}.
+Choose ONE foundational concept not yet covered from AI, machine learning, data science, or software engineering.
+Respond with ONLY this JSON, nothing else:
+{{"concept": "...", "pedagogical_focus": "...", "assert_template": "..."}}"""
 
-You MUST respond with ONLY valid JSON. No explanation, no markdown, no code fences, no preamble.
-Start your response with {{ and end with }}. If you cannot generate the content, return this exact JSON:
-{{"topic": "LLM Architecture", "subtopic": "Transformers", "difficulty": "intermediate"}}
-
-Return a JSON object with keys: "concept", "pedagogical_focus", "assert_template".
-"""
     try:
         response = await anthropic_client.chat.completions.create(
             model=OPENROUTER_MODEL, max_tokens=300, temperature=0.4,
-            messages=[{"role": "user", "content": prompt}]
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
         )
         text = response.choices[0].message.content.strip()
         plan_match = re.search(r'<plan>\s*(.*?)\s*</plan>', text, re.DOTALL | re.IGNORECASE)
@@ -1053,7 +1081,7 @@ async def run_qa_critic(content: str, reference_code: str) -> tuple[bool, str]:
 
     has_assert_syntax = len(assert_lines) >= 3
     char_length = len(content)
-    within_twilio_limit = char_length <= 1600
+    within_twilio_limit = char_length <= 7500  # chunker handles splitting; check pre-split total
 
     lines = content.split('\n')
     is_in_update_block = False
@@ -1071,7 +1099,7 @@ async def run_qa_critic(content: str, reference_code: str) -> tuple[bool, str]:
     if not has_updates: errors.append("Missing '*🔴 REGULAR DAILY AI UPDATES*' header.")
     if not has_learnings: errors.append("Missing '*📘 WHAT I NEED TO LEARN & PROJECTS TO WORK ON*' header.")
     if not has_assert_syntax: errors.append(f"Found {len(assert_lines)} assertions, expected at least 3.")
-    if not within_twilio_limit: errors.append(f"Payload out of size bounds ({char_length}/1600 chars).")
+    if not within_twilio_limit: errors.append(f"Payload out of size bounds ({char_length}/7500 chars).")
     if not (3 <= update_count <= 8): errors.append(f"Density check: Found {update_count} updates, expected 5-7.")
 
     sandbox_passed = False
@@ -1099,7 +1127,7 @@ async def run_qa_critic(content: str, reference_code: str) -> tuple[bool, str]:
     print(f"  - Sandbox Assert Execution:      {'PASS' if sandbox_passed else 'FAIL'}")
     print(f"  - Assertion Quality Score:       {quality_result.get('average_score',0):.1f}/10 ({quality_result.get('verdict','SKIP')})")
     print(f"  - Mutation Test Kill Rate:       {mutation_result.get('kill_rate',0):.0f}% ({mutation_result.get('verdict','SKIP')})")
-    print(f"  - Twilio Message Size Safety:    {char_length}/1600 chars ({'PASS' if within_twilio_limit else 'FAIL'})")
+    print(f"  - Twilio Message Size Safety:    {char_length}/7500 chars ({'PASS' if within_twilio_limit else 'FAIL'})")
     print(f"  - Density Metric:                {update_count} updates processed")
 
     if not errors:
@@ -1158,7 +1186,7 @@ CRITICAL SIZE CONSTRAINT: Content inside <whatsapp_payload> must be strictly und
 Structure the <whatsapp_payload> EXACTLY as:
 
 *🔴 REGULAR DAILY AI UPDATES*
-(5 to 7 high-signal, short, single-sentence points)
+(Return EXACTLY 5 news items maximum. Not 6, not 7, not 20. Exactly 5. Each item must be under 100 characters.)
 
 *📘 WHAT I NEED TO LEARN & PROJECTS TO WORK ON*
 - *Core Concept to Master Today*: {concept} — {pedagogical_focus}
