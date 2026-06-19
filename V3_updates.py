@@ -1308,6 +1308,20 @@ CRITICAL ASSERTION RULES:
 4. Assertions must test actual concept logic
 
 Structure the <reference_implementation> as valid Python code with function definitions.
+
+CRITICAL OUTPUT FORMAT: Wrap your entire final answer in
+<whatsapp_payload> and </whatsapp_payload> tags.
+Put NOTHING outside these tags — no reasoning, no explanation,
+no preamble. Everything outside the tags will be discarded.
+
+Example:
+<whatsapp_payload>
+🔴 REGULAR DAILY AI UPDATES
+[content here]
+
+📘 WHAT I NEED TO LEARN & PROJECTS TO WORK ON
+[content here]
+</whatsapp_payload>
 """
 
     if feedback_loop_msg:
@@ -1315,6 +1329,7 @@ Structure the <reference_implementation> as valid Python code with function defi
 
     response = await anthropic_client.chat.completions.create(
         model=OPENROUTER_MODEL, max_tokens=2000, temperature=0.2,
+        extra_body={"thinking": False},
         messages=[{"role": "user", "content": prompt}]
     )
 
@@ -1841,6 +1856,54 @@ async def send_weekly_report():
 # ==========================================
 # 13. MORNING DIGEST ENDPOINT
 # ==========================================
+def extract_final_payload(raw_response: str) -> str:
+    """
+    Strips reasoning/thinking text from model output.
+    Only keeps content between <whatsapp_payload> tags if present,
+    otherwise strips common reasoning patterns.
+    """
+    if not raw_response:
+        return ""
+
+    text = raw_response.strip()
+
+    # Method 1: If wrapped in <whatsapp_payload> tags, extract only that
+    if "<whatsapp_payload>" in text and "</whatsapp_payload>" in text:
+        start = text.find("<whatsapp_payload>") + len("<whatsapp_payload>")
+        end = text.find("</whatsapp_payload>")
+        return text[start:end].strip()
+
+    # Method 2: If reasoning leaked without tags, detect and strip it
+    reasoning_markers = [
+        "We need to", "We must", "Let's", "I'll produce",
+        "Thus we need", "Probably each", "We'll design",
+        "Let's estimate", "We need assertions"
+    ]
+
+    lines = text.split('\n')
+    content_start_idx = 0
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        # Find where actual content starts (emoji headers are reliable markers)
+        if stripped.startswith('🔴') or stripped.startswith('📘') or stripped.startswith('📊'):
+            content_start_idx = i
+            break
+        # If we hit a reasoning marker, keep scanning past it
+        if any(stripped.startswith(marker) for marker in reasoning_markers):
+            continue
+
+    cleaned = '\n'.join(lines[content_start_idx:])
+
+    # Safety check: if cleaned result is still suspiciously long with
+    # reasoning phrases, it's a hard failure — return empty so fallback kicks in
+    if any(marker in cleaned[:200] for marker in reasoning_markers):
+        print("⚠️ Reasoning leak detected even after cleaning — rejecting payload")
+        return ""
+
+    return cleaned.strip()
+
+
 def enforce_content_limits(text: str, max_items: int = 5, max_chars: int = 7000) -> str:
     """
     Hard-cap the number of news/update items and total length.
@@ -1956,6 +2019,16 @@ async def run_morning_digest():
                     news_context, skill_level, exclusions, planner_context, project_context, feedback_loop_msg=feedback
                 )
                 final_text = enforce_content_limits(final_text)
+                final_text = extract_final_payload(final_text)
+                if not final_text or len(final_text) < 50:
+                    print("⚠️ Creator Agent payload extraction failed — using safe fallback")
+                    final_text = (
+                        "🔴 *REGULAR DAILY AI UPDATES*\n"
+                        "Content generation had an issue today. Check back tomorrow!\n\n"
+                        "📘 *WHAT I NEED TO LEARN*\n"
+                        "Today's concept: " + concept + "\n"
+                        "Take a moment to research this topic on your own today."
+                    )
                 is_valid_run, feedback = await run_qa_critic(final_text, reference_code)
                 if is_valid_run:
                     break
