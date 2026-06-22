@@ -2250,7 +2250,7 @@ async def handle_onboarding(incoming_message: str) -> str:
 # ==========================================
 # 14. WHATSAPP WEBHOOK
 # ==========================================
-async def process_message(user_message: str) -> str:
+async def process_message(user_message: str, source: str = "whatsapp") -> str:
     """
     Core intent-routing logic, shared by the WhatsApp webhook and the /chat-message web UI.
     Returns the reply text, or None when the block already sent its own message(s) directly
@@ -2291,11 +2291,29 @@ async def process_message(user_message: str) -> str:
         save_setting("topic", "")
         return "♻️ Profile reset! Send any message to start fresh."
 
-    onboarded = get_setting("onboarded", "0")
-    if onboarded != "1":
-        return await handle_onboarding(user_message)
+    if source == "whatsapp":
+        onboarded = get_setting("onboarded", "0")
+        if onboarded != "1":
+            return await handle_onboarding(user_message)
 
     # ── Normal command processing continues below ──
+
+    # =========================================================================
+    # WEB UI — natural greeting (bypasses the learning-engine help menu)
+    # =========================================================================
+    if source == "web" and user_message_clean in [
+        "hi", "hello", "hey", "how are you",
+        "hello jarvis", "hi jarvis", "hey jarvis",
+        "hello jarvis, how are you", "how are you doing"
+    ]:
+        hour = dt.datetime.now().hour
+        time_of_day = "morning" if hour < 12 else "afternoon" if hour < 17 else "evening"
+        return (
+            f"Hey Madan! Good {time_of_day}. I'm running well — "
+            f"all systems online. What do you need help with? "
+            f"I can check your emails, set reminders, research something, "
+            f"or just have a conversation."
+        )
 
     # =========================================================================
     # GREETING / HELP MENU
@@ -2896,14 +2914,27 @@ You are not limited to any domain. Explain whatever the user asks."""
         context_str = "\n".join([f"- {c['content']}" for c in relevant_context])
         facts_str = "\n".join([f"- {f}" for f in user_facts])
 
-        system_msg = {
-            "role": "system",
-            "content": (
+        if source == "web":
+            system_prompt = (
+                f"You are JARVIS, Madan's personal AI executive assistant. "
+                f"You are helpful, direct, and conversational. "
+                f"You help with emails, reminders, research, scheduling, "
+                f"and general questions. "
+                f"Facts about Madan:\n{facts_str}\n\n"
+                f"Context:\n{context_str}\n\n"
+                f"RULES: Be natural and conversational. "
+                f"2-4 sentences for simple questions, more if needed. "
+                f"Never mention being a learning engine or curriculum coach. "
+                f"If Madan asks about learning or study topics specifically, "
+                f"you can help with that — but do not default to it."
+            )
+        else:
+            system_prompt = (
                 f"You are the user's Curriculum Coach and AI Architect.\n"
                 f"Facts about user:\n{facts_str}\n\nContext:\n{context_str}\n\n"
                 f"RULES: 2-4 sentences max. Use asterisks (*) for bold. End with one open-ended learning question."
-            ),
-        }
+            )
+        system_msg = {"role": "system", "content": system_prompt}
         response = await anthropic_client.chat.completions.create(
             model=OPENROUTER_MODEL, max_tokens=800,
             messages=[system_msg] + chat_history + [{"role": "user", "content": user_message}]
@@ -2944,7 +2975,7 @@ async def chat_message(request: Request):
     if not user_msg:
         return JSONResponse({"reply": "Please type a message."})
     try:
-        reply = await process_message(user_msg)
+        reply = await process_message(user_msg, source="web")
         return JSONResponse({"reply": reply or "✅ Done — check WhatsApp for details."})
     except Exception as e:
         print(f"❌ chat-message error: {e}")
