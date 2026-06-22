@@ -10,13 +10,28 @@ import re
 import base64
 import datetime as dt
 from datetime import date
+from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Response, Form
 from twilio.rest import Client
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from contextlib import asynccontextmanager
 from openai import AsyncOpenAI
+
+load_dotenv()
+
 from rag_engine import retrieve_relevant_context
+from email_triage import (
+    init_email_tables,
+    check_inbox_and_notify,
+    get_active_draft,
+    activate_next_draft,
+    delete_draft,
+    count_pending_drafts,
+    get_can_wait_count,
+    approve_draft,
+    edit_draft,
+)
 
 # Core Credentials
 TWILIO_SID = os.getenv("TWILIO_SID")
@@ -207,6 +222,7 @@ def init_db_tables():
     print("✅ State Engine: All database tables verified and ready.")
 
 init_db_tables()
+init_email_tables()
 
 
 # ==========================================
@@ -262,6 +278,7 @@ async def lifespan(app: FastAPI):
     for r in SCHEDULE_CONFIG["reminders"]:
         scheduler.add_job(send_checkin_reminder, "cron", hour=r["hour"], minute=0, kwargs={"reminder_number": r["number"]})
     scheduler.add_job(send_weekly_report, "cron", day_of_week="sun", hour=SCHEDULE_CONFIG["weekly_report_hour"], minute=0)
+    scheduler.add_job(lambda: asyncio.ensure_future(check_inbox_and_notify(call_llm, send_whatsapp_chunked)), "interval", minutes=15)
     scheduler.start()
     app.state.scheduler = scheduler
     reminder_times = ", ".join([f"{r['hour']}:00" for r in SCHEDULE_CONFIG["reminders"]])
@@ -2203,7 +2220,7 @@ async def handle_onboarding(incoming_message: str) -> str:
 @app.post("/whatsapp-webhook")
 async def incoming_whatsapp_reply(Body: str = Form(...)):
     user_message = Body.strip()
-    user_message_clean = user_message.lower().strip()
+    user_message_clean = user_message.lower().strip().replace("’", "'")
     loop = asyncio.get_running_loop()
     today = date.today().isoformat()
 
@@ -2211,6 +2228,15 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
 
     def send_whatsapp(msg):
         send_whatsapp_chunked(msg)
+
+    async def advance_email_queue():
+        """Move to the next queued priority draft, or send a wrap-up if none are left."""
+        activated = await activate_next_draft(send_whatsapp)
+        if not activated:
+            can_wait = await get_can_wait_count()
+            msg = f"✅ *All priority emails handled.* {can_wait} non-urgent email(s) also came in."
+            await log_chat_message("assistant", msg)
+            await loop.run_in_executor(None, lambda: send_whatsapp(msg))
 
     # =========================================================================
     # ONBOARDING GATE — runs before every other command
@@ -2255,6 +2281,61 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             "*end quiz* — End quiz early"
         )
         await loop.run_in_executor(None, lambda: send_whatsapp(help_msg))
+        return Response(content="<Response></Response>", media_type="text/xml")
+
+    # =========================================================================
+    # EMAIL TRIAGE — approve the active draft reply, then advance the queue
+    # =========================================================================
+    if user_message_clean in ["approve email", "yes email"]:
+        await log_chat_message("user", user_message)
+        draft = await get_active_draft()
+        if not draft:
+            await loop.run_in_executor(None, lambda: send_whatsapp("⚠️ *No active email draft.*"))
+            return Response(content="<Response></Response>", media_type="text/xml")
+        success, report = await approve_draft(draft["id"])
+        msg = f"📤 *Email sent to {draft['sender']}.*" if success else f"❌ *Send failed:* {report}"
+        await log_chat_message("assistant", msg)
+        await loop.run_in_executor(None, lambda: send_whatsapp(msg))
+        if success:
+            await advance_email_queue()
+        return Response(content="<Response></Response>", media_type="text/xml")
+
+    # =========================================================================
+    # EMAIL TRIAGE — discard the active draft entirely, then advance the queue
+    # =========================================================================
+    if user_message_clean == "don't send":
+        await log_chat_message("user", user_message)
+        draft = await get_active_draft()
+        if not draft:
+            await loop.run_in_executor(None, lambda: send_whatsapp("⚠️ *No active email draft.*"))
+            return Response(content="<Response></Response>", media_type="text/xml")
+        await delete_draft(draft["id"])
+        remaining = await count_pending_drafts()
+        can_wait = await get_can_wait_count()
+        msg = f"🗑️ *Deleted.* {remaining} priority email(s) left, {can_wait} non-priority email(s)."
+        await log_chat_message("assistant", msg)
+        await loop.run_in_executor(None, lambda: send_whatsapp(msg))
+        await advance_email_queue()
+        return Response(content="<Response></Response>", media_type="text/xml")
+
+    # =========================================================================
+    # EMAIL TRIAGE — edit the active draft reply
+    # Usage: "edit: <new reply text>"
+    # =========================================================================
+    if user_message_clean.startswith("edit:"):
+        await log_chat_message("user", user_message)
+        new_text = user_message[len("edit:"):].strip()
+        draft = await get_active_draft()
+        if not draft:
+            await loop.run_in_executor(None, lambda: send_whatsapp("⚠️ *No active email draft.*"))
+            return Response(content="<Response></Response>", media_type="text/xml")
+        if not new_text:
+            await loop.run_in_executor(None, lambda: send_whatsapp("⚠️ Usage: EDIT: <your new reply text>"))
+            return Response(content="<Response></Response>", media_type="text/xml")
+        await edit_draft(draft["id"], new_text)
+        msg = f"✏️ *Draft updated.*\n\n{new_text}\n\nReply *APPROVE EMAIL* to send it, or *DON'T SEND* to discard it."
+        await log_chat_message("assistant", msg)
+        await loop.run_in_executor(None, lambda: send_whatsapp(msg))
         return Response(content="<Response></Response>", media_type="text/xml")
 
     # =========================================================================

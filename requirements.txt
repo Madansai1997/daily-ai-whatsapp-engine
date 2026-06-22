@@ -8,3 +8,5 @@ python-dotenv
 python-multipart
 openai
 aiosqlite
+google-api-python-client
+google-auth
