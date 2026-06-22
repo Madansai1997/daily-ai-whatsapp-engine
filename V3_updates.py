@@ -39,6 +39,7 @@ from reminders import (
     init_reminder_tables,
     register_all_active_reminders,
     create_reminder_from_intent,
+    get_active_reminders,
 )
 
 # Core Credentials
@@ -2777,7 +2778,22 @@ You are not limited to any domain. Explain whatever the user asks."""
     # =========================================================================
     # UPGRADE INTENT — SURGICAL PATCH
     # =========================================================================
-    is_upgrade_intent = any(k in user_message_clean for k in ["change", "update", "set", "add", "modify", "upgrade", "fix", "scheduler", "timings", "implement"])
+    # Only trigger code patching for explicit code/system change requests
+    UPGRADE_PHRASES = [
+        "upgrade yourself",
+        "modify your code",
+        "update your code",
+        "fix your code",
+        "change your code",
+        "patch yourself",
+        "update the scheduler timings",
+        "change the scheduler",
+        "implement this change",
+        "modify the bot",
+        "update the bot",
+        "change the bot",
+    ]
+    is_upgrade_intent = any(phrase in user_message_clean for phrase in UPGRADE_PHRASES)
 
     if is_upgrade_intent:
         await log_chat_message("user", user_message)
@@ -2901,6 +2917,31 @@ You are not limited to any domain. Explain whatever the user asks."""
             success, msg = await create_reminder_from_intent(app_scheduler, memory_reminder, send_whatsapp)
         await log_chat_message("assistant", msg)
         return msg
+
+    # =========================================================================
+    # REMINDERS — list pending reminders
+    # =========================================================================
+    if user_message_clean in [
+        "my reminders", "list reminders", "show reminders",
+        "what are my reminders", "pending reminders"
+    ]:
+        await log_chat_message("user", user_message)
+        rows = await get_active_reminders()
+        if not rows:
+            return "📭 No pending reminders."
+
+        def _format_when(row):
+            if row["kind"] == "once":
+                return dt.datetime.fromisoformat(row["run_at"]).strftime("%d %b at %I:%M %p")
+            elif row["kind"] == "daily":
+                return f"every day at {row['hour']:02d}:{row['minute']:02d}"
+            else:
+                return f"every {row['day_of_week']} at {row['hour']:02d}:{row['minute']:02d}"
+
+        lines = [f"{i+1}. {row['text']} — {_format_when(row)}" for i, row in enumerate(rows)]
+        result = f"⏰ *Your reminders ({len(rows)}):*\n\n" + "\n".join(lines)
+        await log_chat_message("assistant", result)
+        return result
 
     # =========================================================================
     # GENERAL CONVERSATIONAL CHAT
