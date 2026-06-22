@@ -58,8 +58,34 @@ def _fetch_weather_sync(include_humidity: bool) -> dict:
     return response.json()
 
 
-async def get_weather() -> str:
-    """Full detailed weather message for an on-demand WhatsApp/web query."""
+JARVIS_WEATHER_SYSTEM_PROMPT = (
+    "You are JARVIS, Tony Stark's AI, briefing Madan on the weather the way you would "
+    "in the suit — composed, dry wit, a little playful, never robotic. Use only the "
+    "facts given. 2-3 sentences max. No headers, no bullet points, no markdown, no "
+    "emoji walls — just speak naturally, like you're talking to him."
+)
+
+
+async def _phrase_like_jarvis(facts: str, call_llm_fn) -> str | None:
+    """Ask the LLM to turn raw weather facts into a JARVIS-style spoken briefing.
+    Returns None on failure so the caller can fall back to the plain template."""
+    if not call_llm_fn:
+        return None
+    try:
+        return await call_llm_fn(JARVIS_WEATHER_SYSTEM_PROMPT, facts, max_tokens=200)
+    except Exception as e:
+        print(f"⚠️ [weather_agent] JARVIS phrasing failed, falling back to plain text: {e}")
+        return None
+
+
+async def get_weather(call_llm_fn=None) -> str:
+    """Full weather message for an on-demand WhatsApp/web query.
+
+    call_llm_fn (optional): the app's call_llm(system_prompt, user_prompt) — injected
+    rather than imported directly, since V3_updates.py imports this module (importing
+    back would be circular). Passed in to phrase the facts in JARVIS's voice; without
+    it, falls back to the plain templated message.
+    """
     print("🌤️ [Weather] Fetching Hyderabad weather...")
     try:
         loop = asyncio.get_running_loop()
@@ -79,6 +105,18 @@ async def get_weather() -> str:
             if t.startswith(current_hour_str):
                 humidity = h
                 break
+
+        facts = (
+            f"Location: Hyderabad\n"
+            f"Condition: {condition}\n"
+            f"Temperature: {temp}°C\n"
+            f"Humidity: {humidity if humidity is not None else 'unknown'}%\n"
+            f"Wind speed: {windspeed} km/h"
+        )
+
+        briefing = await _phrase_like_jarvis(facts, call_llm_fn)
+        if briefing:
+            return briefing
 
         lines = [
             "🌤️ *Hyderabad Weather*",

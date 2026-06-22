@@ -45,7 +45,7 @@ try:
     from weather_agent import get_weather, get_weather_brief
 except Exception as e:
     print(f"❌ weather_agent import failed: {e}")
-    async def get_weather():
+    async def get_weather(call_llm_fn=None):
         return "⚠️ Weather agent not available."
     async def get_weather_brief():
         return "Weather unavailable"
@@ -2454,12 +2454,12 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
     # =========================================================================
     # WEATHER — on-demand weather query
     # =========================================================================
-    if user_message_clean in [
-        "weather", "weather today", "whats the weather", "what's the weather",
-        "how's the weather", "temperature", "temp", "climate today",
-    ]:
+    if any(phrase in user_message_clean for phrase in [
+        "weather", "temperature", "climate today",
+        "temp today", "current temp", "what's the temp", "whats the temp",
+    ]):
         await log_chat_message("user", user_message)
-        weather_msg = await get_weather()
+        weather_msg = await get_weather(call_llm)
         await log_chat_message("assistant", weather_msg)
         return weather_msg
 
