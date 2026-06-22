@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+# RUN THIS ON YOUR MAC — not on Render
+"""
+JARVIS Local Bridge
+Run this on your Mac to give JARVIS access
+to your local filesystem.
+Command: python local_bridge.py
+"""
+
+import os
+import time
+import subprocess
+from datetime import datetime
+from pathlib import Path
+
+import requests
+
+# ── CONFIG ──────────────────────────────
+RENDER_URL = "https://YOUR-RENDER-APP.onrender.com"
+POLL_INTERVAL = 10  # seconds between polls
+PROJECT_FOLDER = "/Users/madansaidaram/Desktop/Daily_AI_updates"
+
+# Whitelist of folders the bridge can read
+ALLOWED_FOLDERS = [
+    "/Users/madansaidaram/Desktop/Daily_AI_updates",
+    "/Users/madansaidaram/Desktop",
+    "/Users/madansaidaram/Documents",
+]
+
+# Whitelist of file extensions bridge can read
+ALLOWED_EXTENSIONS = [
+    ".py", ".txt", ".md", ".json",
+    ".csv", ".yaml", ".yml", ".env.example",
+    ".html", ".js", ".css"
+]
+# ─────────────────────────────────────────
+
+
+def is_path_allowed(path: str) -> bool:
+    """Safety check — only read from allowed folders"""
+    abs_path = os.path.abspath(path)
+    return any(
+        abs_path.startswith(folder)
+        for folder in ALLOWED_FOLDERS
+    )
+
+
+def execute_command(command_type: str, payload: str) -> str:
+    try:
+        if command_type == "list_folder":
+            folder = payload or PROJECT_FOLDER
+            if not is_path_allowed(folder):
+                return f"❌ Folder not in allowed list: {folder}"
+
+            items = []
+            for item in sorted(Path(folder).iterdir()):
+                icon = "📁" if item.is_dir() else "📄"
+                size = ""
+                if item.is_file():
+                    s = item.stat().st_size
+                    size = f" ({s:,} bytes)" if s < 1024 else f" ({s//1024}KB)"
+                items.append(f"{icon} {item.name}{size}")
+
+            return (
+                f"📂 *{folder}*\n\n" +
+                "\n".join(items[:30]) +
+                (f"\n... and {len(items)-30} more"
+                 if len(items) > 30 else "")
+            )
+
+        elif command_type == "read_file":
+            filepath = payload
+            if not is_path_allowed(filepath):
+                return f"❌ File not in allowed folder"
+
+            ext = Path(filepath).suffix.lower()
+            if ext not in ALLOWED_EXTENSIONS:
+                return f"❌ File type {ext} not in allowed list"
+
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            if len(content) > 3000:
+                content = content[:3000] + "\n... (truncated)"
+
+            return f"📄 *{Path(filepath).name}*\n\n```\n{content}\n```"
+
+        elif command_type == "search_files":
+            query = payload.lower()
+            results = []
+            for root, dirs, files in os.walk(PROJECT_FOLDER):
+                # Skip hidden and cache folders
+                dirs[:] = [
+                    d for d in dirs
+                    if not d.startswith(".")
+                    and d not in ["__pycache__", "node_modules", ".git"]
+                ]
+                for file in files:
+                    if query in file.lower():
+                        full_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(
+                            full_path, PROJECT_FOLDER
+                        )
+                        results.append(rel_path)
+
+            if not results:
+                return f"No files found matching '{payload}'"
+            return (
+                f"🔍 *Files matching '{payload}':*\n\n" +
+                "\n".join(f"📄 {r}" for r in results[:20])
+            )
+
+        elif command_type == "list_recent_files":
+            files_with_time = []
+            for root, dirs, files in os.walk(PROJECT_FOLDER):
+                dirs[:] = [
+                    d for d in dirs
+                    if not d.startswith(".")
+                    and d not in ["__pycache__", ".git"]
+                ]
+                for file in files:
+                    full_path = os.path.join(root, file)
+                    mtime = os.path.getmtime(full_path)
+                    files_with_time.append((mtime, full_path))
+
+            files_with_time.sort(reverse=True)
+            recent = files_with_time[:10]
+
+            lines = []
+            for mtime, path in recent:
+                rel = os.path.relpath(path, PROJECT_FOLDER)
+                dt_str = datetime.fromtimestamp(mtime).strftime(
+                    "%d %b %H:%M"
+                )
+                lines.append(f"📄 {rel} — {dt_str}")
+
+            return "*Recently modified files:*\n\n" + "\n".join(lines)
+
+        elif command_type == "system_info":
+            result = subprocess.run(
+                ["sw_vers"], capture_output=True, text=True
+            )
+            disk = subprocess.run(
+                ["df", "-h", "/"], capture_output=True, text=True
+            )
+            return (
+                f"💻 *Mac System Info*\n\n"
+                f"{result.stdout}\n"
+                f"*Disk:*\n{disk.stdout}"
+            )
+
+        else:
+            return f"Unknown command: {command_type}"
+
+    except Exception as e:
+        return f"❌ Error executing {command_type}: {str(e)}"
+
+
+def poll_and_execute():
+    print(f"🤖 JARVIS Local Bridge started")
+    print(f"📡 Polling: {RENDER_URL}")
+    print(f"📁 Project: {PROJECT_FOLDER}")
+    print(f"⏱️  Interval: {POLL_INTERVAL}s")
+    print("─" * 40)
+
+    while True:
+        try:
+            # Poll for pending commands
+            r = requests.get(
+                f"{RENDER_URL}/local-queue/pending",
+                timeout=10
+            )
+
+            if r.status_code == 200:
+                commands = r.json().get("commands", [])
+
+                for cmd in commands:
+                    command_id = cmd["id"]
+                    command_type = cmd["command_type"]
+                    payload = cmd["payload"]
+
+                    print(f"▶️  Executing: {command_type} | {payload}")
+                    result = execute_command(command_type, payload)
+
+                    # Post result back
+                    requests.post(
+                        f"{RENDER_URL}/local-queue/result",
+                        json={
+                            "command_id": command_id,
+                            "result": result,
+                            "status": "completed"
+                        },
+                        timeout=10
+                    )
+                    print(f"✅ Done: {command_type}")
+
+        except requests.exceptions.ConnectionError:
+            print(f"⚠️  Cannot reach Render — retrying in {POLL_INTERVAL}s")
+        except Exception as e:
+            print(f"❌ Bridge error: {e}")
+
+        time.sleep(POLL_INTERVAL)
+
+
+if __name__ == "__main__":
+    poll_and_execute()

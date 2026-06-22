@@ -41,6 +41,7 @@ from reminders import (
     create_reminder_from_intent,
     get_active_reminders,
 )
+from weather_agent import get_weather, get_weather_brief
 
 # Core Credentials
 TWILIO_SID = os.getenv("TWILIO_SID")
@@ -249,6 +250,15 @@ def init_db_tables():
         generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         sent INTEGER DEFAULT 0)''')
 
+    cursor.execute('''CREATE TABLE IF NOT EXISTS local_command_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        command_type TEXT,
+        payload TEXT,
+        status TEXT DEFAULT 'pending',
+        result TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        completed_at DATETIME)''')
+
     conn.commit()
     conn.close()
     print("✅ State Engine: All database tables verified and ready.")
@@ -387,6 +397,100 @@ def health_check():
 @app.get("/ping")
 def ping():
     return {"status": "alive", "timestamp": dt.datetime.utcnow().isoformat()}
+
+
+# =========================================================================
+# LOCAL COMMAND QUEUE — bridge between Render and the local_bridge.py
+# process running on Madan's Mac (see local_bridge.py, bridge_setup.md)
+# =========================================================================
+LOCAL_QUEUE_ALLOWED_COMMANDS = [
+    "list_folder", "read_file",
+    "search_files", "system_info",
+    "list_recent_files",
+]
+
+
+@app.post("/local-queue")
+async def queue_local_command(request: Request):
+    body = await request.json()
+    command_type = body.get("command_type", "")
+    payload = body.get("payload", "")
+
+    if command_type not in LOCAL_QUEUE_ALLOWED_COMMANDS:
+        return JSONResponse({
+            "error": f"Command {command_type} not allowed"
+        }, status_code=400)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "INSERT INTO local_command_queue "
+            "(command_type, payload) VALUES (?, ?)",
+            (command_type, payload)
+        )
+        command_id = cursor.lastrowid
+        await db.commit()
+
+    return JSONResponse({
+        "status": "queued",
+        "command_id": command_id
+    })
+
+
+@app.get("/local-queue/pending")
+async def get_pending_commands():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT id, command_type, payload "
+            "FROM local_command_queue "
+            "WHERE status='pending' "
+            "ORDER BY created_at ASC LIMIT 5"
+        )
+        rows = await cur.fetchall()
+
+    commands = [
+        {"id": r[0], "command_type": r[1], "payload": r[2]}
+        for r in rows
+    ]
+    return JSONResponse({"commands": commands})
+
+
+@app.post("/local-queue/result")
+async def post_command_result(request: Request):
+    body = await request.json()
+    command_id = body.get("command_id")
+    result = body.get("result", "")
+    status = body.get("status", "completed")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE local_command_queue "
+            "SET status=?, result=?, "
+            "completed_at=datetime('now') "
+            "WHERE id=?",
+            (status, result, command_id)
+        )
+        await db.commit()
+
+    return JSONResponse({"status": "saved"})
+
+
+@app.get("/local-queue/result/{command_id}")
+async def get_command_result(command_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT status, result FROM local_command_queue "
+            "WHERE id=?",
+            (command_id,)
+        )
+        row = await cur.fetchone()
+
+    if not row:
+        return JSONResponse({"error": "Not found"},
+                          status_code=404)
+    return JSONResponse({
+        "status": row[0],
+        "result": row[1]
+    })
 
 
 @app.get("/admin", response_class=Response)
@@ -2092,6 +2196,8 @@ async def run_morning_digest():
                 current_attempt += 1
 
         if is_valid_run:
+            weather_brief = await get_weather_brief()
+            final_text = f"🌤️ {weather_brief}\n\n{final_text}"
             await log_sent_concept(concept, final_text)
             today_str = date.today().isoformat()
             # Save to cache before sending
@@ -2337,6 +2443,70 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
             "*end quiz* — End quiz early"
         )
         return help_msg
+
+    # =========================================================================
+    # WEATHER — on-demand weather query
+    # =========================================================================
+    if user_message_clean in [
+        "weather", "weather today", "whats the weather", "what's the weather",
+        "how's the weather", "temperature", "temp", "climate today",
+    ]:
+        await log_chat_message("user", user_message)
+        weather_msg = await get_weather()
+        await log_chat_message("assistant", weather_msg)
+        return weather_msg
+
+    # =========================================================================
+    # LOCAL BRIDGE — queue a command for local_bridge.py (runs on the Mac)
+    # and wait for it to poll, execute, and post the result back.
+    # Same process as the /local-queue routes above, so this reads/writes
+    # local_command_queue directly instead of calling its own HTTP routes.
+    #
+    # WhatsApp's webhook has a ~15s ack timeout — blocking incoming_whatsapp_
+    # reply() for that long risks Twilio retrying and double-queuing the
+    # command. So on WhatsApp we queue it, ack immediately (return None,
+    # mirrors the digest/email-queue blocks), and poll in a background task
+    # that self-sends the result when ready. The web chat UI has no such
+    # timeout, so it keeps the original inline blocking wait.
+    # =========================================================================
+    if user_message_clean.startswith("show folder") or \
+       user_message_clean.startswith("list folder") or \
+       user_message_clean in ["show my project", "list my files", "show project folder"]:
+        await log_chat_message("user", user_message)
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "INSERT INTO local_command_queue (command_type, payload) VALUES (?, ?)",
+                ("list_folder", "/Users/madansaidaram/Desktop/Daily_AI_updates")
+            )
+            command_id = cursor.lastrowid
+            await db.commit()
+
+        async def _poll_local_result(cmd_id: int, max_wait_seconds: int) -> str:
+            for _ in range(max_wait_seconds):
+                await asyncio.sleep(1)
+                async with aiosqlite.connect(DB_PATH) as db:
+                    cur = await db.execute(
+                        "SELECT status, result FROM local_command_queue WHERE id=?",
+                        (cmd_id,)
+                    )
+                    row = await cur.fetchone()
+                if row and row[0] == "completed":
+                    return row[1] or "No result"
+            return "⏳ Local bridge not running. Start local_bridge.py on your Mac."
+
+        if source == "whatsapp":
+            async def _deliver_when_ready():
+                result = await _poll_local_result(command_id, max_wait_seconds=60)
+                await log_chat_message("assistant", result)
+                send_whatsapp(result)
+
+            asyncio.create_task(_deliver_when_ready())
+            return None
+        else:
+            result = await _poll_local_result(command_id, max_wait_seconds=15)
+            await log_chat_message("assistant", result)
+            return result
 
     # =========================================================================
     # EMAIL TRIAGE — approve the active draft reply, then advance the queue
