@@ -97,11 +97,33 @@ def register_reminder_job(scheduler, row: dict, notify_fn):
 
 
 async def register_all_active_reminders(scheduler, notify_fn) -> int:
-    """Call once at startup so reminders survive a server restart."""
+    """Call once at startup so reminders survive a server restart.
+
+    A 'once' reminder whose run_at already passed while the app was down would
+    otherwise be silently dropped by APScheduler (misfire window exceeded, no
+    notification, row stuck at status='active' forever). Catch that here:
+    notify Madan it was missed and close the row instead of registering it.
+    """
     rows = await get_active_reminders()
+    restored = 0
+    now = datetime.now()
     for row in rows:
+        if row["kind"] == "once" and datetime.fromisoformat(row["run_at"]) <= now:
+            run_at = datetime.fromisoformat(row["run_at"])
+            try:
+                notify_fn(
+                    f"⏰ *Missed Reminder*\n\n"
+                    f"You had a reminder that fired while the system was restarting:\n\n"
+                    f"📌 {row['text']}\n"
+                    f"🕐 Was due: {run_at.strftime('%d %b at %I:%M %p')}"
+                )
+            except Exception as e:
+                print(f"⚠️ [reminders] Failed to send missed-reminder notice for {row['id']}: {e}")
+            await mark_fired(row["id"])
+            continue
         register_reminder_job(scheduler, row, notify_fn)
-    return len(rows)
+        restored += 1
+    return restored
 
 
 async def create_reminder_from_intent(scheduler, reminder: dict, notify_fn):

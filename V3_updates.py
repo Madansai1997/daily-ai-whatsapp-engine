@@ -34,6 +34,10 @@ from email_triage import (
     get_low_count,
     approve_draft,
     edit_draft,
+    save_composed_draft,
+    get_latest_composed_draft,
+    cancel_composed_draft,
+    send_composed_email,
 )
 from reminders import (
     init_reminder_tables,
@@ -111,6 +115,14 @@ MEMORY_INTENT_PROMPT = (
     'kind="daily" with hour/minute for every-day reminders; kind="weekly" with day_of_week/hour/minute for a '
     "specific weekday. reminder.text = the reminder message itself.\n"
     "Use OTHER for everything else — general conversation, questions, commands. content = null, reminder = null."
+)
+
+EMAIL_COMPOSE_SYSTEM_PROMPT = (
+    "Extract email details from the user's request and write the email body. "
+    "Return ONLY valid JSON, no markdown, no commentary, matching exactly this shape:\n"
+    '{"to": "recipient email address", "subject": "email subject line", "body": "full professional email body text"}\n'
+    "Write a complete, professional email based on the key points given — not just a one-line summary. "
+    "Sign it as 'Madan'. If no recipient email address is given anywhere in the request, set \"to\" to an empty string."
 )
 
 def get_llm_client() -> AsyncOpenAI:
@@ -617,7 +629,7 @@ async def log_chat_message(role, content):
 
 async def get_recent_chat_history(limit=5):
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT role, content FROM chat_history ORDER BY timestamp DESC LIMIT ?", (limit,)) as cursor:
+        async with db.execute("SELECT role, content FROM chat_history ORDER BY id DESC LIMIT ?", (limit,)) as cursor:
             rows = await cursor.fetchall()
     return [{"role": row[0], "content": row[1]} for row in reversed(rows)]
 
@@ -2420,14 +2432,17 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
         "hello jarvis", "hi jarvis", "hey jarvis",
         "hello jarvis, how are you", "how are you doing"
     ]:
+        await log_chat_message("user", user_message)
         hour = dt.datetime.now().hour
         time_of_day = "morning" if hour < 12 else "afternoon" if hour < 17 else "evening"
-        return (
+        greeting_msg = (
             f"Hey Madan! Good {time_of_day}. I'm running well — "
             f"all systems online. What do you need help with? "
             f"I can check your emails, set reminders, research something, "
             f"or just have a conversation."
         )
+        await log_chat_message("assistant", greeting_msg)
+        return greeting_msg
 
     # =========================================================================
     # GREETING / HELP MENU
@@ -2565,6 +2580,132 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
         msg = f"✏️ *Draft updated.*\n\n{new_text}\n\nReply *APPROVE EMAIL* to send it, or *DON'T SEND* to discard it."
         await log_chat_message("assistant", msg)
         return msg
+
+    # =========================================================================
+    # EMAIL COMPOSE — draft a brand-new outbound email via natural language
+    # Distinct from EMAIL TRIAGE above: this is Madan asking JARVIS to write
+    # and send a fresh email, not approving/editing a reply to an inbound one.
+    # Usage: "draft an email to x@example.com about ..."
+    # =========================================================================
+    EMAIL_COMPOSE_TRIGGERS = [
+        "draft an email", "draft email", "compose an email", "compose email",
+        "write an email", "send an email to", "send email to",
+    ]
+    if any(phrase in user_message_clean for phrase in EMAIL_COMPOSE_TRIGGERS):
+        await log_chat_message("user", user_message)
+        try:
+            compose_raw = await call_llm(EMAIL_COMPOSE_SYSTEM_PROMPT, user_message, max_tokens=500)
+            compose_parsed = json.loads(compose_raw)
+            to_address = (compose_parsed.get("to") or "").strip()
+            subject = (compose_parsed.get("subject") or "").strip() or "No Subject"
+            body = (compose_parsed.get("body") or "").strip()
+        except Exception as e:
+            print(f"⚠️ Email compose LLM failed: {e}")
+            err = "⚠️ Couldn't draft that email — try again with a recipient and what it should say."
+            await log_chat_message("assistant", err)
+            return err
+
+        if not to_address or not body:
+            msg = (
+                "⚠️ I need a recipient email address and what the email should say.\n"
+                "Try: \"draft an email to x@example.com about ...\""
+            )
+            await log_chat_message("assistant", msg)
+            return msg
+
+        await save_composed_draft(to_address, subject, body)
+        reply = (
+            f"📧 *Email Draft Ready*\n\n"
+            f"*To:* {to_address}\n"
+            f"*Subject:* {subject}\n\n"
+            f"*Body:*\n{body}\n\n"
+            f"─────────────────\n"
+            f"Reply *SEND* to send this email\n"
+            f"Reply *EDIT EMAIL: <new text>* to revise\n"
+            f"Reply *CANCEL* to discard"
+        )
+        await log_chat_message("assistant", reply)
+        return reply
+
+    # =========================================================================
+    # EMAIL COMPOSE — send confirmation
+    # =========================================================================
+    if user_message_clean in [
+        "send", "send it", "send this",
+        "send this email", "yeah send",
+        "yes send it", "yeah, send this email",
+        "send the email", "go ahead send",
+    ]:
+        await log_chat_message("user", user_message)
+        draft = await get_latest_composed_draft()
+        if not draft:
+            msg = "No pending email draft found. Compose one first."
+            await log_chat_message("assistant", msg)
+            return msg
+
+        to_addr = draft.get("sender", "")  # recipient is stored in the sender column for composed drafts
+        subject = draft.get("subject", "No Subject")
+        body = draft.get("draft_reply", "")
+        draft_id = draft.get("id")
+
+        if not to_addr or not body:
+            msg = "⚠️ Draft is incomplete — missing recipient or body. Please compose again."
+            await log_chat_message("assistant", msg)
+            return msg
+
+        sent_ok = await send_composed_email(to_address=to_addr, subject=subject, body=body, draft_id=draft_id)
+        if sent_ok:
+            reply = (
+                f"✅ *Email sent successfully!*\n\n"
+                f"*To:* {to_addr}\n"
+                f"*Subject:* {subject}\n\n"
+                f"Check your Gmail sent folder to confirm."
+            )
+        else:
+            reply = (
+                "❌ Failed to send email.\n"
+                "Check Render logs for details. Gmail credentials may need refreshing."
+            )
+        await log_chat_message("assistant", reply)
+        return reply
+
+    # =========================================================================
+    # EMAIL COMPOSE — edit the pending composed draft
+    # Usage: "edit email: <new text>"
+    # =========================================================================
+    if user_message_clean.startswith("edit email:"):
+        await log_chat_message("user", user_message)
+        new_body = user_message[len("edit email:"):].strip()
+        draft = await get_latest_composed_draft()
+
+        if not draft:
+            msg = "No pending draft to edit."
+        elif not new_body:
+            msg = "⚠️ Usage: EDIT EMAIL: <your new text>"
+        else:
+            await edit_draft(draft["id"], new_body)
+            msg = (
+                f"✏️ *Draft updated:*\n\n{new_body}\n\n"
+                f"─────────────────\n"
+                f"Reply *SEND* to send · *EDIT EMAIL: <text>* to revise again"
+            )
+        await log_chat_message("assistant", msg)
+        return msg
+
+    # =========================================================================
+    # EMAIL COMPOSE — cancel the pending composed draft
+    # Only handles bare "cancel" when a composed draft actually exists —
+    # otherwise falls through to the CANCEL STAGED PATCH block further down,
+    # which already handles "cancel"/"no"/"abort" for the AI-architect flow.
+    # =========================================================================
+    if user_message_clean == "cancel":
+        composed_draft = await get_latest_composed_draft()
+        if composed_draft:
+            await log_chat_message("user", user_message)
+            await cancel_composed_draft(composed_draft["id"])
+            msg = "🗑️ Email draft cancelled."
+            await log_chat_message("assistant", msg)
+            return msg
 
     # =========================================================================
     # NOTES — force-save a fact on demand
@@ -3204,6 +3345,20 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
     return Response(content="<Response></Response>", media_type="text/xml")
 
 
+@app.get("/chat-history")
+async def chat_history_api(limit: int = 50):
+    """Recent persisted chat_history rows, oldest first — lets the web UI
+    re-render the conversation on page refresh instead of starting blank."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT role, content, timestamp FROM chat_history ORDER BY id DESC LIMIT ?",
+            (limit,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+    messages = [{"role": r[0], "content": r[1], "timestamp": r[2]} for r in reversed(rows)]
+    return JSONResponse({"messages": messages})
+
+
 @app.post("/chat-message")
 async def chat_message(request: Request):
     body = await request.json()
@@ -3336,7 +3491,13 @@ function timeNow() {
   return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-function appendBubble(text, who) {
+function formatStoredTimestamp(ts) {
+  // SQLite CURRENT_TIMESTAMP is "YYYY-MM-DD HH:MM:SS" in UTC, no timezone marker
+  const d = new Date(ts.replace(' ', 'T') + 'Z');
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function appendBubble(text, who, timeStr) {
   const row = document.createElement('div');
   row.className = 'bubble-row ' + who;
   const bubble = document.createElement('div');
@@ -3344,7 +3505,7 @@ function appendBubble(text, who) {
   bubble.textContent = text;
   const ts = document.createElement('div');
   ts.className = 'timestamp';
-  ts.textContent = timeNow();
+  ts.textContent = timeStr || timeNow();
   row.appendChild(bubble);
   row.appendChild(ts);
   chatWindow.appendChild(row);
@@ -3439,10 +3600,27 @@ if ('webkitSpeechRecognition' in window) {
   });
 }
 
-// Initial greeting based on local time of day
-const hour = new Date().getHours();
-const greeting = hour < 12 ? 'morning' : (hour < 17 ? 'afternoon' : 'evening');
-appendBubble('⚡ JARVIS online. Good ' + greeting + ', Madan.\\nWhat do you need?', 'agent');
+// Load persisted history on open so a refresh never wipes the conversation.
+// Only show the canned greeting if there's no saved history yet.
+async function loadHistory() {
+  try {
+    const res = await fetch('/chat-history');
+    const data = await res.json();
+    const messages = data.messages || [];
+    if (messages.length > 0) {
+      messages.forEach(m => {
+        appendBubble(m.content, m.role === 'user' ? 'user' : 'agent', formatStoredTimestamp(m.timestamp));
+      });
+      return;
+    }
+  } catch (err) {
+    console.error('Failed to load chat history', err);
+  }
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? 'morning' : (hour < 17 ? 'afternoon' : 'evening');
+  appendBubble('⚡ JARVIS online. Good ' + greeting + ', Madan.\\nWhat do you need?', 'agent');
+}
+loadHistory();
 </script>
 </body>
 </html>"""

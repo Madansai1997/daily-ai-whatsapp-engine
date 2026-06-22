@@ -7,6 +7,7 @@ its own error handling. V3_updates.py only imports the public functions below.
 
 import os
 import json
+import uuid
 import base64
 import sqlite3
 import aiosqlite
@@ -323,3 +324,62 @@ async def edit_draft(draft_id: int, new_text: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE pending_drafts SET draft_reply = ? WHERE id = ?", (new_text, draft_id))
         await db.commit()
+
+
+# =========================================================================
+# COMPOSED EMAILS — user-initiated fresh outbound emails (not inbox triage)
+#
+# Reuses pending_drafts (priority='COMPOSED') but with its own status value,
+# 'pending_send', so these never get mixed into the inbox-triage queue:
+# get_active_draft()/activate_next_draft() only ever look at 'active'/'pending'.
+# For a composed draft, the 'sender' column holds the *recipient* address.
+# =========================================================================
+async def save_composed_draft(to_address: str, subject: str, body: str) -> int:
+    email_id = f"composed_{uuid.uuid4().hex[:12]}"
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """INSERT INTO pending_drafts
+               (email_id, sender, subject, snippet, priority, draft_reply, status, created_at)
+               VALUES (?, ?, ?, ?, 'COMPOSED', ?, 'pending_send', ?)""",
+            (email_id, to_address, subject, body[:200], body, datetime.now(timezone.utc).isoformat()),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def get_latest_composed_draft():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM pending_drafts WHERE status = 'pending_send' AND priority = 'COMPOSED' "
+            "ORDER BY created_at DESC LIMIT 1"
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def cancel_composed_draft(draft_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE pending_drafts SET status = 'cancelled' WHERE id = ?", (draft_id,))
+        await db.commit()
+
+
+async def send_composed_email(to_address: str, subject: str, body: str, draft_id: int = None) -> bool:
+    """Send a freshly-composed (not a reply) email via Gmail API."""
+    try:
+        service = _get_gmail_service()
+        message = MIMEText(body)
+        message["to"] = to_address
+        message["subject"] = subject
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
+        send_result = service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        print(f"✅ Email sent to {to_address} | ID: {send_result.get('id')}")
+    except Exception as e:
+        print(f"⚠️ [email_triage] Composed email send failed: {e}")
+        return False
+
+    if draft_id:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE pending_drafts SET status = 'sent' WHERE id = ?", (draft_id,))
+            await db.commit()
+    return True
