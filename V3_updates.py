@@ -41,7 +41,14 @@ from reminders import (
     create_reminder_from_intent,
     get_active_reminders,
 )
-from weather_agent import get_weather, get_weather_brief
+try:
+    from weather_agent import get_weather, get_weather_brief
+except Exception as e:
+    print(f"❌ weather_agent import failed: {e}")
+    async def get_weather():
+        return "⚠️ Weather agent not available."
+    async def get_weather_brief():
+        return "Weather unavailable"
 
 # Core Credentials
 TWILIO_SID = os.getenv("TWILIO_SID")

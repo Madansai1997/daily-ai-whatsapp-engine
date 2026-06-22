@@ -60,6 +60,7 @@ def _fetch_weather_sync(include_humidity: bool) -> dict:
 
 async def get_weather() -> str:
     """Full detailed weather message for an on-demand WhatsApp/web query."""
+    print("🌤️ [Weather] Fetching Hyderabad weather...")
     try:
         loop = asyncio.get_running_loop()
         data = await loop.run_in_executor(None, lambda: _fetch_weather_sync(True))
