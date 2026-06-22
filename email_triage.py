@@ -28,11 +28,15 @@ GMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN")
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
 TRIAGE_SYSTEM_PROMPT = (
-    "You are an email triage assistant. Given an email, classify it and optionally draft a reply. "
-    "Respond with STRICT JSON only, no markdown, no commentary, matching exactly this shape:\n"
-    '{"priority": "PRIORITY" or "CAN_WAIT", "reason": "short reason", "draft": "2-4 sentence reply" or null}\n'
-    "Use PRIORITY only for emails that need a timely human response (requests, questions, deadlines, "
-    "important people). Use CAN_WAIT for newsletters, notifications, FYI threads, spam-like content. "
+    "You are an email triage assistant. Given an email, classify it into exactly one of three tiers "
+    "and optionally draft a reply. Respond with STRICT JSON only, no markdown, no commentary, matching "
+    "exactly this shape:\n"
+    '{"priority": "PRIORITY" or "MEDIUM" or "LOW", "reason": "short reason", "draft": "2-4 sentence reply" or null}\n'
+    "Use PRIORITY for emails that need a timely human response (requests, questions, deadlines, important "
+    "people) — these get a drafted reply.\n"
+    "Use MEDIUM for things worth knowing about but that don't need a reply (account/security alerts, "
+    "application or order status updates, FYI threads from real people or services about your accounts).\n"
+    "Use LOW for pure noise (newsletters, marketing, promotions, spam-like content).\n"
     "Only include a non-null draft when priority is PRIORITY."
 )
 
@@ -162,7 +166,9 @@ async def check_inbox_and_notify(call_llm_fn, notify_fn):
         print(f"⚠️ [email_triage] Unexpected error listing messages: {e}")
         return
 
-    can_wait_emails = []
+    medium_emails = []
+    low_emails = []
+    new_priority_count = 0
 
     for msg_meta in messages:
         email_id = msg_meta.get("id")
@@ -186,7 +192,7 @@ async def check_inbox_and_notify(call_llm_fn, notify_fn):
                     max_tokens=400,
                 )
                 parsed = json.loads(raw)
-                priority = parsed.get("priority", "CAN_WAIT")
+                priority = parsed.get("priority", "LOW")
                 draft = parsed.get("draft")
             except Exception as e:
                 print(f"⚠️ [email_triage] LLM classification failed for {email_id}: {e}")
@@ -195,8 +201,11 @@ async def check_inbox_and_notify(call_llm_fn, notify_fn):
 
             if priority == "PRIORITY" and draft:
                 await _save_draft(email_id, sender, subject, snippet, priority, draft)
+                new_priority_count += 1
+            elif priority == "MEDIUM":
+                medium_emails.append((sender, subject))
             else:
-                can_wait_emails.append((sender, subject))
+                low_emails.append((sender, subject))
 
             await _mark_processed(email_id)
 
@@ -204,17 +213,27 @@ async def check_inbox_and_notify(call_llm_fn, notify_fn):
             print(f"⚠️ [email_triage] Failed processing email {email_id}: {e}")
             continue
 
-    await _set_meta("last_can_wait_count", str(len(can_wait_emails)))
+    await _set_meta("last_medium_count", str(len(medium_emails)))
+    await _set_meta("last_low_count", str(len(low_emails)))
 
-    if can_wait_emails:
-        examples = "\n".join(f"- {sender}: {subject}" for sender, subject in can_wait_emails[:2])
-        more = f"\n...and {len(can_wait_emails) - 2} more" if len(can_wait_emails) > 2 else ""
-        try:
-            notify_fn(
-                f"📭 *{len(can_wait_emails)} other email(s)* (not urgent)\n{examples}{more}"
-            )
-        except Exception as e:
-            print(f"⚠️ [email_triage] notify_fn failed for can_wait summary: {e}")
+    sections = []
+    if medium_emails:
+        examples = "\n".join(f"- {sender}: {subject}" for sender, subject in medium_emails[:2])
+        more = f"\n...and {len(medium_emails) - 2} more" if len(medium_emails) > 2 else ""
+        sections.append(f"*Medium:*\n{examples}{more}")
+    if low_emails:
+        examples = "\n".join(f"- {sender}: {subject}" for sender, subject in low_emails[:2])
+        more = f"\n...and {len(low_emails) - 2} more" if len(low_emails) > 2 else ""
+        sections.append(f"*Low:*\n{examples}{more}")
+    detail = ("\n\n" + "\n\n".join(sections)) if sections else " All clear."
+
+    try:
+        notify_fn(
+            f"📊 *Inbox check:* {new_priority_count} new priority, "
+            f"{len(medium_emails)} medium, {len(low_emails)} low.{detail}"
+        )
+    except Exception as e:
+        print(f"⚠️ [email_triage] notify_fn failed for inbox check status: {e}")
 
     if not await get_active_draft():
         await activate_next_draft(notify_fn)
@@ -265,8 +284,12 @@ async def count_pending_drafts() -> int:
         return row[0]
 
 
-async def get_can_wait_count() -> int:
-    return int(await _get_meta("last_can_wait_count", "0"))
+async def get_medium_count() -> int:
+    return int(await _get_meta("last_medium_count", "0"))
+
+
+async def get_low_count() -> int:
+    return int(await _get_meta("last_low_count", "0"))
 
 
 async def approve_draft(draft_id: int):

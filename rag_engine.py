@@ -123,3 +123,27 @@ async def retrieve_relevant_context(query: str, limit: int = 3) -> list[dict]:
     matched_docs = [doc for doc, score in ranked_docs if score > 0]
 
     return matched_docs[:limit]
+
+async def search_user_facts(query: str, limit: int = 5) -> list[str]:
+    """BM25-ranks stored user_facts against a query, returning the matching fact strings."""
+    import logging
+    query_tokens = tokenize(query)
+    if not query_tokens:
+        return []
+
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT fact FROM user_facts ORDER BY created_at DESC") as cursor:
+                rows = await cursor.fetchall()
+    except Exception as e:
+        logging.warning(f"RAG Engine: Error querying user_facts: {e}")
+        return []
+
+    if not rows:
+        return []
+
+    documents = [{"title": "", "content": row[0]} for row in rows]
+    ranked_docs = compute_bm25(query_tokens, documents)
+    matched_facts = [doc["content"] for doc, score in ranked_docs if score > 0]
+
+    return matched_facts[:limit]

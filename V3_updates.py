@@ -10,9 +10,11 @@ import re
 import base64
 import datetime as dt
 from datetime import date
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, Response, Form
+from fastapi import FastAPI, Response, Form, Request
+from fastapi.responses import JSONResponse, HTMLResponse
 from twilio.rest import Client
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from contextlib import asynccontextmanager
@@ -20,7 +22,7 @@ from openai import AsyncOpenAI
 
 load_dotenv()
 
-from rag_engine import retrieve_relevant_context
+from rag_engine import retrieve_relevant_context, search_user_facts
 from email_triage import (
     init_email_tables,
     check_inbox_and_notify,
@@ -28,9 +30,15 @@ from email_triage import (
     activate_next_draft,
     delete_draft,
     count_pending_drafts,
-    get_can_wait_count,
+    get_medium_count,
+    get_low_count,
     approve_draft,
     edit_draft,
+)
+from reminders import (
+    init_reminder_tables,
+    register_all_active_reminders,
+    create_reminder_from_intent,
 )
 
 # Core Credentials
@@ -62,16 +70,39 @@ SCHEDULE_CONFIG = {
 }
 
 
-OPENROUTER_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
-OPENROUTER_MODEL_FAST = "nvidia/nemotron-3-super-120b-a12b:free"
+OPENROUTER_MODEL = "openai/gpt-oss-120b:free"
+OPENROUTER_MODEL_FAST = "openai/gpt-oss-120b:free"
 
 FREE_MODELS = [
-    "nvidia/nemotron-3-super-120b-a12b:free",   # Nemotron Super — best for agents
-    "nvidia/nemotron-3-ultra:free",              # Nemotron Ultra — 1M context
-    "google/gemma-4-31b-it:free",               # Gemma 4 — highest quality score
-    "openai/gpt-oss-120b:free",                 # GPT OSS — solid fallback
+    "openai/gpt-oss-120b:free",                 # GPT OSS — currently the most reliable free tier
     "meta-llama/llama-4-maverick:free",         # Llama 4 — reliable backup
+    "nvidia/nemotron-3-super-120b-a12b:free",   # Nemotron Super — best for agents, but daily free quota exhausts fast
+    "google/gemma-4-31b-it:free",               # Gemma 4 — highest quality score, tight per-min rate limit
+    # "nvidia/nemotron-3-ultra:free" removed — not a valid OpenRouter model ID, always 400s
 ]
+
+MEMORY_INTENT_PROMPT = (
+    "Classify the user's message into exactly one intent. The message is preceded by the current date/time "
+    "(Asia/Kolkata) for resolving relative dates. Respond with STRICT JSON only, no markdown, no commentary, "
+    "matching exactly this shape:\n"
+    '{"intent": "SAVE_FACT" or "RECALL_FACT" or "SET_REMINDER" or "OTHER", "content": "string" or null, '
+    '"reminder": {"text": "string", "kind": "once" or "daily" or "weekly", "run_at": "ISO 8601 datetime" or null, '
+    '"hour": 0-23 or null, "minute": 0-59 or null, "day_of_week": "mon"/"tue"/"wed"/"thu"/"fri"/"sat"/"sun" or null} '
+    "or null}\n"
+    "Use SAVE_FACT when the user is asking you to remember/note/save a fact about themselves or their plans "
+    '(e.g. "remember that my exam is in August", "note that I prefer Python"). content = the fact itself, '
+    "cleaned up as a standalone statement. reminder = null.\n"
+    "Use RECALL_FACT when the user is asking what you remember/know about something "
+    '(e.g. "do you remember my exam date", "what do you know about my AWS plans"). content = the topic/keywords '
+    "to search for. reminder = null.\n"
+    "Use SET_REMINDER when the user asks to be reminded/notified about something at a specific time, or on a "
+    'recurring schedule (e.g. "remind me to call mom tomorrow at 5pm", "remind me every day at 9am to drink '
+    'water"). content = null. Fill reminder: kind="once" with run_at as a full ISO 8601 datetime (resolve relative '
+    'phrases like "tomorrow"/"in 2 hours" against the given current date/time) for a single occurrence; '
+    'kind="daily" with hour/minute for every-day reminders; kind="weekly" with day_of_week/hour/minute for a '
+    "specific weekday. reminder.text = the reminder message itself.\n"
+    "Use OTHER for everything else — general conversation, questions, commands. content = null, reminder = null."
+)
 
 def get_llm_client() -> AsyncOpenAI:
     key = os.environ.get("OPENROUTER_API_KEY", "")
@@ -223,6 +254,7 @@ def init_db_tables():
 
 init_db_tables()
 init_email_tables()
+init_reminder_tables()
 
 
 # ==========================================
@@ -278,11 +310,12 @@ async def lifespan(app: FastAPI):
     for r in SCHEDULE_CONFIG["reminders"]:
         scheduler.add_job(send_checkin_reminder, "cron", hour=r["hour"], minute=0, kwargs={"reminder_number": r["number"]})
     scheduler.add_job(send_weekly_report, "cron", day_of_week="sun", hour=SCHEDULE_CONFIG["weekly_report_hour"], minute=0)
-    scheduler.add_job(lambda: asyncio.ensure_future(check_inbox_and_notify(call_llm, send_whatsapp_chunked)), "interval", minutes=15)
+    scheduler.add_job(check_inbox_and_notify, "interval", hours=1, args=[call_llm, send_whatsapp_chunked])
     scheduler.start()
     app.state.scheduler = scheduler
+    restored = await register_all_active_reminders(scheduler, send_whatsapp_chunked)
     reminder_times = ", ".join([f"{r['hour']}:00" for r in SCHEDULE_CONFIG["reminders"]])
-    print(f"⏰ Scheduler: Digest {SCHEDULE_CONFIG['digest_hour']}:00 | Check-ins {reminder_times} | Report Sunday {SCHEDULE_CONFIG['weekly_report_hour']}:00")
+    print(f"⏰ Scheduler: Digest {SCHEDULE_CONFIG['digest_hour']}:00 | Check-ins {reminder_times} | Report Sunday {SCHEDULE_CONFIG['weekly_report_hour']}:00 | Restored {restored} reminder(s)")
 
     yield
     scheduler.shutdown()
@@ -2217,9 +2250,12 @@ async def handle_onboarding(incoming_message: str) -> str:
 # ==========================================
 # 14. WHATSAPP WEBHOOK
 # ==========================================
-@app.post("/whatsapp-webhook")
-async def incoming_whatsapp_reply(Body: str = Form(...)):
-    user_message = Body.strip()
+async def process_message(user_message: str) -> str:
+    """
+    Core intent-routing logic, shared by the WhatsApp webhook and the /chat-message web UI.
+    Returns the reply text, or None when the block already sent its own message(s) directly
+    (e.g. digest/weekly-report, which dispatch asynchronously and have nothing left to return).
+    """
     user_message_clean = user_message.lower().strip().replace("’", "'")
     loop = asyncio.get_running_loop()
     today = date.today().isoformat()
@@ -2227,16 +2263,20 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
     print(f"📥 [Incoming]: '{user_message_clean}'")
 
     def send_whatsapp(msg):
-        send_whatsapp_chunked(msg)
+        try:
+            send_whatsapp_chunked(msg)
+        except Exception as e:
+            print(f"❌ Twilio dispatch failed: {e}")
 
     async def advance_email_queue():
         """Move to the next queued priority draft, or send a wrap-up if none are left."""
         activated = await activate_next_draft(send_whatsapp)
         if not activated:
-            can_wait = await get_can_wait_count()
-            msg = f"✅ *All priority emails handled.* {can_wait} non-urgent email(s) also came in."
+            medium = await get_medium_count()
+            low = await get_low_count()
+            msg = f"✅ *All priority emails handled.* {medium} medium, {low} low priority email(s) also came in."
             await log_chat_message("assistant", msg)
-            await loop.run_in_executor(None, lambda: send_whatsapp(msg))
+            send_whatsapp(msg)
 
     # =========================================================================
     # ONBOARDING GATE — runs before every other command
@@ -2249,14 +2289,11 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
         save_setting("domain_display", "")
         save_setting("skill_level", "")
         save_setting("topic", "")
-        await loop.run_in_executor(None, lambda: send_whatsapp("♻️ Profile reset! Send any message to start fresh."))
-        return Response(content="<Response></Response>", media_type="text/xml")
+        return "♻️ Profile reset! Send any message to start fresh."
 
     onboarded = get_setting("onboarded", "0")
     if onboarded != "1":
-        reply = await handle_onboarding(user_message)
-        await loop.run_in_executor(None, lambda: send_whatsapp(reply))
-        return Response(content="<Response></Response>", media_type="text/xml")
+        return await handle_onboarding(user_message)
 
     # ── Normal command processing continues below ──
 
@@ -2280,8 +2317,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             "*skip* — Skip quiz question\n"
             "*end quiz* — End quiz early"
         )
-        await loop.run_in_executor(None, lambda: send_whatsapp(help_msg))
-        return Response(content="<Response></Response>", media_type="text/xml")
+        return help_msg
 
     # =========================================================================
     # EMAIL TRIAGE — approve the active draft reply, then advance the queue
@@ -2290,15 +2326,14 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
         await log_chat_message("user", user_message)
         draft = await get_active_draft()
         if not draft:
-            await loop.run_in_executor(None, lambda: send_whatsapp("⚠️ *No active email draft.*"))
-            return Response(content="<Response></Response>", media_type="text/xml")
+            return "⚠️ *No active email draft.*"
         success, report = await approve_draft(draft["id"])
         msg = f"📤 *Email sent to {draft['sender']}.*" if success else f"❌ *Send failed:* {report}"
         await log_chat_message("assistant", msg)
-        await loop.run_in_executor(None, lambda: send_whatsapp(msg))
+        send_whatsapp(msg)
         if success:
             await advance_email_queue()
-        return Response(content="<Response></Response>", media_type="text/xml")
+        return None
 
     # =========================================================================
     # EMAIL TRIAGE — discard the active draft entirely, then advance the queue
@@ -2307,16 +2342,16 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
         await log_chat_message("user", user_message)
         draft = await get_active_draft()
         if not draft:
-            await loop.run_in_executor(None, lambda: send_whatsapp("⚠️ *No active email draft.*"))
-            return Response(content="<Response></Response>", media_type="text/xml")
+            return "⚠️ *No active email draft.*"
         await delete_draft(draft["id"])
         remaining = await count_pending_drafts()
-        can_wait = await get_can_wait_count()
-        msg = f"🗑️ *Deleted.* {remaining} priority email(s) left, {can_wait} non-priority email(s)."
+        medium = await get_medium_count()
+        low = await get_low_count()
+        msg = f"🗑️ *Deleted.* {remaining} priority email(s) left, {medium} medium, {low} low priority email(s)."
         await log_chat_message("assistant", msg)
-        await loop.run_in_executor(None, lambda: send_whatsapp(msg))
+        send_whatsapp(msg)
         await advance_email_queue()
-        return Response(content="<Response></Response>", media_type="text/xml")
+        return None
 
     # =========================================================================
     # EMAIL TRIAGE — edit the active draft reply
@@ -2327,16 +2362,44 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
         new_text = user_message[len("edit:"):].strip()
         draft = await get_active_draft()
         if not draft:
-            await loop.run_in_executor(None, lambda: send_whatsapp("⚠️ *No active email draft.*"))
-            return Response(content="<Response></Response>", media_type="text/xml")
+            return "⚠️ *No active email draft.*"
         if not new_text:
-            await loop.run_in_executor(None, lambda: send_whatsapp("⚠️ Usage: EDIT: <your new reply text>"))
-            return Response(content="<Response></Response>", media_type="text/xml")
+            return "⚠️ Usage: EDIT: <your new reply text>"
         await edit_draft(draft["id"], new_text)
         msg = f"✏️ *Draft updated.*\n\n{new_text}\n\nReply *APPROVE EMAIL* to send it, or *DON'T SEND* to discard it."
         await log_chat_message("assistant", msg)
-        await loop.run_in_executor(None, lambda: send_whatsapp(msg))
-        return Response(content="<Response></Response>", media_type="text/xml")
+        return msg
+
+    # =========================================================================
+    # NOTES — force-save a fact on demand
+    # Usage: "remember: <something>"
+    # =========================================================================
+    if user_message_clean.startswith("remember:"):
+        await log_chat_message("user", user_message)
+        fact_text = user_message[len("remember:"):].strip()
+        if not fact_text:
+            return "⚠️ Usage: REMEMBER: <something to remember>"
+        await save_user_fact(fact_text)
+        msg = f"🧠 *Got it, I'll remember:* {fact_text}"
+        await log_chat_message("assistant", msg)
+        return msg
+
+    # =========================================================================
+    # NOTES — search saved facts
+    # Usage: "what do i know about <topic>"
+    # =========================================================================
+    if user_message_clean.startswith("what do i know about"):
+        await log_chat_message("user", user_message)
+        topic = user_message[len("what do i know about"):].strip()
+        if not topic:
+            return "⚠️ Usage: WHAT DO I KNOW ABOUT <topic>"
+        facts = await search_user_facts(topic)
+        if facts:
+            msg = "🧠 *Here's what I know:*\n\n" + "\n".join(f"- {f}" for f in facts)
+        else:
+            msg = f"🤷 Nothing saved about \"{topic}\" yet."
+        await log_chat_message("assistant", msg)
+        return msg
 
     # =========================================================================
     # SET TOPIC — override what the bot teaches next morning
@@ -2360,16 +2423,14 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
             reply = f"Got it! Your learning topic is now: *{new_topic}*\nI'll teach you concepts from this domain daily. Type SET TOPIC: anything to change it anytime — it can be literally any subject."
         else:
             reply = "⚠️ Usage: SET TOPIC: <your topic here>\nExample: SET TOPIC: Reinforcement Learning"
-        await loop.run_in_executor(None, lambda: send_whatsapp(reply))
-        return Response(content="<Response></Response>", media_type="text/xml")
+        return reply
 
     if user_message_clean == "clear topic":
         await log_chat_message("user", user_message)
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("DELETE FROM user_profile WHERE key='override_topic'")
             await db.commit()
-        await loop.run_in_executor(None, lambda: send_whatsapp("✅ Topic override cleared. Auto-selection resumes tomorrow."))
-        return Response(content="<Response></Response>", media_type="text/xml")
+        return "✅ Topic override cleared. Auto-selection resumes tomorrow."
 
     # =========================================================================
     # EXPLAIN — instant concept explanation
@@ -2379,8 +2440,7 @@ async def incoming_whatsapp_reply(Body: str = Form(...)):
         await log_chat_message("user", user_message)
         concept_to_explain = user_message[len("explain:"):].strip()
         if not concept_to_explain:
-            await loop.run_in_executor(None, lambda: send_whatsapp("⚠️ Usage: EXPLAIN: <concept>\nExample: EXPLAIN: transformer attention"))
-            return Response(content="<Response></Response>", media_type="text/xml")
+            return "⚠️ Usage: EXPLAIN: <concept>\nExample: EXPLAIN: transformer attention"
         try:
             explain_system = """You are a world-class educator who can explain any concept
 from any field — science, math, history, coding, philosophy, economics,
@@ -2401,10 +2461,9 @@ You are not limited to any domain. Explain whatever the user asks."""
                 ]
             )
             explanation = explain_response.choices[0].message.content.strip()
-            await loop.run_in_executor(None, lambda: send_whatsapp(explanation))
+            return explanation
         except Exception as e:
-            await loop.run_in_executor(None, lambda: send_whatsapp(f"⚠️ Could not explain that right now: {str(e)}"))
-        return Response(content="<Response></Response>", media_type="text/xml")
+            return f"⚠️ Could not explain that right now: {str(e)}"
 
     # =========================================================================
     # STATUS / PROGRESS DASHBOARD
@@ -2438,8 +2497,7 @@ You are not limited to any domain. Explain whatever the user asks."""
             f"Reply *done* after today's reading to start your quiz! 🚀"
         )
         await log_chat_message("assistant", status_msg)
-        await loop.run_in_executor(None, lambda: send_whatsapp(status_msg))
-        return Response(content="<Response></Response>", media_type="text/xml")
+        return status_msg
 
     # =========================================================================
     # DIFFICULTY FEEDBACK (E / J / H)
@@ -2454,8 +2512,7 @@ You are not limited to any domain. Explain whatever the user asks."""
         reply = f"Got it! I noted today's concept felt *{labels[user_message_clean]}*. I'll adjust future concepts accordingly. 📐"
         await log_chat_message("user", user_message)
         await log_chat_message("assistant", reply)
-        await loop.run_in_executor(None, lambda: send_whatsapp(reply))
-        return Response(content="<Response></Response>", media_type="text/xml")
+        return reply
 
     # =========================================================================
     # CODE REVIEW
@@ -2464,8 +2521,7 @@ You are not limited to any domain. Explain whatever the user asks."""
         await log_chat_message("user", user_message)
         code_snippet = user_message[7:].strip()
         if not code_snippet:
-            await loop.run_in_executor(None, lambda: send_whatsapp("⚠️ Send: *review: <your code here>*"))
-            return Response(content="<Response></Response>", media_type="text/xml")
+            return "⚠️ Send: *review: <your code here>*"
         skill_level, recent_topics, _ = await get_db_state()
         concept = recent_topics[0] if recent_topics else "AI Engineering"
         try:
@@ -2482,8 +2538,7 @@ You are not limited to any domain. Explain whatever the user asks."""
         except Exception as e:
             review_msg = f"⚠️ Code review unavailable: {e}"
         await log_chat_message("assistant", review_msg)
-        await loop.run_in_executor(None, lambda: send_whatsapp(review_msg))
-        return Response(content="<Response></Response>", media_type="text/xml")
+        return review_msg
 
     # =========================================================================
     # QUIZ ANSWER HANDLER
@@ -2498,8 +2553,7 @@ You are not limited to any domain. Explain whatever the user asks."""
             clear_quiz_state()
             final = f"🛑 *Quiz ended early.*\n\n{result_msg}"
             await log_chat_message("assistant", final)
-            await loop.run_in_executor(None, lambda: send_whatsapp(final))
-            return Response(content="<Response></Response>", media_type="text/xml")
+            return final
 
         # End quiz early — ask for confirmation first
         if user_message_clean in ["end quiz", "end", "stop quiz", "finish"]:
@@ -2512,8 +2566,7 @@ You are not limited to any domain. Explain whatever the user asks."""
                 f"Reply *confirm* to end and see results, or keep answering to continue."
             )
             await log_chat_message("assistant", confirm_msg)
-            await loop.run_in_executor(None, lambda: send_whatsapp(confirm_msg))
-            return Response(content="<Response></Response>", media_type="text/xml")
+            return confirm_msg
 
         # Skip current question
         if user_message_clean == "skip":
@@ -2559,8 +2612,7 @@ You are not limited to any domain. Explain whatever the user asks."""
                 skip_msg = f"⏭️ *Question skipped.* Moving on...\n\n{next_question_text}{options_footer}"
 
             await log_chat_message("assistant", skip_msg)
-            await loop.run_in_executor(None, lambda: send_whatsapp(skip_msg))
-            return Response(content="<Response></Response>", media_type="text/xml")
+            return skip_msg
 
         # Answer A B C D
         if user_message_clean.upper() in ["A", "B", "C", "D"]:
@@ -2568,8 +2620,7 @@ You are not limited to any domain. Explain whatever the user asks."""
             result = await process_quiz_answer(user_message_clean.upper())
             if result:
                 await log_chat_message("assistant", result)
-                await loop.run_in_executor(None, lambda: send_whatsapp(result))
-            return Response(content="<Response></Response>", media_type="text/xml")
+            return result
 
     # =========================================================================
     # LEARNING DONE — trigger quiz
@@ -2582,8 +2633,7 @@ You are not limited to any domain. Explain whatever the user asks."""
                 row = await cursor.fetchone()
 
         if row and row[0]:
-            await loop.run_in_executor(None, lambda: send_whatsapp("✅ Quiz already completed today! Come back tomorrow for a new concept. 🌟"))
-            return Response(content="<Response></Response>", media_type="text/xml")
+            return "✅ Quiz already completed today! Come back tomorrow for a new concept. 🌟"
 
         concept = row[1] if row and row[1] else _FALLBACK_CONCEPTS[0][0]
 
@@ -2600,8 +2650,7 @@ You are not limited to any domain. Explain whatever the user asks."""
             await db.commit()
 
         await log_chat_message("assistant", intro + first_question)
-        await loop.run_in_executor(None, lambda: send_whatsapp(intro + first_question))
-        return Response(content="<Response></Response>", media_type="text/xml")
+        return intro + first_question
 
     # =========================================================================
     # APPROVE STAGED PATCH
@@ -2609,8 +2658,7 @@ You are not limited to any domain. Explain whatever the user asks."""
     if user_message_clean in ["approve", "yes", "confirm", "push"]:
         await log_chat_message("user", user_message)
         if not os.path.exists(STAGED_CODE_FILE):
-            await loop.run_in_executor(None, lambda: send_whatsapp("⚠️ *No changes staged.* Send an upgrade instruction first!"))
-            return Response(content="<Response></Response>", media_type="text/xml")
+            return "⚠️ *No changes staged.* Send an upgrade instruction first!"
 
         def execute_staged_push():
             try:
@@ -2645,8 +2693,7 @@ You are not limited to any domain. Explain whatever the user asks."""
         success, report = await loop.run_in_executor(None, execute_staged_push)
         msg = "🚀 *Approved!* Patch committed to GitHub.\n\n🔄 *Render Deployment Initiated.*" if success else f"❌ *Deployment Aborted.*\n\n`{report}`"
         await log_chat_message("assistant", msg)
-        await loop.run_in_executor(None, lambda: send_whatsapp(msg))
-        return Response(content="<Response></Response>", media_type="text/xml")
+        return msg
 
     # =========================================================================
     # CANCEL STAGED PATCH
@@ -2659,8 +2706,7 @@ You are not limited to any domain. Explain whatever the user asks."""
         else:
             msg = "ℹ️ Nothing staged. Buffer is empty."
         await log_chat_message("assistant", msg)
-        await loop.run_in_executor(None, lambda: send_whatsapp(msg))
-        return Response(content="<Response></Response>", media_type="text/xml")
+        return msg
 
     # =========================================================================
     # SYSTEM COMMANDS
@@ -2673,8 +2719,7 @@ You are not limited to any domain. Explain whatever the user asks."""
         output = await loop.run_in_executor(None, run_git)
         msg = f"📊 *Git Status*:\n\n```{output}```"
         await log_chat_message("assistant", msg)
-        await loop.run_in_executor(None, lambda: send_whatsapp(msg))
-        return Response(content="<Response></Response>", media_type="text/xml")
+        return msg
 
     if user_message_clean in ["digest", "refresh", "force digest"]:
         await log_chat_message("user", user_message)
@@ -2691,7 +2736,7 @@ You are not limited to any domain. Explain whatever the user asks."""
                     cached_content = row[0]
         if cached_content:
             print("⚡ [Cache HIT]: Sending pre-generated digest")
-            await loop.run_in_executor(None, lambda: send_whatsapp_chunked(cached_content))
+            send_whatsapp_chunked(cached_content)
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
                     "UPDATE digest_cache SET sent=1 WHERE date=? AND sent=0",
@@ -2701,17 +2746,15 @@ You are not limited to any domain. Explain whatever the user asks."""
             await log_chat_message("assistant", "Cache HIT: sent pre-generated digest instantly")
         else:
             print("⚡ [Cache MISS]: Generating fresh digest, ~30 seconds...")
-            await loop.run_in_executor(None, lambda: send_whatsapp_chunked(
-                "⚡ Digest requested! Generating your update now — arrives in ~30 seconds..."
-            ))
+            send_whatsapp_chunked("⚡ Digest requested! Generating your update now — arrives in ~30 seconds...")
             digest_status = await run_morning_digest()
             await log_chat_message("assistant", f"Cache MISS: fresh digest done. Status: {digest_status.get('status')}")
-        return Response(content="<Response></Response>", media_type="text/xml")
+        return None
 
     if user_message_clean in ["weekly report", "report", "my progress"]:
         await log_chat_message("user", user_message)
         await send_weekly_report()
-        return Response(content="<Response></Response>", media_type="text/xml")
+        return None
 
     # =========================================================================
     # UPGRADE INTENT — SURGICAL PATCH
@@ -2721,16 +2764,14 @@ You are not limited to any domain. Explain whatever the user asks."""
     if is_upgrade_intent:
         await log_chat_message("user", user_message)
         if not GITHUB_TOKEN or not GITHUB_REPO:
-            await loop.run_in_executor(None, lambda: send_whatsapp("❌ *Operation Denied.* `GITHUB_TOKEN` or `GITHUB_REPO` missing."))
-            return Response(content="<Response></Response>", media_type="text/xml")
+            return "❌ *Operation Denied.* `GITHUB_TOKEN` or `GITHUB_REPO` missing."
 
         try:
             headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
             file_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/V3_updates.py"
             res = await loop.run_in_executor(None, lambda: requests.get(file_url, headers=headers))
             if res.status_code != 200:
-                await loop.run_in_executor(None, lambda: send_whatsapp(f"❌ *GitHub Error:* {res.json().get('message')}"))
-                return Response(content="<Response></Response>", media_type="text/xml")
+                return f"❌ *GitHub Error:* {res.json().get('message')}"
 
             file_data = res.json()
             current_sha = file_data["sha"]
@@ -2740,18 +2781,20 @@ You are not limited to any domain. Explain whatever the user asks."""
 
             patch_response = await anthropic_client.chat.completions.create(
                 model=OPENROUTER_MODEL, max_tokens=1500, temperature=0.1,
-                system=(
-                    "You are an expert Python code surgeon. "
-                    "Given a user instruction and a Python file, identify the exact snippet to change. "
-                    "Respond ONLY with a valid raw JSON object with exactly two keys: "
-                    "\"find\" (exact existing code verbatim) and \"replace\" (new code). "
-                    "No explanation, no markdown, no text outside the JSON."
-                ),
-                messages=[{"role": "user", "content": (
-                    f"Instruction: {user_message}\n\n"
-                    f"Current file:\n{current_code}\n\n"
-                    f"Return ONLY: {{\"find\": \"exact old code\", \"replace\": \"new code\"}}"
-                )}]
+                messages=[
+                    {"role": "system", "content": (
+                        "You are an expert Python code surgeon. "
+                        "Given a user instruction and a Python file, identify the exact snippet to change. "
+                        "Respond ONLY with a valid raw JSON object with exactly two keys: "
+                        "\"find\" (exact existing code verbatim) and \"replace\" (new code). "
+                        "No explanation, no markdown, no text outside the JSON."
+                    )},
+                    {"role": "user", "content": (
+                        f"Instruction: {user_message}\n\n"
+                        f"Current file:\n{current_code}\n\n"
+                        f"Return ONLY: {{\"find\": \"exact old code\", \"replace\": \"new code\"}}"
+                    )},
+                ]
             )
 
             raw_text = re.sub(r'^```(?:json)?\s*|\s*```$', '', patch_response.choices[0].message.content.strip(), flags=re.MULTILINE).strip()
@@ -2791,14 +2834,55 @@ You are not limited to any domain. Explain whatever the user asks."""
                 f"Reply *'Approve'* to push or *'Cancel'* to discard."
             )
             await log_chat_message("assistant", msg)
-            await loop.run_in_executor(None, lambda: send_whatsapp(msg))
-            return Response(content="<Response></Response>", media_type="text/xml")
+            return msg
 
         except Exception as e:
             err = "⏳ *Claude overloaded.* Try again in a moment." if "529" in str(e) or "overloaded" in str(e).lower() else f"❌ *Patch Error:* {str(e)}"
             await log_chat_message("assistant", err)
-            await loop.run_in_executor(None, lambda: send_whatsapp(err))
-            return Response(content="<Response></Response>", media_type="text/xml")
+            return err
+
+    # =========================================================================
+    # NOTES & REMINDERS — natural-language intent detection
+    # =========================================================================
+    try:
+        now_str = dt.datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
+        intent_raw = await call_llm(MEMORY_INTENT_PROMPT, f"Current datetime: {now_str}\n\nMessage: {user_message}", max_tokens=300)
+        intent_parsed = json.loads(intent_raw)
+        memory_intent = intent_parsed.get("intent", "OTHER")
+        memory_content = intent_parsed.get("content")
+        memory_reminder = intent_parsed.get("reminder")
+    except Exception as e:
+        print(f"⚠️ Memory intent classification failed: {e}")
+        memory_intent = "OTHER"
+        memory_content = None
+        memory_reminder = None
+
+    if memory_intent == "SAVE_FACT" and memory_content:
+        await log_chat_message("user", user_message)
+        await save_user_fact(memory_content)
+        msg = f"🧠 *Got it, I'll remember:* {memory_content}"
+        await log_chat_message("assistant", msg)
+        return msg
+
+    if memory_intent == "RECALL_FACT" and memory_content:
+        await log_chat_message("user", user_message)
+        facts = await search_user_facts(memory_content)
+        if facts:
+            msg = "🧠 *Here's what I know:*\n\n" + "\n".join(f"- {f}" for f in facts)
+        else:
+            msg = f"🤷 Nothing saved about \"{memory_content}\" yet."
+        await log_chat_message("assistant", msg)
+        return msg
+
+    if memory_intent == "SET_REMINDER" and memory_reminder:
+        await log_chat_message("user", user_message)
+        app_scheduler = getattr(app.state, "scheduler", None)
+        if not app_scheduler:
+            msg = "⚠️ *Scheduler not available right now.*"
+        else:
+            success, msg = await create_reminder_from_intent(app_scheduler, memory_reminder, send_whatsapp)
+        await log_chat_message("assistant", msg)
+        return msg
 
     # =========================================================================
     # GENERAL CONVERSATIONAL CHAT
@@ -2812,14 +2896,17 @@ You are not limited to any domain. Explain whatever the user asks."""
         context_str = "\n".join([f"- {c['content']}" for c in relevant_context])
         facts_str = "\n".join([f"- {f}" for f in user_facts])
 
-        response = await anthropic_client.chat.completions.create(
-            model=OPENROUTER_MODEL, max_tokens=800,
-            system=(
+        system_msg = {
+            "role": "system",
+            "content": (
                 f"You are the user's Curriculum Coach and AI Architect.\n"
                 f"Facts about user:\n{facts_str}\n\nContext:\n{context_str}\n\n"
                 f"RULES: 2-4 sentences max. Use asterisks (*) for bold. End with one open-ended learning question."
             ),
-            messages=chat_history + [{"role": "user", "content": user_message}]
+        }
+        response = await anthropic_client.chat.completions.create(
+            model=OPENROUTER_MODEL, max_tokens=800,
+            messages=[system_msg] + chat_history + [{"role": "user", "content": user_message}]
         )
 
         ai_response = response.choices[0].message.content.strip()
@@ -2836,12 +2923,267 @@ You are not limited to any domain. Explain whatever the user asks."""
         print(f"❌ Webhook LLM error: {e}")
         ai_response = "⚠️ Coaching engine interrupted. Check console logs."
 
-    try:
-        await loop.run_in_executor(None, lambda: send_whatsapp(ai_response))
-    except Exception as e:
-        print(f"❌ Twilio dispatch failed: {e}")
+    return ai_response
 
+
+@app.post("/whatsapp-webhook")
+async def incoming_whatsapp_reply(Body: str = Form(...)):
+    reply = await process_message(Body.strip())
+    if reply:
+        try:
+            send_whatsapp_chunked(reply)
+        except Exception as e:
+            print(f"❌ Twilio dispatch failed: {e}")
     return Response(content="<Response></Response>", media_type="text/xml")
+
+
+@app.post("/chat-message")
+async def chat_message(request: Request):
+    body = await request.json()
+    user_msg = body.get("message", "").strip()
+    if not user_msg:
+        return JSONResponse({"reply": "Please type a message."})
+    try:
+        reply = await process_message(user_msg)
+        return JSONResponse({"reply": reply or "✅ Done — check WhatsApp for details."})
+    except Exception as e:
+        print(f"❌ chat-message error: {e}")
+        return JSONResponse({"reply": "Something went wrong. Try again."})
+
+
+CHAT_UI_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>JARVIS</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #0a0a0a; color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden;
+  }
+  #app { display: flex; flex-direction: column; height: 100vh; }
+
+  header {
+    flex: 0 0 auto;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px;
+    background: #0a0a0a;
+    border-bottom: 1px solid #1a1a1a;
+  }
+  header .brand { font-size: 18px; font-weight: 700; color: #fff; }
+  .pulse-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #22c55e;
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);
+    animation: pulse 1.6s infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
+    70%  { box-shadow: 0 0 0 8px rgba(34, 197, 94, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+  }
+
+  #chat-window {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .bubble-row { display: flex; flex-direction: column; max-width: 75%; }
+  .bubble-row.user { align-self: flex-end; align-items: flex-end; }
+  .bubble-row.agent { align-self: flex-start; align-items: flex-start; }
+  .bubble {
+    padding: 10px 14px; border-radius: 14px;
+    white-space: pre-wrap; word-wrap: break-word;
+    font-size: 16px; line-height: 1.4;
+  }
+  .bubble-row.user .bubble { background: #1a56db; color: #fff; }
+  .bubble-row.agent .bubble { background: #1a1a1a; color: #fff; }
+  .timestamp { font-size: 11px; color: #777; margin-top: 4px; padding: 0 4px; }
+
+  .typing-dots { display: flex; gap: 4px; padding: 10px 14px; background: #1a1a1a; border-radius: 14px; width: fit-content; }
+  .typing-dots span {
+    width: 6px; height: 6px; border-radius: 50%; background: #888;
+    animation: blink 1.2s infinite ease-in-out;
+  }
+  .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+  .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
+
+  #input-bar {
+    flex: 0 0 auto;
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px;
+    padding-bottom: max(10px, env(safe-area-inset-bottom));
+    background: #111111;
+    border-top: 1px solid #1a1a1a;
+  }
+  #msg-input {
+    flex: 1 1 auto;
+    background: #1a1a1a; color: #fff;
+    border: none; border-radius: 20px;
+    padding: 12px 16px;
+    font-size: 16px;
+    outline: none;
+  }
+  #msg-input::placeholder { color: #777; }
+  #send-btn {
+    background: #1a56db; color: #fff; border: none;
+    border-radius: 20px; padding: 12px 18px;
+    font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  #mic-btn {
+    background: #2a2a2a; color: #fff; border: none;
+    border-radius: 50%; width: 44px; height: 44px;
+    font-size: 18px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #mic-btn.recording { background: #dc2626; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand">⚡ JARVIS</div>
+    <div class="pulse-dot"></div>
+  </header>
+  <div id="chat-window"></div>
+  <div id="input-bar">
+    <input id="msg-input" type="text" placeholder="Message JARVIS..." autocomplete="off">
+    <button id="mic-btn" title="Voice input">🎤</button>
+    <button id="send-btn">Send</button>
+  </div>
+</div>
+
+<script>
+const chatWindow = document.getElementById('chat-window');
+const input = document.getElementById('msg-input');
+const sendBtn = document.getElementById('send-btn');
+const micBtn = document.getElementById('mic-btn');
+
+function timeNow() {
+  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function appendBubble(text, who) {
+  const row = document.createElement('div');
+  row.className = 'bubble-row ' + who;
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+  const ts = document.createElement('div');
+  ts.className = 'timestamp';
+  ts.textContent = timeNow();
+  row.appendChild(bubble);
+  row.appendChild(ts);
+  chatWindow.appendChild(row);
+  scrollToBottom();
+}
+
+function scrollToBottom() {
+  chatWindow.scrollTop = chatWindow.scrollHeight;
+}
+
+let typingRow = null;
+function showTyping() {
+  typingRow = document.createElement('div');
+  typingRow.className = 'bubble-row agent';
+  const dots = document.createElement('div');
+  dots.className = 'typing-dots';
+  dots.innerHTML = '<span></span><span></span><span></span>';
+  typingRow.appendChild(dots);
+  chatWindow.appendChild(typingRow);
+  scrollToBottom();
+}
+function hideTyping() {
+  if (typingRow) {
+    typingRow.remove();
+    typingRow = null;
+  }
+}
+
+async function sendMessage() {
+  const text = input.value.trim();
+  if (!text) return;
+  appendBubble(text, 'user');
+  input.value = '';
+  showTyping();
+  try {
+    const res = await fetch('/chat-message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text })
+    });
+    const data = await res.json();
+    hideTyping();
+    appendBubble(data.reply, 'agent');
+  } catch (err) {
+    hideTyping();
+    appendBubble('⚠️ Connection error. Try again.', 'agent');
+  }
+}
+
+sendBtn.addEventListener('click', sendMessage);
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+// Voice input — webkitSpeechRecognition, fills input but does not auto-send
+let recognizing = false;
+let recognizer = null;
+if ('webkitSpeechRecognition' in window) {
+  recognizer = new webkitSpeechRecognition();
+  recognizer.continuous = false;
+  recognizer.interimResults = false;
+  recognizer.lang = 'en-US';
+
+  recognizer.onresult = (event) => {
+    const transcript = event.results[0][0].transcript;
+    input.value = transcript;
+  };
+  recognizer.onend = () => {
+    recognizing = false;
+    micBtn.classList.remove('recording');
+  };
+  recognizer.onerror = () => {
+    recognizing = false;
+    micBtn.classList.remove('recording');
+  };
+
+  micBtn.addEventListener('click', () => {
+    if (recognizing) {
+      recognizer.stop();
+      return;
+    }
+    recognizing = true;
+    micBtn.classList.add('recording');
+    recognizer.start();
+  });
+} else {
+  micBtn.addEventListener('click', () => {
+    appendBubble('⚠️ Voice input not supported in this browser.', 'agent');
+  });
+}
+
+// Initial greeting based on local time of day
+const hour = new Date().getHours();
+const greeting = hour < 12 ? 'morning' : (hour < 17 ? 'afternoon' : 'evening');
+appendBubble('⚡ JARVIS online. Good ' + greeting + ', Madan.\\nWhat do you need?', 'agent');
+</script>
+</body>
+</html>"""
+
+
+@app.get("/chat", response_class=HTMLResponse)
+async def chat_ui():
+    return HTMLResponse(content=CHAT_UI_HTML)
 
 
 if __name__ == "__main__":
