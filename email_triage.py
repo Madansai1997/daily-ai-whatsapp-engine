@@ -364,6 +364,22 @@ async def cancel_composed_draft(draft_id: int):
         await db.commit()
 
 
+async def create_gmail_draft(to_address: str, subject: str, body: str):
+    """Create an actual Gmail draft (Drafts folder) — not a send. Returns the Gmail draft id, or None on failure."""
+    try:
+        service = _get_gmail_service()
+        message = MIMEText(body)
+        message["to"] = to_address
+        message["subject"] = subject
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
+        draft = service.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
+        print(f"✅ Gmail draft created for {to_address} | ID: {draft.get('id')}")
+        return draft.get("id")
+    except Exception as e:
+        print(f"⚠️ [email_triage] Gmail draft creation failed: {e}")
+        return None
+
+
 async def send_composed_email(to_address: str, subject: str, body: str, draft_id: int = None) -> bool:
     """Send a freshly-composed (not a reply) email via Gmail API."""
     try:

@@ -38,6 +38,7 @@ from email_triage import (
     get_latest_composed_draft,
     cancel_composed_draft,
     send_composed_email,
+    create_gmail_draft,
 )
 from reminders import (
     init_reminder_tables,
@@ -98,10 +99,13 @@ MEMORY_INTENT_PROMPT = (
     "Classify the user's message into exactly one intent. The message is preceded by the current date/time "
     "(Asia/Kolkata) for resolving relative dates. Respond with STRICT JSON only, no markdown, no commentary, "
     "matching exactly this shape:\n"
-    '{"intent": "SAVE_FACT" or "RECALL_FACT" or "SET_REMINDER" or "LIST_REMINDERS" or "OTHER", "content": "string" or null, '
+    '{"intent": "SAVE_FACT" or "RECALL_FACT" or "SET_REMINDER" or "LIST_REMINDERS" or "COMPOSE_EMAIL" or "OTHER", '
+    '"content": "string" or null, '
     '"reminder": {"text": "string", "kind": "once" or "daily" or "weekly", "run_at": "ISO 8601 datetime" or null, '
     '"hour": 0-23 or null, "minute": 0-59 or null, "day_of_week": "mon"/"tue"/"wed"/"thu"/"fri"/"sat"/"sun" or null} '
-    "or null}\n"
+    "or null, "
+    '"email": {"to": "recipient email address or empty string", "subject": "email subject line", '
+    '"body": "full professional email body text", "save_as_draft": true or false} or null}\n'
     "Use SAVE_FACT when the user is asking you to remember/note/save a fact about themselves or their plans "
     '(e.g. "remember that my exam is in August", "note that I prefer Python"). content = the fact itself, '
     "cleaned up as a standalone statement. reminder = null.\n"
@@ -117,16 +121,19 @@ MEMORY_INTENT_PROMPT = (
     "Use LIST_REMINDERS when the user wants to see, view, check, or be shown their current/upcoming reminders "
     '(e.g. "show me my reminders list", "what reminders do I have", "bring up my reminders", "list reminders", '
     '"hey jarvis show off the reminders") — any phrasing asking to see existing reminders, not set a new one. '
-    "content = null, reminder = null.\n"
-    "Use OTHER for everything else — general conversation, questions, commands. content = null, reminder = null."
-)
-
-EMAIL_COMPOSE_SYSTEM_PROMPT = (
-    "Extract email details from the user's request and write the email body. "
-    "Return ONLY valid JSON, no markdown, no commentary, matching exactly this shape:\n"
-    '{"to": "recipient email address", "subject": "email subject line", "body": "full professional email body text"}\n'
-    "Write a complete, professional email based on the key points given — not just a one-line summary. "
-    "Sign it as 'Madan'. If no recipient email address is given anywhere in the request, set \"to\" to an empty string."
+    "content = null, reminder = null, email = null.\n"
+    "Use COMPOSE_EMAIL when the user wants you to write/draft/compose a brand-new outbound email — any phrasing "
+    '(e.g. "draft an email to x@example.com about...", "draft me an email and put it in a draft...", "write an '
+    'email to... and send it"). This is NOT for editing/sending/cancelling an email already shown to the user in '
+    "this conversation — those are separate explicit commands (SEND, EDIT EMAIL:, CANCEL) and should be OTHER. "
+    "Extract the recipient address; write a complete, professional email body based on the key points given (not "
+    "just a one-line summary), signed 'Madan'. Set email.save_as_draft = true if the user wants it saved/put in "
+    "their Gmail Drafts without sending yet (e.g. \"put it in a draft\", \"just save it\", \"don't send it\"); set "
+    "it to false if they want it sent right away (e.g. \"send an email to...\", \"send it now\"). If no recipient "
+    'email address is given anywhere in the request, set email.to to an empty string. content = null, reminder = '
+    "null.\n"
+    "Use OTHER for everything else — general conversation, questions, commands. content = null, reminder = null, "
+    "email = null."
 )
 
 def get_llm_client() -> AsyncOpenAI:
@@ -2586,52 +2593,6 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
         return msg
 
     # =========================================================================
-    # EMAIL COMPOSE — draft a brand-new outbound email via natural language
-    # Distinct from EMAIL TRIAGE above: this is Madan asking JARVIS to write
-    # and send a fresh email, not approving/editing a reply to an inbound one.
-    # Usage: "draft an email to x@example.com about ..."
-    # =========================================================================
-    EMAIL_COMPOSE_TRIGGERS = [
-        "draft an email", "draft email", "compose an email", "compose email",
-        "write an email", "send an email to", "send email to",
-    ]
-    if any(phrase in user_message_clean for phrase in EMAIL_COMPOSE_TRIGGERS):
-        await log_chat_message("user", user_message)
-        try:
-            compose_raw = await call_llm(EMAIL_COMPOSE_SYSTEM_PROMPT, user_message, max_tokens=500)
-            compose_parsed = json.loads(compose_raw)
-            to_address = (compose_parsed.get("to") or "").strip()
-            subject = (compose_parsed.get("subject") or "").strip() or "No Subject"
-            body = (compose_parsed.get("body") or "").strip()
-        except Exception as e:
-            print(f"⚠️ Email compose LLM failed: {e}")
-            err = "⚠️ Couldn't draft that email — try again with a recipient and what it should say."
-            await log_chat_message("assistant", err)
-            return err
-
-        if not to_address or not body:
-            msg = (
-                "⚠️ I need a recipient email address and what the email should say.\n"
-                "Try: \"draft an email to x@example.com about ...\""
-            )
-            await log_chat_message("assistant", msg)
-            return msg
-
-        await save_composed_draft(to_address, subject, body)
-        reply = (
-            f"📧 *Email Draft Ready*\n\n"
-            f"*To:* {to_address}\n"
-            f"*Subject:* {subject}\n\n"
-            f"*Body:*\n{body}\n\n"
-            f"─────────────────\n"
-            f"Reply *SEND* to send this email\n"
-            f"Reply *EDIT EMAIL: <new text>* to revise\n"
-            f"Reply *CANCEL* to discard"
-        )
-        await log_chat_message("assistant", reply)
-        return reply
-
-    # =========================================================================
     # EMAIL COMPOSE — send confirmation
     # =========================================================================
     if user_message_clean in [
@@ -3207,11 +3168,13 @@ You are not limited to any domain. Explain whatever the user asks."""
         memory_intent = intent_parsed.get("intent", "OTHER")
         memory_content = intent_parsed.get("content")
         memory_reminder = intent_parsed.get("reminder")
+        memory_email = intent_parsed.get("email")
     except Exception as e:
         print(f"⚠️ Memory intent classification failed: {e}")
         memory_intent = "OTHER"
         memory_content = None
         memory_reminder = None
+        memory_email = None
 
     if memory_intent == "SAVE_FACT" and memory_content:
         await log_chat_message("user", user_message)
@@ -3237,6 +3200,58 @@ You are not limited to any domain. Explain whatever the user asks."""
             msg = "⚠️ *Scheduler not available right now.*"
         else:
             success, msg = await create_reminder_from_intent(app_scheduler, memory_reminder, send_whatsapp)
+        await log_chat_message("assistant", msg)
+        return msg
+
+    # =========================================================================
+    # EMAIL COMPOSE — draft a brand-new outbound email via natural language
+    # Routed entirely by the LLM intent classification above (COMPOSE_EMAIL) —
+    # no hardcoded trigger phrases, so any natural phrasing reaches this real
+    # Gmail-backed action instead of falling through to general chat (which
+    # has no way to actually create a draft or send anything).
+    # =========================================================================
+    if memory_intent == "COMPOSE_EMAIL" and memory_email:
+        await log_chat_message("user", user_message)
+        to_address = (memory_email.get("to") or "").strip()
+        subject = (memory_email.get("subject") or "").strip() or "No Subject"
+        body = (memory_email.get("body") or "").strip()
+        save_as_draft = bool(memory_email.get("save_as_draft"))
+
+        if not to_address or not body:
+            msg = (
+                "⚠️ I need a recipient email address and what the email should say.\n"
+                "Try: \"draft an email to x@example.com about ...\""
+            )
+            await log_chat_message("assistant", msg)
+            return msg
+
+        if save_as_draft:
+            gmail_draft_id = await create_gmail_draft(to_address, subject, body)
+            if gmail_draft_id:
+                msg = (
+                    f"✅ *Saved to your Gmail Drafts folder.*\n\n"
+                    f"*To:* {to_address}\n"
+                    f"*Subject:* {subject}\n\n"
+                    f"*Body:*\n{body}\n\n"
+                    f"Open Gmail → Drafts to review or send it from there."
+                )
+            else:
+                msg = (
+                    "❌ Failed to save the draft to Gmail.\n"
+                    "Check Render logs for details — Gmail credentials may need refreshing."
+                )
+        else:
+            await save_composed_draft(to_address, subject, body)
+            msg = (
+                f"📧 *Email Draft Ready*\n\n"
+                f"*To:* {to_address}\n"
+                f"*Subject:* {subject}\n\n"
+                f"*Body:*\n{body}\n\n"
+                f"─────────────────\n"
+                f"Reply *SEND* to send this email\n"
+                f"Reply *EDIT EMAIL: <new text>* to revise\n"
+                f"Reply *CANCEL* to discard"
+            )
         await log_chat_message("assistant", msg)
         return msg
 
@@ -3308,13 +3323,15 @@ You are not limited to any domain. Explain whatever the user asks."""
                 "at /Users/madansaidaram/Desktop/Daily_AI_updates'\n\n"
                 "7. Never suggest Madan install things or set things up "
                 "that are already built into his system\n\n"
-                "8. You are NOT shown Madan's actual reminders, emails, or schedule in this "
-                "conversation — you have no way to know if a specific reminder exists, when it "
-                "fires, or whether anything is pending. NEVER state or imply a specific reminder/"
-                "email/schedule status (e.g. 'your next reminder is scheduled for...', 'it'll fire "
-                "via WhatsApp soon') — that is a guess, not something you actually checked. If asked "
-                "about reminder/email/schedule status, say something like 'I'd need to actually check "
-                "that — try asking me to list your reminders' instead of answering directly.\n\n"
+                "8. You are NOT shown Madan's actual reminders, emails, drafts, or schedule in this "
+                "conversation, and reaching this fallback means nothing else handled the request — "
+                "you have NO ability to actually create reminders, drafts, or sent emails, save files, "
+                "or perform any other real action here. NEVER claim you did something or that something "
+                "exists/is scheduled (e.g. 'Draft created in...', 'your next reminder is scheduled for...', "
+                "'I've sent...') unless it is something you can see was already done. If Madan asked you to "
+                "do something actionable, tell him plainly this specific phrasing didn't trigger a real "
+                "action and suggest rephrasing (e.g. 'draft an email to x@example.com about...') instead of "
+                "pretending it succeeded.\n\n"
                 f"Facts about Madan:\n{facts_str}\n\n"
                 f"Relevant context:\n{context_str}"
             )
