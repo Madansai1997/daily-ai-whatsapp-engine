@@ -3675,19 +3675,44 @@ CHAT_UI_HTML = """<!DOCTYPE html>
     display: flex; align-items: center; justify-content: center;
   }
   #mic-btn.recording { background: #dc2626; }
+
+  .header-right { display: flex; align-items: center; gap: 14px; }
+  .tab-bar { display: flex; gap: 4px; background: #1a1a1a; border-radius: 10px; padding: 3px; }
+  .tab-btn {
+    background: none; border: none; color: #888;
+    font-size: 13px; font-weight: 600; font-family: inherit;
+    padding: 6px 14px; border-radius: 8px; cursor: pointer;
+  }
+  .tab-btn.active { background: #1a56db; color: #fff; }
+
+  .view { display: none; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+  .view.active { display: flex; }
+  #privachat-view { padding: 0; }
+  #privachat-frame { flex: 1 1 auto; width: 100%; height: 100%; border: none; }
 </style>
 </head>
 <body>
 <div id="app">
   <header>
     <div class="brand">⚡ JARVIS</div>
-    <div class="pulse-dot"></div>
+    <div class="header-right">
+      <div class="tab-bar">
+        <button class="tab-btn active" id="tab-jarvis" onclick="switchView('jarvis')">JARVIS</button>
+        <button class="tab-btn" id="tab-privachat" onclick="switchView('privachat')">PrivaChat</button>
+      </div>
+      <div class="pulse-dot"></div>
+    </div>
   </header>
-  <div id="chat-window"></div>
-  <div id="input-bar">
-    <input id="msg-input" type="text" placeholder="Message JARVIS..." autocomplete="off">
-    <button id="mic-btn" title="Voice input">🎤</button>
-    <button id="send-btn">Send</button>
+  <div id="jarvis-view" class="view active">
+    <div id="chat-window"></div>
+    <div id="input-bar">
+      <input id="msg-input" type="text" placeholder="Message JARVIS..." autocomplete="off">
+      <button id="mic-btn" title="Voice input">🎤</button>
+      <button id="send-btn">Send</button>
+    </div>
+  </div>
+  <div id="privachat-view" class="view">
+    <iframe id="privachat-frame" src="" title="PrivaChat"></iframe>
   </div>
 </div>
 
@@ -3831,6 +3856,20 @@ async function loadHistory() {
   appendBubble('⚡ JARVIS online. Good ' + greeting + ', Madan.\\nWhat do you need?', 'agent');
 }
 loadHistory();
+
+function switchView(view) {
+  document.getElementById('tab-jarvis').classList.toggle('active', view === 'jarvis');
+  document.getElementById('tab-privachat').classList.toggle('active', view === 'privachat');
+  document.getElementById('jarvis-view').classList.toggle('active', view === 'jarvis');
+  document.getElementById('privachat-view').classList.toggle('active', view === 'privachat');
+  if (view === 'privachat') {
+    const frame = document.getElementById('privachat-frame');
+    if (!frame.dataset.loaded) {
+      frame.src = 'https://privachat.onrender.com/';
+      frame.dataset.loaded = 'true';
+    }
+  }
+}
 </script>
 </body>
 </html>"""
