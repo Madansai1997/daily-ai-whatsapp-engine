@@ -98,7 +98,7 @@ MEMORY_INTENT_PROMPT = (
     "Classify the user's message into exactly one intent. The message is preceded by the current date/time "
     "(Asia/Kolkata) for resolving relative dates. Respond with STRICT JSON only, no markdown, no commentary, "
     "matching exactly this shape:\n"
-    '{"intent": "SAVE_FACT" or "RECALL_FACT" or "SET_REMINDER" or "OTHER", "content": "string" or null, '
+    '{"intent": "SAVE_FACT" or "RECALL_FACT" or "SET_REMINDER" or "LIST_REMINDERS" or "OTHER", "content": "string" or null, '
     '"reminder": {"text": "string", "kind": "once" or "daily" or "weekly", "run_at": "ISO 8601 datetime" or null, '
     '"hour": 0-23 or null, "minute": 0-59 or null, "day_of_week": "mon"/"tue"/"wed"/"thu"/"fri"/"sat"/"sun" or null} '
     "or null}\n"
@@ -114,6 +114,10 @@ MEMORY_INTENT_PROMPT = (
     'phrases like "tomorrow"/"in 2 hours" against the given current date/time) for a single occurrence; '
     'kind="daily" with hour/minute for every-day reminders; kind="weekly" with day_of_week/hour/minute for a '
     "specific weekday. reminder.text = the reminder message itself.\n"
+    "Use LIST_REMINDERS when the user wants to see, view, check, or be shown their current/upcoming reminders "
+    '(e.g. "show me my reminders list", "what reminders do I have", "bring up my reminders", "list reminders", '
+    '"hey jarvis show off the reminders") — any phrasing asking to see existing reminders, not set a new one. '
+    "content = null, reminder = null.\n"
     "Use OTHER for everything else — general conversation, questions, commands. content = null, reminder = null."
 )
 
@@ -3238,15 +3242,17 @@ You are not limited to any domain. Explain whatever the user asks."""
 
     # =========================================================================
     # REMINDERS — list pending reminders
+    # Routed entirely by the LLM intent classification above (LIST_REMINDERS) —
+    # no hardcoded phrase list, so any natural phrasing of "show my reminders"
+    # reaches this real DB lookup instead of falling through to general chat.
     # =========================================================================
-    if user_message_clean in [
-        "my reminders", "list reminders", "show reminders",
-        "what are my reminders", "pending reminders"
-    ]:
+    if memory_intent == "LIST_REMINDERS":
         await log_chat_message("user", user_message)
         rows = await get_active_reminders()
         if not rows:
-            return "📭 No pending reminders."
+            msg = "📭 No pending reminders."
+            await log_chat_message("assistant", msg)
+            return msg
 
         def _format_when(row):
             if row["kind"] == "once":
@@ -3302,6 +3308,13 @@ You are not limited to any domain. Explain whatever the user asks."""
                 "at /Users/madansaidaram/Desktop/Daily_AI_updates'\n\n"
                 "7. Never suggest Madan install things or set things up "
                 "that are already built into his system\n\n"
+                "8. You are NOT shown Madan's actual reminders, emails, or schedule in this "
+                "conversation — you have no way to know if a specific reminder exists, when it "
+                "fires, or whether anything is pending. NEVER state or imply a specific reminder/"
+                "email/schedule status (e.g. 'your next reminder is scheduled for...', 'it'll fire "
+                "via WhatsApp soon') — that is a guess, not something you actually checked. If asked "
+                "about reminder/email/schedule status, say something like 'I'd need to actually check "
+                "that — try asking me to list your reminders' instead of answering directly.\n\n"
                 f"Facts about Madan:\n{facts_str}\n\n"
                 f"Relevant context:\n{context_str}"
             )
