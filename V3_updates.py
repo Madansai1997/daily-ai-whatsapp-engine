@@ -46,6 +46,21 @@ from reminders import (
     create_reminder_from_intent,
     get_active_reminders,
 )
+from calendar_agent import (
+    init_calendar_tables,
+    list_upcoming_events,
+    check_availability,
+    create_event,
+    delete_event,
+    save_pending_event,
+    get_latest_pending_event,
+    cancel_pending_event,
+    confirm_pending_event,
+)
+from automations import (
+    init_automation_tables,
+    register_all_active_automations,
+)
 try:
     from weather_agent import get_weather, get_weather_brief
 except Exception as e:
@@ -99,13 +114,17 @@ MEMORY_INTENT_PROMPT = (
     "Classify the user's message into exactly one intent. The message is preceded by the current date/time "
     "(Asia/Kolkata) for resolving relative dates. Respond with STRICT JSON only, no markdown, no commentary, "
     "matching exactly this shape:\n"
-    '{"intent": "SAVE_FACT" or "RECALL_FACT" or "SET_REMINDER" or "LIST_REMINDERS" or "COMPOSE_EMAIL" or "OTHER", '
+    '{"intent": "SAVE_FACT" or "RECALL_FACT" or "SET_REMINDER" or "LIST_REMINDERS" or "COMPOSE_EMAIL" or '
+    '"CALENDAR_ACTION" or "OTHER", '
     '"content": "string" or null, '
     '"reminder": {"text": "string", "kind": "once" or "daily" or "weekly", "run_at": "ISO 8601 datetime" or null, '
     '"hour": 0-23 or null, "minute": 0-59 or null, "day_of_week": "mon"/"tue"/"wed"/"thu"/"fri"/"sat"/"sun" or null} '
     "or null, "
     '"email": {"to": "recipient email address or empty string", "subject": "email subject line", '
-    '"body": "full professional email body text", "save_as_draft": true or false} or null}\n'
+    '"body": "full professional email body text", "save_as_draft": true or false} or null, '
+    '"calendar": {"action": "list" or "check" or "create" or "delete", "summary": "string" or null, '
+    '"start_dt": "ISO 8601 datetime" or null, "end_dt": "ISO 8601 datetime" or null, '
+    '"description": "string" or null, "attendees": ["email", ...] or null} or null}\n'
     "Use SAVE_FACT when the user is asking you to remember/note/save a fact about themselves or their plans "
     '(e.g. "remember that my exam is in August", "note that I prefer Python"). content = the fact itself, '
     "cleaned up as a standalone statement. reminder = null.\n"
@@ -132,8 +151,20 @@ MEMORY_INTENT_PROMPT = (
     "it to false if they want it sent right away (e.g. \"send an email to...\", \"send it now\"). If no recipient "
     'email address is given anywhere in the request, set email.to to an empty string. content = null, reminder = '
     "null.\n"
+    "Use CALENDAR_ACTION when the user wants to view, check availability for, create, or cancel a calendar event. "
+    "Resolve relative dates/times (e.g. \"tomorrow at 3pm\") against the given current date/time into full ISO "
+    "8601 calendar.start_dt/end_dt — default to a 1-hour duration if no end time is stated. calendar.action="
+    '"list" for viewing upcoming events (e.g. "what\'s on my calendar", "show my events") — no other calendar '
+    'fields needed. calendar.action="check" for availability questions (e.g. "am I free at 3pm tomorrow") — fill '
+    'start_dt/end_dt for the window being checked. calendar.action="create" for adding a new event — fill '
+    "summary/start_dt/end_dt; fill calendar.attendees as a list of email addresses ONLY if the user explicitly "
+    "gives an email address to invite — never invent or guess an email address, omit attendees entirely "
+    'otherwise. calendar.action="delete" for cancelling/removing an existing event — fill summary with whatever '
+    "title/keyword identifies which event to remove. This is NOT for confirming/cancelling an event already shown "
+    "to the user in this conversation — those are separate explicit commands and should be OTHER. content = null, "
+    "reminder = null, email = null.\n"
     "Use OTHER for everything else — general conversation, questions, commands. content = null, reminder = null, "
-    "email = null."
+    "email = null, calendar = null."
 )
 
 def get_llm_client() -> AsyncOpenAI:
@@ -296,6 +327,8 @@ def init_db_tables():
 init_db_tables()
 init_email_tables()
 init_reminder_tables()
+init_calendar_tables()
+init_automation_tables()
 
 
 # ==========================================
@@ -332,6 +365,24 @@ def save_setting(key: str, value: str):
 
 
 # ==========================================
+# AUTOMATIONS DISPATCH — automations.py owns persistence/scheduling only;
+# this maps each action_type to the actual business logic that runs it.
+# ==========================================
+async def dispatch_automation(action_type: str, payload: dict):
+    if action_type == "send_message":
+        send_whatsapp_chunked(payload.get("message", ""))
+    elif action_type == "calendar_digest":
+        events = await list_upcoming_events(max_results=payload.get("max_results", 5))
+        if not events:
+            send_whatsapp_chunked("📅 *Today's calendar:* nothing on the books.")
+        else:
+            lines = [f"- {e['summary']} — {e['start']}" for e in events]
+            send_whatsapp_chunked("📅 *Upcoming on your calendar:*\n\n" + "\n".join(lines))
+    else:
+        print(f"⚠️ [dispatch_automation] Unknown action_type: {action_type}")
+
+
+# ==========================================
 # LIFESPAN & SCHEDULER
 # ==========================================
 @asynccontextmanager
@@ -355,8 +406,9 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     app.state.scheduler = scheduler
     restored = await register_all_active_reminders(scheduler, send_whatsapp_chunked)
+    automations_restored = await register_all_active_automations(scheduler, dispatch_automation)
     reminder_times = ", ".join([f"{r['hour']}:00" for r in SCHEDULE_CONFIG["reminders"]])
-    print(f"⏰ Scheduler: Digest {SCHEDULE_CONFIG['digest_hour']}:00 | Check-ins {reminder_times} | Report Sunday {SCHEDULE_CONFIG['weekly_report_hour']}:00 | Restored {restored} reminder(s)")
+    print(f"⏰ Scheduler: Digest {SCHEDULE_CONFIG['digest_hour']}:00 | Check-ins {reminder_times} | Report Sunday {SCHEDULE_CONFIG['weekly_report_hour']}:00 | Restored {restored} reminder(s), {automations_restored} automation(s)")
 
     yield
     scheduler.shutdown()
@@ -2658,10 +2710,37 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
         return msg
 
     # =========================================================================
+    # CALENDAR — confirm a pending event invite (one with attendees)
+    # Usage: "confirm event" / "send the invite" / "yes invite them"
+    # =========================================================================
+    if user_message_clean in ["confirm event", "send the invite", "send invite", "yes invite them", "confirm invite"]:
+        await log_chat_message("user", user_message)
+        pending_event = await get_latest_pending_event()
+        if not pending_event:
+            msg = "No pending event invite found. Create one first."
+        else:
+            created = await create_event(
+                pending_event["summary"], pending_event["start_dt"], pending_event["end_dt"],
+                pending_event["description"], pending_event["attendees"],
+            )
+            if created:
+                await confirm_pending_event(pending_event["id"])
+                msg = (
+                    f"✅ *Event created and invite sent!*\n\n"
+                    f"*Title:* {pending_event['summary']}\n"
+                    f"*Inviting:* {', '.join(pending_event['attendees'])}"
+                )
+            else:
+                msg = "❌ Failed to create the event. Check Render logs — Calendar credentials may need refreshing."
+        await log_chat_message("assistant", msg)
+        return msg
+
+    # =========================================================================
     # EMAIL COMPOSE — cancel the pending composed draft
-    # Only handles bare "cancel" when a composed draft actually exists —
-    # otherwise falls through to the CANCEL STAGED PATCH block further down,
-    # which already handles "cancel"/"no"/"abort" for the AI-architect flow.
+    # Only handles bare "cancel" when a composed draft or pending event invite
+    # actually exists — otherwise falls through to the CANCEL STAGED PATCH
+    # block further down, which already handles "cancel"/"no"/"abort" for the
+    # AI-architect flow.
     # =========================================================================
     if user_message_clean == "cancel":
         composed_draft = await get_latest_composed_draft()
@@ -2669,6 +2748,14 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
             await log_chat_message("user", user_message)
             await cancel_composed_draft(composed_draft["id"])
             msg = "🗑️ Email draft cancelled."
+            await log_chat_message("assistant", msg)
+            return msg
+
+        pending_event = await get_latest_pending_event()
+        if pending_event:
+            await log_chat_message("user", user_message)
+            await cancel_pending_event(pending_event["id"])
+            msg = "🗑️ Event invite cancelled."
             await log_chat_message("assistant", msg)
             return msg
 
@@ -3163,18 +3250,20 @@ You are not limited to any domain. Explain whatever the user asks."""
     # =========================================================================
     try:
         now_str = dt.datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
-        intent_raw = await call_llm(MEMORY_INTENT_PROMPT, f"Current datetime: {now_str}\n\nMessage: {user_message}", max_tokens=300)
+        intent_raw = await call_llm(MEMORY_INTENT_PROMPT, f"Current datetime: {now_str}\n\nMessage: {user_message}", max_tokens=500)
         intent_parsed = json.loads(intent_raw)
         memory_intent = intent_parsed.get("intent", "OTHER")
         memory_content = intent_parsed.get("content")
         memory_reminder = intent_parsed.get("reminder")
         memory_email = intent_parsed.get("email")
+        memory_calendar = intent_parsed.get("calendar")
     except Exception as e:
         print(f"⚠️ Memory intent classification failed: {e}")
         memory_intent = "OTHER"
         memory_content = None
         memory_reminder = None
         memory_email = None
+        memory_calendar = None
 
     if memory_intent == "SAVE_FACT" and memory_content:
         await log_chat_message("user", user_message)
@@ -3256,6 +3345,84 @@ You are not limited to any domain. Explain whatever the user asks."""
         return msg
 
     # =========================================================================
+    # CALENDAR — view, check availability, create, or cancel an event
+    # Routed entirely by the LLM intent classification above (CALENDAR_ACTION) —
+    # same pattern as reminders/email compose, no hardcoded trigger phrases.
+    # Events with attendees are held for confirmation (see CONFIRM EVENT /
+    # bare CANCEL above) since creating them auto-emails the invite.
+    # =========================================================================
+    if memory_intent == "CALENDAR_ACTION" and memory_calendar:
+        await log_chat_message("user", user_message)
+        cal_action = memory_calendar.get("action")
+
+        if cal_action == "list":
+            events = await list_upcoming_events(max_results=10)
+            if not events:
+                msg = "📭 No upcoming events on your calendar."
+            else:
+                lines = [f"{i+1}. *{e['summary']}* — {e['start']}" for i, e in enumerate(events)]
+                msg = f"📅 *Upcoming events ({len(events)}):*\n\n" + "\n".join(lines)
+
+        elif cal_action == "check":
+            start_dt = memory_calendar.get("start_dt")
+            end_dt = memory_calendar.get("end_dt")
+            if not start_dt or not end_dt:
+                msg = "⚠️ I need a specific time window to check — try \"am I free tomorrow at 3pm?\""
+            else:
+                conflicts = await check_availability(start_dt, end_dt)
+                if not conflicts:
+                    msg = "✅ You're free during that time."
+                else:
+                    lines = [f"- *{e['summary']}* — {e['start']}" for e in conflicts]
+                    msg = "⚠️ *You have something then:*\n\n" + "\n".join(lines)
+
+        elif cal_action == "create":
+            summary = (memory_calendar.get("summary") or "").strip() or "Untitled event"
+            start_dt = memory_calendar.get("start_dt")
+            end_dt = memory_calendar.get("end_dt")
+            description = memory_calendar.get("description")
+            attendees = memory_calendar.get("attendees") or []
+
+            if not start_dt or not end_dt:
+                msg = "⚠️ I need a start time for the event — try \"put a meeting on my calendar tomorrow at 3pm\""
+            elif attendees:
+                await save_pending_event(summary, start_dt, end_dt, description, attendees)
+                msg = (
+                    f"📅 *Event Ready — Invite Pending*\n\n"
+                    f"*Title:* {summary}\n"
+                    f"*When:* {start_dt} to {end_dt}\n"
+                    f"*Inviting:* {', '.join(attendees)}\n\n"
+                    f"─────────────────\n"
+                    f"Reply *CONFIRM EVENT* to create it and send the invite\n"
+                    f"Reply *CANCEL* to discard"
+                )
+            else:
+                created = await create_event(summary, start_dt, end_dt, description)
+                if created:
+                    msg = f"✅ *Event created:* {summary}\n*When:* {start_dt} to {end_dt}"
+                else:
+                    msg = "❌ Failed to create the event. Check Render logs — Calendar credentials may need refreshing."
+
+        elif cal_action == "delete":
+            summary_hint = (memory_calendar.get("summary") or "").strip().lower()
+            events = await list_upcoming_events(max_results=20)
+            matches = [e for e in events if summary_hint and summary_hint in e["summary"].lower()]
+            if not matches:
+                msg = f"🤷 Couldn't find an upcoming event matching \"{summary_hint}\"."
+            elif len(matches) > 1:
+                lines = [f"- *{e['summary']}* — {e['start']}" for e in matches]
+                msg = "⚠️ *Found more than one match — be more specific:*\n\n" + "\n".join(lines)
+            else:
+                ok = await delete_event(matches[0]["id"])
+                msg = f"🗑️ *Event cancelled:* {matches[0]['summary']}" if ok else "❌ Failed to cancel the event."
+
+        else:
+            msg = "⚠️ I didn't understand what calendar action you wanted."
+
+        await log_chat_message("assistant", msg)
+        return msg
+
+    # =========================================================================
     # REMINDERS — list pending reminders
     # Routed entirely by the LLM intent classification above (LIST_REMINDERS) —
     # no hardcoded phrase list, so any natural phrasing of "show my reminders"
@@ -3323,6 +3490,11 @@ You are not limited to any domain. Explain whatever the user asks."""
                 "address, say plainly that you can't confirm or name the exact linked address — never "
                 "name ANY specific email address as 'the' connected one, even Madan's own. Only say the "
                 "integration itself is live and working.\n"
+                "- Calendar features are built in (ask things like 'what's on my calendar today' or 'put "
+                "a meeting on my calendar tomorrow at 3pm'), but unlike Gmail you do NOT know for certain "
+                "the calendar OAuth scope is active yet — if a calendar request fails or says credentials "
+                "need refreshing, that's expected until the one-time OAuth re-authorization step is done; "
+                "don't claim calendar access definitely works OR definitely doesn't.\n"
                 "- Database: agent_memory.db in the project folder\n"
                 "- Do NOT invent or guess folder paths, file names, or "
                 "project structure — use only what is stated here\n"
