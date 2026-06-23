@@ -3679,11 +3679,21 @@ CHAT_UI_HTML = """<!DOCTYPE html>
   .header-right { display: flex; align-items: center; gap: 14px; }
   .tab-bar { display: flex; gap: 4px; background: #1a1a1a; border-radius: 10px; padding: 3px; }
   .tab-btn {
+    position: relative;
     background: none; border: none; color: #888;
     font-size: 13px; font-weight: 600; font-family: inherit;
     padding: 6px 14px; border-radius: 8px; cursor: pointer;
   }
   .tab-btn.active { background: #1a56db; color: #fff; }
+  .tab-badge {
+    display: none;
+    position: absolute; top: -4px; right: -4px;
+    min-width: 16px; height: 16px; padding: 0 3px;
+    background: #dc2626; color: #fff;
+    border-radius: 8px; font-size: 10px; font-weight: 700;
+    align-items: center; justify-content: center;
+  }
+  .tab-badge.visible { display: flex; }
 
   .view { display: none; flex-direction: column; flex: 1 1 auto; min-height: 0; }
   .view.active { display: flex; }
@@ -3698,7 +3708,10 @@ CHAT_UI_HTML = """<!DOCTYPE html>
     <div class="header-right">
       <div class="tab-bar">
         <button class="tab-btn active" id="tab-jarvis" onclick="switchView('jarvis')">JARVIS</button>
-        <button class="tab-btn" id="tab-privachat" onclick="switchView('privachat')">PrivaChat</button>
+        <button class="tab-btn" id="tab-privachat" onclick="switchView('privachat')">
+          PrivaChat
+          <span class="tab-badge" id="privachat-badge">0</span>
+        </button>
       </div>
       <div class="pulse-dot"></div>
     </div>
@@ -3857,7 +3870,17 @@ async function loadHistory() {
 }
 loadHistory();
 
+let currentView = 'jarvis';
+let privachatUnread = 0;
+
+function updatePrivachatBadge() {
+  const badge = document.getElementById('privachat-badge');
+  badge.textContent = privachatUnread > 9 ? '9+' : String(privachatUnread);
+  badge.classList.toggle('visible', privachatUnread > 0);
+}
+
 function switchView(view) {
+  currentView = view;
   document.getElementById('tab-jarvis').classList.toggle('active', view === 'jarvis');
   document.getElementById('tab-privachat').classList.toggle('active', view === 'privachat');
   document.getElementById('jarvis-view').classList.toggle('active', view === 'jarvis');
@@ -3868,8 +3891,18 @@ function switchView(view) {
       frame.src = 'https://privachat.onrender.com/';
       frame.dataset.loaded = 'true';
     }
+    privachatUnread = 0;
+    updatePrivachatBadge();
   }
 }
+
+window.addEventListener('message', (event) => {
+  if (event.origin !== 'https://privachat.onrender.com') return;
+  if (event.data && event.data.type === 'privachat:new-message' && currentView !== 'privachat') {
+    privachatUnread += 1;
+    updatePrivachatBadge();
+  }
+});
 </script>
 </body>
 </html>"""
