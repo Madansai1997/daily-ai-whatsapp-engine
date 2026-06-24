@@ -13,7 +13,9 @@ from datetime import date
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, Response, Form, Request
+import httpx
+import websockets as ws_lib
+from fastapi import FastAPI, Response, Form, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, HTMLResponse
 from twilio.rest import Client
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -3774,6 +3776,39 @@ CHAT_UI_HTML = """<!DOCTYPE html>
     0%, 100% { box-shadow: 0 0 8px rgba(255, 59, 92, 0.4); }
     50%      { box-shadow: 0 0 18px rgba(255, 59, 92, 0.8); }
   }
+  .header-right { display: flex; align-items: center; gap: 14px; }
+  .tab-bar {
+    display: flex; gap: 4px;
+    background: rgba(0, 20, 28, 0.6); border: 1px solid var(--cyan-dim);
+    border-radius: 8px; padding: 3px;
+  }
+  .tab-btn {
+    position: relative;
+    background: none; border: none; color: rgba(0, 229, 255, 0.5);
+    font-family: 'Orbitron', sans-serif; text-transform: uppercase;
+    font-size: 11px; font-weight: 700; letter-spacing: 1px;
+    padding: 7px 14px; border-radius: 6px; cursor: pointer;
+    transition: background 0.2s ease, color 0.2s ease;
+  }
+  .tab-btn.active {
+    background: rgba(0, 229, 255, 0.15); color: var(--cyan);
+    box-shadow: 0 0 10px rgba(0, 229, 255, 0.25);
+  }
+  .tab-badge {
+    display: none;
+    position: absolute; top: -4px; right: -4px;
+    min-width: 16px; height: 16px; padding: 0 3px;
+    background: #ff3b5c; color: #fff;
+    box-shadow: 0 0 8px rgba(255, 59, 92, 0.6);
+    border-radius: 8px; font-size: 10px; font-weight: 700;
+    align-items: center; justify-content: center;
+  }
+  .tab-badge.visible { display: flex; }
+
+  .view { display: none; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+  .view.active { display: flex; }
+  #privachat-view { padding: 0; }
+  #privachat-frame { flex: 1 1 auto; width: 100%; height: 100%; border: none; }
 </style>
 </head>
 <body>
@@ -3784,15 +3819,29 @@ CHAT_UI_HTML = """<!DOCTYPE html>
       <div class="brand">J.A.R.V.I.S.</div>
       <div class="subtitle">PERSONAL AI INTERFACE</div>
     </div>
-    <div class="status-ring"><div class="pulse-dot"></div></div>
-  </header>
-  <div id="chat-window"></div>
-  <div id="input-bar">
-    <div id="input-frame">
-      <input id="msg-input" type="text" placeholder="Message JARVIS..." autocomplete="off">
+    <div class="header-right">
+      <div class="tab-bar">
+        <button class="tab-btn active" id="tab-jarvis" onclick="switchView('jarvis')">JARVIS</button>
+        <button class="tab-btn" id="tab-privachat" onclick="switchView('privachat')">
+          PrivaChat
+          <span class="tab-badge" id="privachat-badge">0</span>
+        </button>
+      </div>
+      <div class="status-ring"><div class="pulse-dot"></div></div>
     </div>
-    <button id="mic-btn" title="Voice input">🎤</button>
-    <button id="send-btn">SEND</button>
+  </header>
+  <div id="jarvis-view" class="view active">
+    <div id="chat-window"></div>
+    <div id="input-bar">
+      <div id="input-frame">
+        <input id="msg-input" type="text" placeholder="Message JARVIS..." autocomplete="off">
+      </div>
+      <button id="mic-btn" title="Voice input">🎤</button>
+      <button id="send-btn">SEND</button>
+    </div>
+  </div>
+  <div id="privachat-view" class="view">
+    <iframe id="privachat-frame" src="" title="PrivaChat"></iframe>
   </div>
 </div>
 
@@ -3936,6 +3985,57 @@ async function loadHistory() {
   appendBubble('⚡ JARVIS online. Good ' + greeting + ', Madan.\\nWhat do you need?', 'agent');
 }
 loadHistory();
+
+let currentView = 'jarvis';
+let privachatUnread = 0;
+
+function updatePrivachatBadge() {
+  const badge = document.getElementById('privachat-badge');
+  badge.textContent = privachatUnread > 9 ? '9+' : String(privachatUnread);
+  badge.classList.toggle('visible', privachatUnread > 0);
+}
+
+function switchView(view) {
+  currentView = view;
+  document.getElementById('tab-jarvis').classList.toggle('active', view === 'jarvis');
+  document.getElementById('tab-privachat').classList.toggle('active', view === 'privachat');
+  document.getElementById('jarvis-view').classList.toggle('active', view === 'jarvis');
+  document.getElementById('privachat-view').classList.toggle('active', view === 'privachat');
+  if (view === 'privachat') {
+    const frame = document.getElementById('privachat-frame');
+    if (!frame.dataset.loaded) {
+      let src = '/privachat/';
+      const saved = localStorage.getItem('jarvis_privachat_session');
+      if (saved) {
+        try {
+          const { room, alias } = JSON.parse(saved);
+          if (room && alias) {
+            src = `/privachat/chat?room=${encodeURIComponent(room)}&alias=${encodeURIComponent(alias)}`;
+          }
+        } catch (e) {}
+      }
+      frame.src = src;
+      frame.dataset.loaded = 'true';
+    }
+    privachatUnread = 0;
+    updatePrivachatBadge();
+  }
+}
+
+window.addEventListener('message', (event) => {
+  const frame = document.getElementById('privachat-frame');
+  if (event.source !== frame.contentWindow) return;
+  if (event.data && event.data.type === 'privachat:session') {
+    localStorage.setItem('jarvis_privachat_session', JSON.stringify({ room: event.data.room, alias: event.data.alias }));
+  }
+  if (event.data && event.data.type === 'privachat:left') {
+    localStorage.removeItem('jarvis_privachat_session');
+  }
+  if (event.data && event.data.type === 'privachat:new-message' && currentView !== 'privachat') {
+    privachatUnread += 1;
+    updatePrivachatBadge();
+  }
+});
 </script>
 </body>
 </html>"""
@@ -3944,6 +4044,69 @@ loadHistory();
 @app.get("/chat", response_class=HTMLResponse)
 async def chat_ui():
     return HTMLResponse(content=CHAT_UI_HTML)
+
+
+# ── PrivaChat reverse proxy ──────────────────────────────────────────────────
+# PrivaChat is embedded as a same-origin iframe under "/privachat" so the
+# browser will allow it to request notification permission directly (browsers
+# block that permission prompt inside a cross-origin iframe). The actual app
+# still runs on its own separate Render deployment; this just forwards traffic
+# through so it appears to be part of this origin.
+PRIVACHAT_HTTP_BASE = "https://privachat.onrender.com"
+PRIVACHAT_WS_BASE = "wss://privachat.onrender.com"
+
+@app.api_route("/privachat/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def privachat_http_proxy(path: str, request: Request):
+    url = f"{PRIVACHAT_HTTP_BASE}/privachat/{path}"
+    body = await request.body()
+    forward_headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in ("host", "content-length", "accept-encoding")
+    }
+    async with httpx.AsyncClient(follow_redirects=False, timeout=30.0) as client:
+        upstream = await client.request(
+            request.method, url,
+            params=request.query_params,
+            content=body,
+            headers=forward_headers,
+        )
+    excluded = {"content-encoding", "content-length", "transfer-encoding", "connection"}
+    response_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in excluded}
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        headers=response_headers,
+        media_type=upstream.headers.get("content-type"),
+    )
+
+@app.websocket("/privachat/ws/{room_code}/{alias}")
+async def privachat_ws_proxy(websocket: WebSocket, room_code: str, alias: str):
+    await websocket.accept()
+    upstream_url = f"{PRIVACHAT_WS_BASE}/privachat/ws/{room_code}/{alias}"
+    try:
+        async with ws_lib.connect(upstream_url) as upstream:
+            async def client_to_upstream():
+                while True:
+                    msg = await websocket.receive_text()
+                    await upstream.send(msg)
+
+            async def upstream_to_client():
+                async for msg in upstream:
+                    await websocket.send_text(msg)
+
+            tasks = [asyncio.ensure_future(client_to_upstream()), asyncio.ensure_future(upstream_to_client())]
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for t in tasks:
+                t.cancel()
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"[privachat-proxy] ws error: {e!r}", flush=True)
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
