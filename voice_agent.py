@@ -43,10 +43,14 @@ def _ensure_voice_downloaded() -> str:
 def _get_voice():
     global _voice
     if _voice is None:
+        print(f"🧊 [voice_agent] cache MISS (pid {os.getpid()}) — loading '{VOICE_NAME}' from disk...")
+        t0 = time.time()
         from piper import PiperVoice
         model_path = _ensure_voice_downloaded()
         _voice = PiperVoice.load(model_path)
-        print(f"✅ Voice model '{VOICE_NAME}' loaded.")
+        print(f"✅ [voice_agent] model loaded in {time.time() - t0:.2f}s (pid {os.getpid()})")
+    else:
+        print(f"♻️ [voice_agent] cache HIT (pid {os.getpid()}) — reusing already-loaded model")
     return _voice
 
 
@@ -68,9 +72,11 @@ def synthesize_speech(text: str) -> bytes:
         return None
     try:
         voice = _get_voice()
+        t0 = time.time()
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wav_file:
             voice.synthesize_wav(cleaned, wav_file)
+        print(f"⏱️ [voice_agent] raw inference took {time.time() - t0:.2f}s (pid {os.getpid()}, text len {len(cleaned)})")
         return buf.getvalue()
     except Exception as e:
         print(f"⚠️ [voice_agent] synthesize_speech failed: {e}")
