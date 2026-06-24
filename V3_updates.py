@@ -103,15 +103,13 @@ SCHEDULE_CONFIG = {
 }
 
 
-OPENROUTER_MODEL = "openai/gpt-oss-120b:free"
-OPENROUTER_MODEL_FAST = "openai/gpt-oss-120b:free"
+OPENROUTER_MODEL = "openai/gpt-oss-120b"
+OPENROUTER_MODEL_FAST = "openai/gpt-oss-120b"
 
 FREE_MODELS = [
-    "openai/gpt-oss-120b:free",                 # GPT OSS — currently the most reliable free tier
-    "meta-llama/llama-4-maverick:free",         # Llama 4 — reliable backup
-    "nvidia/nemotron-3-super-120b-a12b:free",   # Nemotron Super — best for agents, but daily free quota exhausts fast
-    "google/gemma-4-31b-it:free",               # Gemma 4 — highest quality score, tight per-min rate limit
-    # "nvidia/nemotron-3-ultra:free" removed — not a valid OpenRouter model ID, always 400s
+    "openai/gpt-oss-120b",          # GPT OSS — same model as before, now on Groq's LPU hardware
+    "llama-3.3-70b-versatile",      # Llama 3.3 70B — reliable backup
+    "llama-3.1-8b-instant",         # Llama 3.1 8B — smallest/fastest backup
 ]
 
 MEMORY_INTENT_PROMPT = (
@@ -182,23 +180,32 @@ MEMORY_INTENT_PROMPT = (
 )
 
 def get_llm_client() -> AsyncOpenAI:
-    key = os.environ.get("OPENROUTER_API_KEY", "")
+    key = os.environ.get("GROQ_API_KEY", "")
     if not key:
-        print("⚠️ WARNING: OPENROUTER_API_KEY not set!")
+        print("⚠️ WARNING: GROQ_API_KEY not set!")
     return AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
+        base_url="https://api.groq.com/openai/v1",
         api_key=key or "missing",
     )
 
 anthropic_client = get_llm_client()  # kept same name so all call sites work unchanged
 
 async def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 1000) -> str:
-    """Call LLM with automatic fallback through FREE_MODELS on rate limit or error."""
+    """Call LLM with automatic fallback through FREE_MODELS on rate limit or error.
+
+    GPT-OSS models on Groq spend tokens on hidden reasoning before the visible answer —
+    with a tight max_tokens budget this can consume the whole budget and return empty
+    content (finish_reason="length", zero actual answer). reasoning_effort="low" fixes
+    this, but only gpt-oss models accept that parameter — other free-tier fallbacks
+    (Llama, etc.) hard-error on it, so it's only added when the model name matches.
+    """
     for model in FREE_MODELS:
         try:
+            extra_body = {"reasoning_effort": "low"} if "gpt-oss" in model else {}
             response = await anthropic_client.chat.completions.create(
                 model=model,
                 max_tokens=max_tokens,
+                extra_body=extra_body,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -404,7 +411,7 @@ async def lifespan(app: FastAPI):
     missing_env = []
     if not TWILIO_SID: missing_env.append("TWILIO_SID")
     if not TWILIO_TOKEN: missing_env.append("TWILIO_TOKEN")
-    if not os.environ.get("OPENROUTER_API_KEY"): missing_env.append("OPENROUTER_API_KEY")
+    if not os.environ.get("GROQ_API_KEY"): missing_env.append("GROQ_API_KEY")
 
     if missing_env:
         print(f"⚠️ STARTUP WARNING: Missing: {', '.join(missing_env)}")
@@ -803,6 +810,7 @@ Output raw JSON array of strings only. If no facts, output [].
     try:
         response = await anthropic_client.chat.completions.create(
             model=OPENROUTER_MODEL, max_tokens=300, temperature=0.0,
+            extra_body={"reasoning_effort": "low"},
             messages=[{"role": "user", "content": prompt}]
         )
         text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.choices[0].message.content.strip(), flags=re.MULTILINE).strip()
@@ -1035,7 +1043,7 @@ OUTPUT ONLY THIS JSON, NOTHING ELSE:
     try:
         response = await anthropic_client.chat.completions.create(
             model=OPENROUTER_MODEL, max_tokens=500, temperature=0.4,
-            extra_body={"thinking": False},
+            extra_body={"reasoning_effort": "low"},
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -1133,6 +1141,7 @@ Return a JSON object with keys "project_title" and "subtasks" (array of 7 object
     try:
         response = await anthropic_client.chat.completions.create(
             model=OPENROUTER_MODEL, max_tokens=1500, temperature=0.3,
+            extra_body={"reasoning_effort": "low"},
             messages=[{"role": "user", "content": prompt}]
         )
         text = response.choices[0].message.content.strip()
@@ -1217,6 +1226,7 @@ Verdict is PASS if average_score >= 6.0, otherwise FAIL.
     try:
         response = await anthropic_client.chat.completions.create(
             model=OPENROUTER_MODEL, max_tokens=600, temperature=0.0,
+            extra_body={"reasoning_effort": "low"},
             messages=[{"role": "user", "content": prompt}]
         )
         text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.choices[0].message.content.strip(), flags=re.MULTILINE).strip()
@@ -1580,7 +1590,7 @@ Example:
 
     response = await anthropic_client.chat.completions.create(
         model=OPENROUTER_MODEL, max_tokens=2000, temperature=0.2,
-        extra_body={"thinking": False},
+        extra_body={"reasoning_effort": "low"},
         messages=[{"role": "user", "content": prompt}]
     )
 
@@ -1665,6 +1675,7 @@ Generate all 10 questions following this exact structure.
     try:
         response = await anthropic_client.chat.completions.create(
             model=OPENROUTER_MODEL_FAST, max_tokens=2000, temperature=0.3,
+            extra_body={"reasoning_effort": "low"},
             messages=[{"role": "user", "content": prompt}]
         )
         text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.choices[0].message.content.strip(), flags=re.MULTILINE).strip()
@@ -1855,6 +1866,7 @@ Output raw JSON only:
         try:
             response = await anthropic_client.chat.completions.create(
                 model=OPENROUTER_MODEL, max_tokens=400, temperature=0.2,
+                extra_body={"reasoning_effort": "low"},
                 messages=[{"role": "user", "content": prompt}]
             )
             text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.choices[0].message.content.strip(), flags=re.MULTILINE).strip()
@@ -2858,6 +2870,7 @@ When explaining:
 You are not limited to any domain. Explain whatever the user asks."""
             explain_response = await anthropic_client.chat.completions.create(
                 model=OPENROUTER_MODEL, max_tokens=500, temperature=0.3,
+                extra_body={"reasoning_effort": "low"},
                 messages=[
                     {"role": "system", "content": explain_system},
                     {"role": "user", "content": f"Explain this concept clearly: {concept_to_explain}"},
@@ -2930,6 +2943,7 @@ You are not limited to any domain. Explain whatever the user asks."""
         try:
             review_response = await anthropic_client.chat.completions.create(
                 model=OPENROUTER_MODEL, max_tokens=600, temperature=0.2,
+                extra_body={"reasoning_effort": "medium"},
                 messages=[{"role": "user", "content": (
                     f"Review this code snippet for an {skill_level} student learning {concept}.\n"
                     f"```\n{code_snippet}\n```\n"
@@ -3198,7 +3212,8 @@ You are not limited to any domain. Explain whatever the user asks."""
             print("🧠 [AI Architect]: Generating surgical patch...")
 
             patch_response = await anthropic_client.chat.completions.create(
-                model=OPENROUTER_MODEL, max_tokens=1500, temperature=0.1,
+                model=OPENROUTER_MODEL, max_tokens=2500, temperature=0.1,
+                extra_body={"reasoning_effort": "medium"},
                 messages=[
                     {"role": "system", "content": (
                         "You are an expert Python code surgeon. "
@@ -3563,6 +3578,7 @@ You are not limited to any domain. Explain whatever the user asks."""
         t_reply = time.time()
         response = await anthropic_client.chat.completions.create(
             model=OPENROUTER_MODEL, max_tokens=800,
+            extra_body={"reasoning_effort": "low"},
             messages=[system_msg] + chat_history + [{"role": "user", "content": user_message}]
         )
         print(f"⏱️ [process_message] general-chat reply call took {time.time() - t_reply:.2f}s")
