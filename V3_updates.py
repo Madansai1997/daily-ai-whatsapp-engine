@@ -42,6 +42,7 @@ from email_triage import (
     cancel_composed_draft,
     send_composed_email,
     create_gmail_draft,
+    get_connected_gmail_address,
 )
 from reminders import (
     init_reminder_tables,
@@ -132,11 +133,15 @@ MEMORY_INTENT_PROMPT = (
     "fill in the actual recipient/subject/body/time/etc. you find there, rather than leaving fields empty or "
     "falling back to OTHER just because the latest message alone doesn't contain them.\n"
     "Use SAVE_FACT when the user is asking you to remember/note/save a fact about themselves or their plans "
-    '(e.g. "remember that my exam is in August", "note that I prefer Python"). content = the fact itself, '
-    "cleaned up as a standalone statement. reminder = null.\n"
-    "Use RECALL_FACT when the user is asking what you remember/know about something "
-    '(e.g. "do you remember my exam date", "what do you know about my AWS plans"). content = the topic/keywords '
-    "to search for. reminder = null.\n"
+    '(e.g. "remember that my exam is in August", "note that I prefer Python") OR when they plainly state a '
+    'personal detail with no explicit save-verb at all, which still needs saving (e.g. "email id would be '
+    'madansai97@gmail.com", "my phone number is...", "my email is..."). content = the fact itself, cleaned up '
+    'as a standalone statement (e.g. "Madan\'s email address is madansai97@gmail.com"), using whatever literal '
+    "value the user gave even if it looks unusual — never correct, guess, or reformat it. reminder = null.\n"
+    "Use RECALL_FACT when the user is asking what you remember/know about something, including direct "
+    'questions about their own stored details (e.g. "do you remember my exam date", "what do you know about '
+    'my AWS plans", "what\'s my email id", "what\'s my phone number"). content = the topic/keywords to search '
+    "for (e.g. \"email address\"). reminder = null.\n"
     "Use SET_REMINDER when the user asks to be reminded/notified about something at a specific time, or on a "
     'recurring schedule (e.g. "remind me to call mom tomorrow at 5pm", "remind me every day at 9am to drink '
     'water"). content = null. Fill reminder: kind="once" with run_at as a full ISO 8601 datetime (resolve relative '
@@ -405,6 +410,8 @@ async def dispatch_automation(action_type: str, payload: dict):
 # ==========================================
 # LIFESPAN & SCHEDULER
 # ==========================================
+CONNECTED_GMAIL_ADDRESS = None  # populated once at startup by lifespan() below
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     missing_env = []
@@ -416,6 +423,13 @@ async def lifespan(app: FastAPI):
         print(f"⚠️ STARTUP WARNING: Missing: {', '.join(missing_env)}")
     else:
         print("✅ Environment Variables Verified.")
+
+    global CONNECTED_GMAIL_ADDRESS
+    CONNECTED_GMAIL_ADDRESS = get_connected_gmail_address()
+    if CONNECTED_GMAIL_ADDRESS:
+        print(f"✅ Gmail integration confirmed: {CONNECTED_GMAIL_ADDRESS}")
+    else:
+        print("⚠️ Could not confirm which Gmail account is connected.")
 
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
     scheduler.add_job(run_morning_digest, "cron", hour=SCHEDULE_CONFIG["digest_hour"], minute=0)
@@ -3513,6 +3527,22 @@ You are not limited to any domain. Explain whatever the user asks."""
         context_str = "\n".join([f"- {c['content']}" for c in relevant_context])
         facts_str = "\n".join([f"- {f}" for f in user_facts])
 
+        if CONNECTED_GMAIL_ADDRESS:
+            gmail_fact_line = (
+                f"- Gmail is connected via OAuth to {CONNECTED_GMAIL_ADDRESS} — you CAN draft "
+                "(save to Gmail Drafts) or send real emails when asked. Never deny this. This is "
+                "the exact account drafts/sends actually go through — state it plainly if asked. "
+                "It is NOT necessarily the same as any personal email address saved as a fact "
+                "about Madan elsewhere; never conflate the two.\n"
+            )
+        else:
+            gmail_fact_line = (
+                "- Gmail is connected via OAuth — you CAN draft (save to Gmail Drafts) or send "
+                "real emails when asked. Never deny this. But the exact linked address couldn't "
+                "be confirmed at startup — never name any specific email address as the connected "
+                "one until it's verified. Just say the integration is live and working.\n"
+            )
+
         if source == "web":
             system_prompt = (
                 "You are JARVIS, Madan's personal AI executive assistant. "
@@ -3535,7 +3565,10 @@ You are not limited to any domain. Explain whatever the user asks."""
                 "bullet list — max 5 items, each under 15 words. Drop the rest "
                 "unless Madan asks for more.\n"
                 "5. End every response with exactly one of: ✅ Done | "
-                "⚡ Needs your input | 📌 FYI only\n"
+                "⚡ Needs your input | 📌 FYI only — this tag comes AFTER your real "
+                "answer or question, it never replaces it. Never reply with just the "
+                "tag alone; if you're asking for clarification, write the actual "
+                "clarifying question first, then the tag.\n"
                 "6. If the answer is yes or no, say yes or no first, "
                 "then one sentence of context if needed.\n"
                 "7. Never give tutorials, step-by-step guides, or long "
@@ -3561,11 +3594,7 @@ You are not limited to any domain. Explain whatever the user asks."""
                 "- Reminders fire via WhatsApp using Twilio (already configured)\n"
                 "- Emails triage to WhatsApp every hour\n"
                 "- Briefings go to WhatsApp\n"
-                "- Gmail is connected via OAuth — you CAN draft (save to Gmail "
-                "Drafts) or send real emails when asked. Never deny this. But you "
-                "have NO WAY to know the exact linked address — never name any "
-                "specific email address as the connected one. Just say the "
-                "integration is live and working.\n"
+                f"{gmail_fact_line}"
                 "- Calendar features are built in (e.g. 'what's on my calendar "
                 "today', 'put a meeting tomorrow at 3pm') — but do NOT claim "
                 "calendar access definitely works OR definitely doesn't until "
