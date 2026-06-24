@@ -3588,58 +3588,121 @@ CHAT_UI_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>JARVIS</title>
+<title>J.A.R.V.I.S.</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <style>
   * { box-sizing: border-box; }
+  :root {
+    --cyan: #00e5ff;
+    --cyan-dim: rgba(0, 229, 255, 0.35);
+    --cyan-faint: rgba(0, 229, 255, 0.12);
+  }
   html, body {
     margin: 0; padding: 0; height: 100%;
-    background: #0a0a0a; color: #fff;
+    background: #000509; color: #d7f6ff;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     overflow: hidden;
   }
-  #app { display: flex; flex-direction: column; height: 100vh; }
+  #app {
+    position: relative;
+    display: flex; flex-direction: column; height: 100vh;
+    background:
+      radial-gradient(ellipse at top, rgba(0, 229, 255, 0.07), transparent 60%),
+      repeating-linear-gradient(0deg, rgba(0, 229, 255, 0.025) 0px, rgba(0, 229, 255, 0.025) 1px, transparent 1px, transparent 28px),
+      repeating-linear-gradient(90deg, rgba(0, 229, 255, 0.025) 0px, rgba(0, 229, 255, 0.025) 1px, transparent 1px, transparent 28px),
+      #000509;
+  }
+  #scanline {
+    position: absolute; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--cyan-dim), transparent);
+    opacity: 0.5; pointer-events: none; z-index: 50;
+    animation: scan 6s linear infinite;
+  }
+  @keyframes scan {
+    0%   { top: 0%; }
+    100% { top: 100%; }
+  }
 
   header {
     flex: 0 0 auto;
     display: flex; align-items: center; justify-content: space-between;
-    padding: 14px 18px;
-    background: #0a0a0a;
-    border-bottom: 1px solid #1a1a1a;
+    padding: 16px 20px;
+    background: linear-gradient(180deg, rgba(0,229,255,0.06), transparent);
+    border-bottom: 1px solid var(--cyan-dim);
+    position: relative; z-index: 10;
   }
-  header .brand { font-size: 18px; font-weight: 700; color: #fff; }
+  header .brand {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 18px; font-weight: 700; letter-spacing: 3px;
+    color: var(--cyan);
+    text-shadow: 0 0 8px var(--cyan-dim), 0 0 18px var(--cyan-dim);
+  }
+  header .subtitle {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px; letter-spacing: 2px; color: rgba(0,229,255,0.5);
+    margin-top: 2px;
+  }
+  .status-ring {
+    position: relative; width: 22px; height: 22px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .status-ring::before {
+    content: ''; position: absolute; inset: 0;
+    border: 1px solid var(--cyan-dim); border-radius: 50%;
+    animation: ring-pulse 2s ease-out infinite;
+  }
   .pulse-dot {
-    width: 10px; height: 10px; border-radius: 50%;
+    width: 8px; height: 8px; border-radius: 50%;
     background: #22c55e;
-    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);
-    animation: pulse 1.6s infinite;
+    box-shadow: 0 0 6px #22c55e, 0 0 12px rgba(34, 197, 94, 0.6);
   }
-  @keyframes pulse {
-    0%   { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
-    70%  { box-shadow: 0 0 0 8px rgba(34, 197, 94, 0); }
-    100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+  @keyframes ring-pulse {
+    0%   { transform: scale(0.6); opacity: 1; }
+    100% { transform: scale(1.8); opacity: 0; }
   }
 
   #chat-window {
     flex: 1 1 auto;
     overflow-y: auto;
-    padding: 16px;
+    padding: 18px;
     display: flex; flex-direction: column; gap: 12px;
+    position: relative; z-index: 10;
   }
   .bubble-row { display: flex; flex-direction: column; max-width: 75%; }
   .bubble-row.user { align-self: flex-end; align-items: flex-end; }
   .bubble-row.agent { align-self: flex-start; align-items: flex-start; }
   .bubble {
-    padding: 10px 14px; border-radius: 14px;
+    padding: 10px 14px; border-radius: 10px;
     white-space: pre-wrap; word-wrap: break-word;
     font-size: 16px; line-height: 1.4;
   }
-  .bubble-row.user .bubble { background: #1a56db; color: #fff; }
-  .bubble-row.agent .bubble { background: #1a1a1a; color: #fff; }
-  .timestamp { font-size: 11px; color: #777; margin-top: 4px; padding: 0 4px; }
+  .bubble-row.user .bubble {
+    background: linear-gradient(135deg, #0a3a52, #0e5a78);
+    color: #eafffd;
+    border: 1px solid rgba(0, 229, 255, 0.5);
+    box-shadow: 0 0 10px rgba(0, 229, 255, 0.15);
+  }
+  .bubble-row.agent .bubble {
+    background: rgba(0, 20, 28, 0.85);
+    color: #d7f6ff;
+    border: 1px solid var(--cyan-dim);
+    box-shadow: 0 0 10px rgba(0, 229, 255, 0.08);
+  }
+  .timestamp {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px; letter-spacing: 1px; color: rgba(0, 229, 255, 0.45);
+    margin-top: 4px; padding: 0 4px;
+  }
 
-  .typing-dots { display: flex; gap: 4px; padding: 10px 14px; background: #1a1a1a; border-radius: 14px; width: fit-content; }
+  .typing-dots {
+    display: flex; gap: 4px; padding: 10px 14px;
+    background: rgba(0, 20, 28, 0.85); border: 1px solid var(--cyan-dim);
+    border-radius: 10px; width: fit-content;
+    box-shadow: 0 0 10px rgba(0, 229, 255, 0.08);
+  }
   .typing-dots span {
-    width: 6px; height: 6px; border-radius: 50%; background: #888;
+    width: 6px; height: 6px; border-radius: 50%; background: var(--cyan);
     animation: blink 1.2s infinite ease-in-out;
   }
   .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
@@ -3648,46 +3711,88 @@ CHAT_UI_HTML = """<!DOCTYPE html>
 
   #input-bar {
     flex: 0 0 auto;
-    display: flex; align-items: center; gap: 8px;
-    padding: 10px 12px;
-    padding-bottom: max(10px, env(safe-area-inset-bottom));
-    background: #111111;
-    border-top: 1px solid #1a1a1a;
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 14px;
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+    background: linear-gradient(0deg, rgba(0,229,255,0.05), transparent);
+    border-top: 1px solid var(--cyan-dim);
+    position: relative; z-index: 10;
+  }
+  #input-frame {
+    flex: 1 1 auto; position: relative;
+    border: 1px solid var(--cyan-dim); border-radius: 6px;
+    background: rgba(0, 20, 28, 0.6);
+    transition: box-shadow 0.2s ease, border-color 0.2s ease;
+  }
+  #input-frame:focus-within {
+    border-color: var(--cyan);
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.35);
+  }
+  #input-frame::before, #input-frame::after {
+    content: ''; position: absolute; width: 8px; height: 8px;
+    border-top: 2px solid var(--cyan); border-left: 2px solid var(--cyan);
+    top: -1px; left: -1px;
+  }
+  #input-frame::after {
+    border-top: none; border-left: none;
+    border-bottom: 2px solid var(--cyan); border-right: 2px solid var(--cyan);
+    top: auto; left: auto; bottom: -1px; right: -1px;
   }
   #msg-input {
-    flex: 1 1 auto;
-    background: #1a1a1a; color: #fff;
-    border: none; border-radius: 20px;
-    padding: 12px 16px;
+    width: 100%;
+    background: transparent; color: #eafffd;
+    border: none; border-radius: 6px;
+    padding: 12px 14px;
     font-size: 16px;
+    font-family: 'Share Tech Mono', monospace;
     outline: none;
   }
-  #msg-input::placeholder { color: #777; }
+  #msg-input::placeholder { color: rgba(0, 229, 255, 0.4); }
   #send-btn {
-    background: #1a56db; color: #fff; border: none;
-    border-radius: 20px; padding: 12px 18px;
-    font-size: 15px; font-weight: 600; cursor: pointer;
+    background: rgba(0, 229, 255, 0.08); color: var(--cyan);
+    border: 1px solid var(--cyan); border-radius: 6px; padding: 12px 18px;
+    font-family: 'Orbitron', sans-serif;
+    font-size: 13px; font-weight: 700; letter-spacing: 1px; cursor: pointer;
+    transition: background 0.2s ease, box-shadow 0.2s ease;
   }
+  #send-btn:hover { background: rgba(0, 229, 255, 0.2); box-shadow: 0 0 14px rgba(0, 229, 255, 0.4); }
   #mic-btn {
-    background: #2a2a2a; color: #fff; border: none;
-    border-radius: 50%; width: 44px; height: 44px;
+    position: relative;
+    background: rgba(0, 229, 255, 0.06); color: var(--cyan); border: 1px solid var(--cyan-dim);
+    border-radius: 50%; width: 46px; height: 46px;
     font-size: 18px; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
   }
-  #mic-btn.recording { background: #dc2626; }
+  #mic-btn:hover { box-shadow: 0 0 10px rgba(0, 229, 255, 0.3); }
+  #mic-btn.recording {
+    border-color: #ff3b5c; color: #ff3b5c;
+    box-shadow: 0 0 14px rgba(255, 59, 92, 0.5);
+    animation: mic-pulse 1s ease-in-out infinite;
+  }
+  @keyframes mic-pulse {
+    0%, 100% { box-shadow: 0 0 8px rgba(255, 59, 92, 0.4); }
+    50%      { box-shadow: 0 0 18px rgba(255, 59, 92, 0.8); }
+  }
 </style>
 </head>
 <body>
 <div id="app">
+  <div id="scanline"></div>
   <header>
-    <div class="brand">⚡ JARVIS</div>
-    <div class="pulse-dot"></div>
+    <div>
+      <div class="brand">J.A.R.V.I.S.</div>
+      <div class="subtitle">PERSONAL AI INTERFACE</div>
+    </div>
+    <div class="status-ring"><div class="pulse-dot"></div></div>
   </header>
   <div id="chat-window"></div>
   <div id="input-bar">
-    <input id="msg-input" type="text" placeholder="Message JARVIS..." autocomplete="off">
+    <div id="input-frame">
+      <input id="msg-input" type="text" placeholder="Message JARVIS..." autocomplete="off">
+    </div>
     <button id="mic-btn" title="Voice input">🎤</button>
-    <button id="send-btn">Send</button>
+    <button id="send-btn">SEND</button>
   </div>
 </div>
 
