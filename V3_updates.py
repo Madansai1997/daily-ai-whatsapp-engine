@@ -63,6 +63,7 @@ from automations import (
     init_automation_tables,
     register_all_active_automations,
 )
+from voice_agent import synthesize_speech
 try:
     from weather_agent import get_weather, get_weather_brief
 except Exception as e:
@@ -3617,6 +3618,40 @@ async def chat_message(request: Request):
         return JSONResponse({"reply": "Something went wrong. Try again."})
 
 
+TTS_SUMMARY_PROMPT = (
+    "You are JARVIS, about to speak the verbal version of a longer written answer you already "
+    "gave. Read it, actually understand the point being made, then brief it back in 2-3 sentences "
+    "the way a composed, confident assistant would summarize something out loud to someone — not "
+    "a list of facts, the actual takeaway. Skip code, skip numbers/lists, skip markdown entirely. "
+    "End with a short, natural pointer back to the full answer on screen, phrased differently each "
+    "time, not a fixed disclaimer — e.g. mention the complete breakdown/details/steps are there to "
+    "read. Output plain spoken sentences only, nothing else."
+)
+
+
+@app.post("/tts")
+async def text_to_speech(request: Request):
+    body = await request.json()
+    text = body.get("text", "").strip()
+    if not text:
+        return Response(status_code=204)
+    try:
+        speech_text = text
+        if len(text) > 400:
+            try:
+                summary = await call_llm(TTS_SUMMARY_PROMPT, text, max_tokens=150)
+                speech_text = summary.strip() or text
+            except Exception as e:
+                print(f"⚠️ tts summary failed, speaking full text instead: {e}")
+        audio_bytes = await asyncio.get_event_loop().run_in_executor(None, synthesize_speech, speech_text)
+        if not audio_bytes:
+            return Response(status_code=204)
+        return Response(content=audio_bytes, media_type="audio/wav")
+    except Exception as e:
+        print(f"❌ tts error: {e}")
+        return Response(status_code=204)
+
+
 CHAT_UI_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3842,6 +3877,24 @@ CHAT_UI_HTML = """<!DOCTYPE html>
     0%, 100% { box-shadow: 0 0 8px rgba(255, 59, 92, 0.4); }
     50%      { box-shadow: 0 0 18px rgba(255, 59, 92, 0.8); }
   }
+  #voice-toggle-btn {
+    position: relative;
+    background: rgba(0, 229, 255, 0.06); color: var(--cyan); border: 1px solid var(--cyan-dim);
+    border-radius: 50%; width: 46px; height: 46px;
+    font-size: 18px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+  #voice-toggle-btn:hover { box-shadow: 0 0 10px rgba(0, 229, 255, 0.3); }
+  #voice-toggle-btn .icon-off { display: none; }
+  #voice-toggle-btn.muted { border-color: rgba(0, 229, 255, 0.2); color: rgba(0, 229, 255, 0.35); }
+  #voice-toggle-btn.muted .icon-on { display: none; }
+  #voice-toggle-btn.muted .icon-off { display: block; }
+  #voice-toggle-btn.speaking {
+    border-color: var(--cyan);
+    box-shadow: 0 0 14px rgba(0, 229, 255, 0.6);
+    animation: mic-pulse 1s ease-in-out infinite;
+  }
   .header-right { display: flex; align-items: center; gap: 14px; }
   .tab-bar {
     display: flex; gap: 4px;
@@ -3902,6 +3955,18 @@ CHAT_UI_HTML = """<!DOCTYPE html>
       <div id="input-frame">
         <input id="msg-input" type="text" placeholder="Message JARVIS..." autocomplete="off">
       </div>
+      <button id="voice-toggle-btn" title="Toggle JARVIS voice">
+        <svg class="icon-on" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+          <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+          <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+        </svg>
+        <svg class="icon-off" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+          <line x1="23" y1="9" x2="17" y2="15"></line>
+          <line x1="17" y1="9" x2="23" y2="15"></line>
+        </svg>
+      </button>
       <button id="mic-btn" title="Voice input">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
@@ -3923,6 +3988,47 @@ const chatWindow = document.getElementById('chat-window');
 const input = document.getElementById('msg-input');
 const sendBtn = document.getElementById('send-btn');
 const micBtn = document.getElementById('mic-btn');
+const voiceToggleBtn = document.getElementById('voice-toggle-btn');
+
+let voiceEnabled = localStorage.getItem('jarvis_voice_enabled') !== 'false';
+voiceToggleBtn.classList.toggle('muted', !voiceEnabled);
+let jarvisAudio = null;
+
+function setSpeaking(isSpeaking) {
+  voiceToggleBtn.classList.toggle('speaking', isSpeaking);
+}
+
+async function speak(text) {
+  if (!voiceEnabled || !text) return;
+  try {
+    const res = await fetch('/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+    if (res.status !== 200) return;
+    const blob = await res.blob();
+    if (jarvisAudio) jarvisAudio.pause();
+    jarvisAudio = new Audio(URL.createObjectURL(blob));
+    jarvisAudio.onplay = () => setSpeaking(true);
+    jarvisAudio.onended = () => setSpeaking(false);
+    jarvisAudio.onerror = () => setSpeaking(false);
+    await jarvisAudio.play();
+  } catch (err) {
+    console.error('Voice playback failed', err);
+    setSpeaking(false);
+  }
+}
+
+voiceToggleBtn.addEventListener('click', () => {
+  voiceEnabled = !voiceEnabled;
+  localStorage.setItem('jarvis_voice_enabled', String(voiceEnabled));
+  voiceToggleBtn.classList.toggle('muted', !voiceEnabled);
+  if (!voiceEnabled && jarvisAudio) {
+    jarvisAudio.pause();
+    setSpeaking(false);
+  }
+});
 
 function timeNow() {
   return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -4043,6 +4149,7 @@ async function sendMessage() {
     const data = await res.json();
     hideTyping();
     appendBubble(data.reply, 'agent');
+    speak(data.reply);
   } catch (err) {
     hideTyping();
     appendBubble('⚠️ Connection error. Try again.', 'agent');
@@ -4057,7 +4164,9 @@ input.addEventListener('keydown', (e) => {
   }
 });
 
-// Voice input — webkitSpeechRecognition, fills input but does not auto-send
+// Voice input — webkitSpeechRecognition. Auto-sends once it detects you've
+// stopped talking (continuous=false + interimResults=false means onresult
+// only fires after the browser's own end-of-speech detection).
 let recognizing = false;
 let recognizer = null;
 if ('webkitSpeechRecognition' in window) {
@@ -4069,6 +4178,7 @@ if ('webkitSpeechRecognition' in window) {
   recognizer.onresult = (event) => {
     const transcript = event.results[0][0].transcript;
     input.value = transcript;
+    sendMessage();
   };
   recognizer.onend = () => {
     recognizing = false;
