@@ -3266,6 +3266,7 @@ You are not limited to any domain. Explain whatever the user asks."""
         now_str = dt.datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
         recent_history = await get_recent_chat_history(limit=6)
         history_str = "\n".join(f"{m['role']}: {m['content']}" for m in recent_history) or "(none)"
+        t_intent = time.time()
         intent_raw = await call_llm(
             MEMORY_INTENT_PROMPT,
             f"Current datetime: {now_str}\n\nRecent conversation (use this to resolve references like "
@@ -3273,6 +3274,7 @@ You are not limited to any domain. Explain whatever the user asks."""
             f"Latest message: {user_message}",
             max_tokens=500,
         )
+        print(f"⏱️ [process_message] intent classification took {time.time() - t_intent:.2f}s")
         intent_parsed = json.loads(intent_raw)
         memory_intent = intent_parsed.get("intent", "OTHER")
         memory_content = intent_parsed.get("content")
@@ -3558,10 +3560,12 @@ You are not limited to any domain. Explain whatever the user asks."""
                 f"RULES: 2-4 sentences max. Use asterisks (*) for bold. End with one open-ended learning question."
             )
         system_msg = {"role": "system", "content": system_prompt}
+        t_reply = time.time()
         response = await anthropic_client.chat.completions.create(
             model=OPENROUTER_MODEL, max_tokens=800,
             messages=[system_msg] + chat_history + [{"role": "user", "content": user_message}]
         )
+        print(f"⏱️ [process_message] general-chat reply call took {time.time() - t_reply:.2f}s")
 
         ai_response = response.choices[0].message.content.strip()
         await log_chat_message("assistant", ai_response)
@@ -3571,7 +3575,9 @@ You are not limited to any domain. Explain whatever the user asks."""
         elif "to *Foundational*" in ai_response:
             await update_db_skill("Foundational")
 
-        await extract_and_save_facts(user_message, ai_response)
+        # Fire-and-forget: this LLM call only saves background memory facts, it has
+        # no bearing on ai_response, so it must not block the user's reply latency.
+        asyncio.create_task(extract_and_save_facts(user_message, ai_response))
 
     except Exception as e:
         print(f"❌ Webhook LLM error: {e}")

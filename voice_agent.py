@@ -2,15 +2,19 @@
 Voice Agent — local neural text-to-speech via Piper (JARVIS voice output).
 
 Runs fully offline, no API key, no usage cap — unlike a hosted TTS service.
-The voice model (~60MB .onnx) is not committed to the repo; it's downloaded
-once on first use into voices/ and then persists for the life of the
-running instance.
+The voice model (~60MB .onnx) is committed to the repo under voices/ so it
+ships with every deploy — Render's free-tier disk is ephemeral and wipes
+anything not baked into the deploy image, and re-downloading it on every
+cold start added 30+ seconds to whichever request happened to be first.
+The auto-download below only exists as a fallback if the file is ever
+missing (e.g. a different PIPER_VOICE is configured without committing it).
 """
 
 import os
 import re
 import sys
 import io
+import time
 import wave
 import subprocess
 
@@ -26,11 +30,13 @@ def _ensure_voice_downloaded() -> str:
     if os.path.exists(model_path):
         return model_path
     os.makedirs(VOICES_DIR, exist_ok=True)
-    print(f"🔊 [voice_agent] Downloading voice model '{VOICE_NAME}' (first run only)...")
+    t0 = time.time()
+    print(f"🔊 [voice_agent] '{VOICE_NAME}' not found on disk, downloading (this should not happen if it's committed to the repo)...")
     subprocess.run(
         [sys.executable, "-m", "piper.download_voices", VOICE_NAME, "--data-dir", VOICES_DIR],
         check=True,
     )
+    print(f"⏱️ [voice_agent] download took {time.time() - t0:.2f}s")
     return model_path
 
 
