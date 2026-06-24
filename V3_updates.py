@@ -3890,7 +3890,17 @@ function switchView(view) {
   if (view === 'privachat') {
     const frame = document.getElementById('privachat-frame');
     if (!frame.dataset.loaded) {
-      frame.src = '/privachat/';
+      let src = '/privachat/';
+      const saved = localStorage.getItem('jarvis_privachat_session');
+      if (saved) {
+        try {
+          const { room, alias } = JSON.parse(saved);
+          if (room && alias) {
+            src = `/privachat/chat?room=${encodeURIComponent(room)}&alias=${encodeURIComponent(alias)}`;
+          }
+        } catch (e) {}
+      }
+      frame.src = src;
       frame.dataset.loaded = 'true';
     }
     privachatUnread = 0;
@@ -3901,6 +3911,12 @@ function switchView(view) {
 window.addEventListener('message', (event) => {
   const frame = document.getElementById('privachat-frame');
   if (event.source !== frame.contentWindow) return;
+  if (event.data && event.data.type === 'privachat:session') {
+    localStorage.setItem('jarvis_privachat_session', JSON.stringify({ room: event.data.room, alias: event.data.alias }));
+  }
+  if (event.data && event.data.type === 'privachat:left') {
+    localStorage.removeItem('jarvis_privachat_session');
+  }
   if (event.data && event.data.type === 'privachat:new-message' && currentView !== 'privachat') {
     privachatUnread += 1;
     updatePrivachatBadge();
