@@ -4122,7 +4122,7 @@ function renderMarkdown(raw) {
   try {
     // Pull fenced code blocks out first so their content survives untouched by other rules.
     const codeBlocks = [];
-    let text = raw.replace(/```[a-zA-Z0-9]*\\n?([\s\S]*?)```/g, (match, code) => {
+    let text = raw.replace(/```[a-zA-Z0-9]*\\n?([\\s\\S]*?)```/g, (match, code) => {
       codeBlocks.push(code.replace(/\\n$/, ''));
       return ' CODEBLOCK' + (codeBlocks.length - 1) + ' ';
     });
@@ -4138,18 +4138,18 @@ function renderMarkdown(raw) {
     text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
 
     // Bold: **text** then leftover single-asterisk *text* (WhatsApp-style, used elsewhere in this app).
-    text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    text = text.replace(/\*([^*]+)\*/g, '<strong>$1</strong>');
+    text = text.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+    text = text.replace(/\\*([^*]+)\\*/g, '<strong>$1</strong>');
 
     // Consecutive "- " / "* " lines become a real <ul>.
     text = text.replace(/(?:^|\\n)((?:[-*] .+)(?:\\n[-*] .+)*)/g, (match, block) => {
-      const items = block.split('\\n').map(line => '<li>' + line.replace(/^[-*]\s+/, '') + '</li>').join('');
+      const items = block.split('\\n').map(line => '<li>' + line.replace(/^[-*]\\s+/, '') + '</li>').join('');
       return '\\n<ul>' + items + '</ul>';
     });
 
     text = text.replace(/\\n/g, '<br>');
 
-    text = text.replace(/ CODEBLOCK(\d+) /g, (match, idx) => {
+    text = text.replace(/ CODEBLOCK(\\d+) /g, (match, idx) => {
       return '<pre><code>' + escapeHtml(codeBlocks[Number(idx)]) + '</code></pre>';
     });
 
