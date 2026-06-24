@@ -13,7 +13,9 @@ from datetime import date
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, Response, Form, Request
+import httpx
+import websockets as ws_lib
+from fastapi import FastAPI, Response, Form, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, HTMLResponse
 from twilio.rest import Client
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -3888,7 +3890,7 @@ function switchView(view) {
   if (view === 'privachat') {
     const frame = document.getElementById('privachat-frame');
     if (!frame.dataset.loaded) {
-      frame.src = 'https://privachat.onrender.com/';
+      frame.src = '/privachat/';
       frame.dataset.loaded = 'true';
     }
     privachatUnread = 0;
@@ -3897,7 +3899,8 @@ function switchView(view) {
 }
 
 window.addEventListener('message', (event) => {
-  if (event.origin !== 'https://privachat.onrender.com') return;
+  const frame = document.getElementById('privachat-frame');
+  if (event.source !== frame.contentWindow) return;
   if (event.data && event.data.type === 'privachat:new-message' && currentView !== 'privachat') {
     privachatUnread += 1;
     updatePrivachatBadge();
@@ -3911,6 +3914,69 @@ window.addEventListener('message', (event) => {
 @app.get("/chat", response_class=HTMLResponse)
 async def chat_ui():
     return HTMLResponse(content=CHAT_UI_HTML)
+
+
+# ── PrivaChat reverse proxy ──────────────────────────────────────────────────
+# PrivaChat is embedded as a same-origin iframe under "/privachat" so the
+# browser will allow it to request notification permission directly (browsers
+# block that permission prompt inside a cross-origin iframe). The actual app
+# still runs on its own separate Render deployment; this just forwards traffic
+# through so it appears to be part of this origin.
+PRIVACHAT_HTTP_BASE = "https://privachat.onrender.com"
+PRIVACHAT_WS_BASE = "wss://privachat.onrender.com"
+
+@app.api_route("/privachat/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def privachat_http_proxy(path: str, request: Request):
+    url = f"{PRIVACHAT_HTTP_BASE}/privachat/{path}"
+    body = await request.body()
+    forward_headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in ("host", "content-length")
+    }
+    async with httpx.AsyncClient(follow_redirects=False, timeout=30.0) as client:
+        upstream = await client.request(
+            request.method, url,
+            params=request.query_params,
+            content=body,
+            headers=forward_headers,
+        )
+    excluded = {"content-encoding", "transfer-encoding", "connection"}
+    response_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in excluded}
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        headers=response_headers,
+        media_type=upstream.headers.get("content-type"),
+    )
+
+@app.websocket("/privachat/ws/{room_code}/{alias}")
+async def privachat_ws_proxy(websocket: WebSocket, room_code: str, alias: str):
+    await websocket.accept()
+    upstream_url = f"{PRIVACHAT_WS_BASE}/privachat/ws/{room_code}/{alias}"
+    try:
+        async with ws_lib.connect(upstream_url) as upstream:
+            async def client_to_upstream():
+                while True:
+                    msg = await websocket.receive_text()
+                    await upstream.send(msg)
+
+            async def upstream_to_client():
+                async for msg in upstream:
+                    await websocket.send_text(msg)
+
+            tasks = [asyncio.ensure_future(client_to_upstream()), asyncio.ensure_future(upstream_to_client())]
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for t in tasks:
+                t.cancel()
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"[privachat-proxy] ws error: {e!r}", flush=True)
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
