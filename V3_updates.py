@@ -493,11 +493,13 @@ def send_whatsapp_chunked(body: str, to_number: str = None, from_number: str = N
 
 
 @app.get("/")
+@app.head("/")
 def health_check():
     return {"status": "healthy", "message": "Engine is awake"}
 
 
 @app.get("/ping")
+@app.head("/ping")
 def ping():
     return {"status": "alive", "timestamp": dt.datetime.utcnow().isoformat()}
 
