@@ -3488,13 +3488,23 @@ You are not limited to any domain. Explain whatever the user asks."""
                 "assistant who knows Madan well, not a teacher or a chatbot.\n\n"
                 "RESPONSE RULES — follow these strictly:\n"
                 "1. Answer in 1-3 sentences maximum for simple questions\n"
-                "2. Never show code unless Madan explicitly asks for code\n"
+                "2. Never show code unless Madan explicitly asks for code or "
+                "syntax. When he does, format it properly like Claude or "
+                "ChatGPT would: wrap any multi-line code or syntax example in "
+                "a fenced code block (```language ... ```), never as bare "
+                "backticked text sitting inside a paragraph. Use single "
+                "backticks only for a short inline reference like `.filter()`.\n"
                 "3. Never give tutorials, step-by-step guides, or long "
                 "explanations unless specifically asked\n"
                 "4. If the answer is yes or no, say yes or no first, "
                 "then one sentence of context if needed\n"
-                "5. Use plain conversational English, no markdown headers, "
-                "no bullet lists unless listing actual items\n"
+                "5. Use plain conversational English for simple answers — no "
+                "headers, no bullet lists, no code. But if Madan asks for "
+                "multiple syntaxes, options, or steps, structure the answer "
+                "with real markdown: a short bullet list for the items and a "
+                "fenced code block for each code example, the same way "
+                "Claude/ChatGPT format a technical answer — don't cram it "
+                "all into one prose paragraph\n"
                 "6. You know Madan's full system — here are the real facts:\n"
                 "- Project folder: /Users/madansaidaram/Desktop/Daily_AI_updates\n"
                 "- Main app file: V3_updates.py in that folder\n"
@@ -3718,6 +3728,40 @@ CHAT_UI_HTML = """<!DOCTYPE html>
     font-size: 10px; letter-spacing: 1px; color: rgba(0, 229, 255, 0.45);
     margin-top: 4px; padding: 0 4px;
   }
+  .bubble pre {
+    background: rgba(0, 8, 12, 0.9);
+    border: 1px solid var(--cyan-dim);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin: 8px 0;
+    overflow-x: auto;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px; line-height: 1.5;
+  }
+  .bubble pre code {
+    background: none; border: none; padding: 0; color: #9bf6ff;
+  }
+  .bubble code {
+    background: rgba(0, 229, 255, 0.1);
+    border: 1px solid rgba(0, 229, 255, 0.25);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.9em;
+    color: #7df9ff;
+  }
+  .bubble strong { color: var(--cyan); font-weight: 700; }
+  .bubble ul, .bubble ol { margin: 6px 0; padding-left: 22px; }
+  .bubble li { margin: 2px 0; }
+  .bubble h1, .bubble h2, .bubble h3 {
+    font-family: 'Orbitron', sans-serif;
+    color: var(--cyan);
+    margin: 8px 0 4px;
+    line-height: 1.3;
+  }
+  .bubble h1 { font-size: 1.15em; }
+  .bubble h2 { font-size: 1.08em; }
+  .bubble h3 { font-size: 1.02em; }
 
   .typing-dots {
     display: flex; gap: 4px; padding: 10px 14px;
@@ -3890,12 +3934,59 @@ function formatStoredTimestamp(ts) {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function renderMarkdown(raw) {
+  // Pull fenced code blocks out first so their content survives untouched by other rules.
+  const codeBlocks = [];
+  let text = raw.replace(/```[a-zA-Z0-9]*\n?([\s\S]*?)```/g, (match, code) => {
+    codeBlocks.push(code.replace(/\n$/, ''));
+    return ' CODEBLOCK' + (codeBlocks.length - 1) + ' ';
+  });
+
+  text = escapeHtml(text);
+
+  // Headers (#, ##, ###) — only when they start a line.
+  text = text.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  text = text.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  text = text.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+  // Inline code.
+  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+  // Bold: **text** then leftover single-asterisk *text* (WhatsApp-style, used elsewhere in this app).
+  text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/\*([^*]+)\*/g, '<strong>$1</strong>');
+
+  // Consecutive "- " / "* " lines become a real <ul>.
+  text = text.replace(/(?:^|\n)((?:[-*] .+)(?:\n[-*] .+)*)/g, (match, block) => {
+    const items = block.split('\n').map(line => '<li>' + line.replace(/^[-*]\s+/, '') + '</li>').join('');
+    return '\n<ul>' + items + '</ul>';
+  });
+
+  text = text.replace(/\n/g, '<br>');
+
+  text = text.replace(/ CODEBLOCK(\d+) /g, (match, idx) => {
+    return '<pre><code>' + escapeHtml(codeBlocks[Number(idx)]) + '</code></pre>';
+  });
+
+  return text;
+}
+
 function appendBubble(text, who, timeStr) {
   const row = document.createElement('div');
   row.className = 'bubble-row ' + who;
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
-  bubble.textContent = text;
+  if (who === 'agent') {
+    bubble.innerHTML = renderMarkdown(text);
+  } else {
+    bubble.textContent = text;
+  }
   const ts = document.createElement('div');
   ts.className = 'timestamp';
   ts.textContent = timeStr || timeNow();
