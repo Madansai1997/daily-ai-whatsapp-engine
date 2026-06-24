@@ -3627,6 +3627,20 @@ TTS_SUMMARY_PROMPT = (
     "time, not a fixed disclaimer — e.g. mention the complete breakdown/details/steps are there to "
     "read. Output plain spoken sentences only, nothing else."
 )
+TTS_SUMMARY_TIMEOUT_SEC = 3.0
+
+
+def _fallback_speech_summary(text: str, max_chars: int = 280) -> str:
+    """No-LLM summary used when the real summarizer is too slow/rate-limited — keeps voice from stalling."""
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    summary = ""
+    for sentence in sentences:
+        if summary and len(summary) + len(sentence) > max_chars:
+            break
+        summary += (" " if summary else "") + sentence
+    if not summary:
+        summary = text[:max_chars]
+    return summary.strip() + " The full details are right there in the chat."
 
 
 @app.post("/tts")
@@ -3639,10 +3653,16 @@ async def text_to_speech(request: Request):
         speech_text = text
         if len(text) > 400:
             try:
-                summary = await call_llm(TTS_SUMMARY_PROMPT, text, max_tokens=150)
+                summary = await asyncio.wait_for(
+                    call_llm(TTS_SUMMARY_PROMPT, text, max_tokens=100), timeout=TTS_SUMMARY_TIMEOUT_SEC
+                )
                 speech_text = summary.strip() or text
+            except asyncio.TimeoutError:
+                print("⚠️ tts summary timed out, using fast fallback summary")
+                speech_text = _fallback_speech_summary(text)
             except Exception as e:
-                print(f"⚠️ tts summary failed, speaking full text instead: {e}")
+                print(f"⚠️ tts summary failed, using fast fallback summary: {e}")
+                speech_text = _fallback_speech_summary(text)
         audio_bytes = await asyncio.get_event_loop().run_in_executor(None, synthesize_speech, speech_text)
         if not audio_bytes:
             return Response(status_code=204)
@@ -3895,6 +3915,10 @@ CHAT_UI_HTML = """<!DOCTYPE html>
     box-shadow: 0 0 14px rgba(0, 229, 255, 0.6);
     animation: mic-pulse 1s ease-in-out infinite;
   }
+  #voice-toggle-btn.pending {
+    border-color: var(--cyan-dim);
+    animation: mic-pulse 1.6s ease-in-out infinite;
+  }
   .header-right { display: flex; align-items: center; gap: 14px; }
   .tab-bar {
     display: flex; gap: 4px;
@@ -4000,22 +4024,33 @@ function setSpeaking(isSpeaking) {
 
 async function speak(text) {
   if (!voiceEnabled || !text) return;
+  voiceToggleBtn.classList.add('pending');
   try {
     const res = await fetch('/tts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text })
     });
-    if (res.status !== 200) return;
+    if (res.status !== 200) {
+      voiceToggleBtn.classList.remove('pending');
+      return;
+    }
     const blob = await res.blob();
     if (jarvisAudio) jarvisAudio.pause();
     jarvisAudio = new Audio(URL.createObjectURL(blob));
-    jarvisAudio.onplay = () => setSpeaking(true);
+    jarvisAudio.onplay = () => {
+      voiceToggleBtn.classList.remove('pending');
+      setSpeaking(true);
+    };
     jarvisAudio.onended = () => setSpeaking(false);
-    jarvisAudio.onerror = () => setSpeaking(false);
+    jarvisAudio.onerror = () => {
+      voiceToggleBtn.classList.remove('pending');
+      setSpeaking(false);
+    };
     await jarvisAudio.play();
   } catch (err) {
     console.error('Voice playback failed', err);
+    voiceToggleBtn.classList.remove('pending');
     setSpeaking(false);
   }
 }
