@@ -127,6 +127,11 @@ MEMORY_INTENT_PROMPT = (
     '"calendar": {"action": "list" or "check" or "create" or "delete", "summary": "string" or null, '
     '"start_dt": "ISO 8601 datetime" or null, "end_dt": "ISO 8601 datetime" or null, '
     '"description": "string" or null, "attendees": ["email", ...] or null} or null}\n'
+    "You are given the recent conversation alongside the latest message. If the latest message references "
+    'something from it instead of stating it directly (e.g. "send the same email again", "remind me about that '
+    'at the same time", "email her the same thing") — resolve the reference using the recent conversation and '
+    "fill in the actual recipient/subject/body/time/etc. you find there, rather than leaving fields empty or "
+    "falling back to OTHER just because the latest message alone doesn't contain them.\n"
     "Use SAVE_FACT when the user is asking you to remember/note/save a fact about themselves or their plans "
     '(e.g. "remember that my exam is in August", "note that I prefer Python"). content = the fact itself, '
     "cleaned up as a standalone statement. reminder = null.\n"
@@ -3252,7 +3257,15 @@ You are not limited to any domain. Explain whatever the user asks."""
     # =========================================================================
     try:
         now_str = dt.datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
-        intent_raw = await call_llm(MEMORY_INTENT_PROMPT, f"Current datetime: {now_str}\n\nMessage: {user_message}", max_tokens=500)
+        recent_history = await get_recent_chat_history(limit=6)
+        history_str = "\n".join(f"{m['role']}: {m['content']}" for m in recent_history) or "(none)"
+        intent_raw = await call_llm(
+            MEMORY_INTENT_PROMPT,
+            f"Current datetime: {now_str}\n\nRecent conversation (use this to resolve references like "
+            f"\"the same email\"/\"that person\"/\"send it again\" into concrete values):\n{history_str}\n\n"
+            f"Latest message: {user_message}",
+            max_tokens=500,
+        )
         intent_parsed = json.loads(intent_raw)
         memory_intent = intent_parsed.get("intent", "OTHER")
         memory_content = intent_parsed.get("content")
@@ -3508,12 +3521,16 @@ You are not limited to any domain. Explain whatever the user asks."""
                 "8. You are NOT shown Madan's actual reminders, emails, drafts, or schedule in this "
                 "conversation, and reaching this fallback means nothing else handled the request — "
                 "you have NO ability to actually create reminders, drafts, or sent emails, save files, "
-                "or perform any other real action here. NEVER claim you did something or that something "
-                "exists/is scheduled (e.g. 'Draft created in...', 'your next reminder is scheduled for...', "
-                "'I've sent...') unless it is something you can see was already done. If Madan asked you to "
-                "do something actionable, tell him plainly this specific phrasing didn't trigger a real "
-                "action and suggest rephrasing (e.g. 'draft an email to x@example.com about...') instead of "
-                "pretending it succeeded.\n\n"
+                "or perform any other real action here, ever, under any circumstances. NEVER claim you did "
+                "something or that something exists/is scheduled (e.g. 'Draft created in...', 'Email sent "
+                "successfully!', 'your next reminder is scheduled for...', 'I've sent...') — there is NO "
+                "exception to this, including when the conversation history shows the same content was sent/"
+                "created earlier: seeing something discussed in past messages does NOT mean it just happened "
+                "again now, and recreating those old details into a fresh-looking success confirmation is "
+                "fabrication, not a real status report. If Madan asks you to do, repeat, or resend something "
+                "actionable, tell him plainly that this specific phrasing didn't trigger a real action and "
+                "suggest rephrasing (e.g. 'draft an email to x@example.com about...') instead of pretending "
+                "it succeeded.\n\n"
                 f"Facts about Madan:\n{facts_str}\n\n"
                 f"Relevant context:\n{context_str}"
             )
