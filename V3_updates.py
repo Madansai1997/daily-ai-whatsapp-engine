@@ -3931,7 +3931,7 @@ async def privachat_http_proxy(path: str, request: Request):
     body = await request.body()
     forward_headers = {
         k: v for k, v in request.headers.items()
-        if k.lower() not in ("host", "content-length")
+        if k.lower() not in ("host", "content-length", "accept-encoding")
     }
     async with httpx.AsyncClient(follow_redirects=False, timeout=30.0) as client:
         upstream = await client.request(
@@ -3940,7 +3940,7 @@ async def privachat_http_proxy(path: str, request: Request):
             content=body,
             headers=forward_headers,
         )
-    excluded = {"content-encoding", "transfer-encoding", "connection"}
+    excluded = {"content-encoding", "content-length", "transfer-encoding", "connection"}
     response_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in excluded}
     return Response(
         content=upstream.content,
