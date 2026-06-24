@@ -116,8 +116,8 @@ MEMORY_INTENT_PROMPT = (
     "Classify the user's message into exactly one intent. The message is preceded by the current date/time "
     "(Asia/Kolkata) for resolving relative dates. Respond with STRICT JSON only, no markdown, no commentary, "
     "matching exactly this shape:\n"
-    '{"intent": "SAVE_FACT" or "RECALL_FACT" or "SET_REMINDER" or "LIST_REMINDERS" or "COMPOSE_EMAIL" or '
-    '"CALENDAR_ACTION" or "OTHER", '
+    '{"intent": "SAVE_FACT" or "RECALL_FACT" or "LIST_FACTS" or "SET_REMINDER" or "LIST_REMINDERS" or '
+    '"COMPOSE_EMAIL" or "CALENDAR_ACTION" or "OTHER", '
     '"content": "string" or null, '
     '"reminder": {"text": "string", "kind": "once" or "daily" or "weekly", "run_at": "ISO 8601 datetime" or null, '
     '"hour": 0-23 or null, "minute": 0-59 or null, "day_of_week": "mon"/"tue"/"wed"/"thu"/"fri"/"sat"/"sun" or null} '
@@ -138,10 +138,18 @@ MEMORY_INTENT_PROMPT = (
     'madansai97@gmail.com", "my phone number is...", "my email is..."). content = the fact itself, cleaned up '
     'as a standalone statement (e.g. "Madan\'s email address is madansai97@gmail.com"), using whatever literal '
     "value the user gave even if it looks unusual — never correct, guess, or reformat it. reminder = null.\n"
-    "Use RECALL_FACT when the user is asking what you remember/know about something, including direct "
+    "Use RECALL_FACT when the user is asking what you remember/know about ONE SPECIFIC topic, including direct "
     'questions about their own stored details (e.g. "do you remember my exam date", "what do you know about '
     'my AWS plans", "what\'s my email id", "what\'s my phone number"). content = the topic/keywords to search '
     "for (e.g. \"email address\"). reminder = null.\n"
+    "Use LIST_FACTS when the user wants to see EVERYTHING saved so far, with no specific topic named — e.g. "
+    '"what did you remember", "what have you saved so far", "tell me everything you know about me", "how many '
+    'things have you remembered", "what did I make you remember", "next one" (asking to continue a list), "tell '
+    'me those" (referring back to a list just mentioned). This is the correct choice whenever the message is '
+    "about the stored-facts list as a whole rather than asking about one named topic — never invent a topic "
+    'string and force it into RECALL_FACT for these (e.g. never use content like "all remembered facts" or '
+    '"number of remembered items" — that\'s a sign LIST_FACTS was the right call instead). content = null, '
+    "reminder = null.\n"
     "Use SET_REMINDER when the user asks to be reminded/notified about something at a specific time, or on a "
     'recurring schedule (e.g. "remind me to call mom tomorrow at 5pm", "remind me every day at 9am to drink '
     'water"). content = null. Fill reminder: kind="once" with run_at as a full ISO 8601 datetime (resolve relative '
@@ -2564,6 +2572,23 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
         await log_chat_message("user", user_message)
         help_msg = (
             "📖 *Commands*\n\n"
+            "Most of this works in plain English — just say what you mean. The lines below "
+            "are examples, not exact syntax you have to match.\n\n"
+            "*🧠 Memory*\n"
+            "- \"Remember that...\" — save a fact\n"
+            "- \"What's my...?\" — recall one specific thing\n"
+            "- \"What have you remembered?\" — list everything saved\n\n"
+            "*⏰ Reminders*\n"
+            "- \"Remind me to... at...\" — set a one-time or recurring reminder\n"
+            "- \"Show me my reminders\" — list active reminders\n\n"
+            "*📧 Email*\n"
+            "- \"Draft an email to x@example.com about...\" — compose (add \"save it as a draft\" "
+            "instead of sending right away)\n"
+            "- *SEND* / *EDIT EMAIL: ...* / *CANCEL* — manage a pending draft\n\n"
+            "*📅 Calendar*\n"
+            "- \"What's on my calendar today?\" / \"Am I free at 3pm tomorrow?\"\n"
+            "- \"Put a meeting on my calendar tomorrow at 3pm\" — create an event\n\n"
+            "*📚 Learning*\n"
             "*digest* — Today's learning now\n"
             "*quiz* — Start a quiz\n"
             "*EXPLAIN: topic* — Explain anything\n"
@@ -3345,6 +3370,16 @@ You are not limited to any domain. Explain whatever the user asks."""
             msg = "🧠 *Here's what I know:*\n\n" + "\n".join(f"- {f}" for f in facts)
         else:
             msg = f"🤷 Nothing saved about \"{memory_content}\" yet."
+        await log_chat_message("assistant", msg)
+        return msg
+
+    if memory_intent == "LIST_FACTS":
+        await log_chat_message("user", user_message)
+        all_facts = await get_user_facts(limit=50)
+        if all_facts:
+            msg = f"🧠 *Everything I've got saved ({len(all_facts)}):*\n\n" + "\n".join(f"- {f}" for f in all_facts)
+        else:
+            msg = "🤷 Nothing saved yet."
         await log_chat_message("assistant", msg)
         return msg
 
