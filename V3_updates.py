@@ -64,7 +64,6 @@ from automations import (
     init_automation_tables,
     register_all_active_automations,
 )
-from voice_agent import synthesize_speech
 try:
     from weather_agent import get_weather, get_weather_brief
 except Exception as e:
@@ -3672,36 +3671,30 @@ def _fallback_speech_summary(text: str, max_chars: int = 280) -> str:
 
 @app.post("/tts")
 async def text_to_speech(request: Request):
+    """Returns the text JARVIS should speak — actual audio is generated client-side via the
+    browser's own SpeechSynthesis API (works on Chrome, Safari/iOS, etc. with zero server
+    compute and no per-character quota). Only does real work for long replies, where an LLM
+    pass turns them into a short natural spoken summary instead of reading everything verbatim."""
     body = await request.json()
     text = body.get("text", "").strip()
     if not text:
-        return Response(status_code=204)
-    t0 = time.time()
+        return JSONResponse({"speech_text": ""})
+    if len(text) <= 400:
+        return JSONResponse({"speech_text": text})
+    t_summary = time.time()
     try:
-        speech_text = text
-        if len(text) > 400:
-            t_summary = time.time()
-            try:
-                summary = await asyncio.wait_for(
-                    call_llm(TTS_SUMMARY_PROMPT, text, max_tokens=100), timeout=TTS_SUMMARY_TIMEOUT_SEC
-                )
-                speech_text = summary.strip() or text
-                print(f"⏱️ [tts] summary took {time.time() - t_summary:.2f}s")
-            except asyncio.TimeoutError:
-                print(f"⚠️ [tts] summary timed out after {time.time() - t_summary:.2f}s, using fast fallback")
-                speech_text = _fallback_speech_summary(text)
-            except Exception as e:
-                print(f"⚠️ [tts] summary failed after {time.time() - t_summary:.2f}s, using fast fallback: {e}")
-                speech_text = _fallback_speech_summary(text)
-        t_synth = time.time()
-        audio_bytes = await asyncio.get_event_loop().run_in_executor(None, synthesize_speech, speech_text)
-        print(f"⏱️ [tts] synthesis took {time.time() - t_synth:.2f}s (text len {len(speech_text)}) | total {time.time() - t0:.2f}s")
-        if not audio_bytes:
-            return Response(status_code=204)
-        return Response(content=audio_bytes, media_type="audio/wav")
+        summary = await asyncio.wait_for(
+            call_llm(TTS_SUMMARY_PROMPT, text, max_tokens=100), timeout=TTS_SUMMARY_TIMEOUT_SEC
+        )
+        speech_text = summary.strip() or text
+        print(f"⏱️ [tts] summary took {time.time() - t_summary:.2f}s")
+    except asyncio.TimeoutError:
+        print(f"⚠️ [tts] summary timed out after {time.time() - t_summary:.2f}s, using fast fallback")
+        speech_text = _fallback_speech_summary(text)
     except Exception as e:
-        print(f"❌ tts error after {time.time() - t0:.2f}s: {e}")
-        return Response(status_code=204)
+        print(f"⚠️ [tts] summary failed after {time.time() - t_summary:.2f}s, using fast fallback: {e}")
+        speech_text = _fallback_speech_summary(text)
+    return JSONResponse({"speech_text": speech_text})
 
 
 CHAT_UI_HTML = """<!DOCTYPE html>
@@ -4048,38 +4041,83 @@ const voiceToggleBtn = document.getElementById('voice-toggle-btn');
 
 let voiceEnabled = localStorage.getItem('jarvis_voice_enabled') !== 'false';
 voiceToggleBtn.classList.toggle('muted', !voiceEnabled);
-let jarvisAudio = null;
+
+const hasSpeechSynthesis = 'speechSynthesis' in window;
+
+// Voice list loads asynchronously on most browsers (notably Chrome) — cache + refresh on change.
+let cachedVoices = [];
+function refreshVoices() {
+  cachedVoices = hasSpeechSynthesis ? window.speechSynthesis.getVoices() : [];
+}
+if (hasSpeechSynthesis) {
+  refreshVoices();
+  window.speechSynthesis.onvoiceschanged = refreshVoices;
+}
+
+function pickVoice() {
+  if (!cachedVoices.length) return null;
+  return cachedVoices.find(v => /en-GB/i.test(v.lang) && /male|daniel|arthur|oliver|james/i.test(v.name))
+      || cachedVoices.find(v => /en-GB/i.test(v.lang))
+      || cachedVoices.find(v => /^en/i.test(v.lang))
+      || cachedVoices[0];
+}
+
+// iOS Safari can silently drop the first speak() call unless it happens inside (or very
+// close to) a real user-gesture handler — a silent warm-up utterance on the first tap fixes it.
+let speechUnlocked = false;
+function unlockSpeechSynthesis() {
+  if (speechUnlocked || !hasSpeechSynthesis) return;
+  speechUnlocked = true;
+  const warmup = new SpeechSynthesisUtterance('');
+  warmup.volume = 0;
+  window.speechSynthesis.speak(warmup);
+}
+sendBtn.addEventListener('click', unlockSpeechSynthesis, { once: true });
+micBtn.addEventListener('click', unlockSpeechSynthesis, { once: true });
+input.addEventListener('keydown', unlockSpeechSynthesis, { once: true });
 
 function setSpeaking(isSpeaking) {
   voiceToggleBtn.classList.toggle('speaking', isSpeaking);
 }
 
+function cleanForSpeech(text) {
+  if (!text) return '';
+  let cleaned = text.replace(/```[\\s\\S]*?```/g, ' Code example shown in the chat. ');
+  cleaned = cleaned.replace(/`([^`]+)`/g, '$1');
+  cleaned = cleaned.replace(/\\*\\*([^*]+)\\*\\*/g, '$1');
+  cleaned = cleaned.replace(/\\*([^*]+)\\*/g, '$1');
+  cleaned = cleaned.replace(/^#{1,3}\\s*/gm, '');
+  cleaned = cleaned.replace(/^[-*]\\s+/gm, '');
+  return cleaned.trim();
+}
+
 async function speak(text) {
-  if (!voiceEnabled || !text) return;
+  if (!voiceEnabled || !text || !hasSpeechSynthesis) return;
   voiceToggleBtn.classList.add('pending');
   try {
-    const res = await fetch('/tts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text })
-    });
-    if (res.status !== 200) {
-      voiceToggleBtn.classList.remove('pending');
-      return;
+    let speechText = text;
+    if (text.length > 400) {
+      const res = await fetch('/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        speechText = data.speech_text || text;
+      }
     }
-    const blob = await res.blob();
-    if (jarvisAudio) jarvisAudio.pause();
-    jarvisAudio = new Audio(URL.createObjectURL(blob));
-    jarvisAudio.onplay = () => {
-      voiceToggleBtn.classList.remove('pending');
-      setSpeaking(true);
-    };
-    jarvisAudio.onended = () => setSpeaking(false);
-    jarvisAudio.onerror = () => {
-      voiceToggleBtn.classList.remove('pending');
-      setSpeaking(false);
-    };
-    await jarvisAudio.play();
+    speechText = cleanForSpeech(speechText);
+    voiceToggleBtn.classList.remove('pending');
+    if (!speechText) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(speechText);
+    const voice = pickVoice();
+    if (voice) utterance.voice = voice;
+    utterance.onstart = () => setSpeaking(true);
+    utterance.onend = () => setSpeaking(false);
+    utterance.onerror = () => setSpeaking(false);
+    window.speechSynthesis.speak(utterance);
   } catch (err) {
     console.error('Voice playback failed', err);
     voiceToggleBtn.classList.remove('pending');
@@ -4091,8 +4129,8 @@ voiceToggleBtn.addEventListener('click', () => {
   voiceEnabled = !voiceEnabled;
   localStorage.setItem('jarvis_voice_enabled', String(voiceEnabled));
   voiceToggleBtn.classList.toggle('muted', !voiceEnabled);
-  if (!voiceEnabled && jarvisAudio) {
-    jarvisAudio.pause();
+  if (!voiceEnabled && hasSpeechSynthesis) {
+    window.speechSynthesis.cancel();
     setSpeaking(false);
   }
 });

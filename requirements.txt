@@ -11,4 +11,3 @@ openai
 aiosqlite
 google-api-python-client
 google-auth
-piper-tts
