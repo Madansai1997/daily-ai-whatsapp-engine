@@ -3697,10 +3697,10 @@ CHAT_UI_HTML = """<!DOCTYPE html>
     font-size: 16px; line-height: 1.4;
   }
   .bubble-row.user .bubble {
-    background: linear-gradient(135deg, #0a3a52, #0e5a78);
+    background: rgba(0, 229, 255, 0.08);
     color: #eafffd;
-    border: 1px solid rgba(0, 229, 255, 0.5);
-    box-shadow: 0 0 10px rgba(0, 229, 255, 0.15);
+    border: 1px solid var(--cyan);
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.3);
   }
   .bubble-row.agent .bubble {
     background: rgba(0, 20, 28, 0.85);
