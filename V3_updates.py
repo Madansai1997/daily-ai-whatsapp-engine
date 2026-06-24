@@ -143,7 +143,12 @@ MEMORY_INTENT_PROMPT = (
     'water"). content = null. Fill reminder: kind="once" with run_at as a full ISO 8601 datetime (resolve relative '
     'phrases like "tomorrow"/"in 2 hours" against the given current date/time) for a single occurrence; '
     'kind="daily" with hour/minute for every-day reminders; kind="weekly" with day_of_week/hour/minute for a '
-    "specific weekday. reminder.text = the reminder message itself.\n"
+    "specific weekday. reminder.text = the actual task/subject to be reminded about — e.g. for \"remind me to "
+    'call mom tomorrow at 5pm" that\'s "call mom", NOT the whole sentence and NOT meta-words like "reminder" or '
+    '"the job". Only use SET_REMINDER if the message actually states what to be reminded about. If it only gives '
+    'a time/schedule with no real task (e.g. "set the reminder at 1:28pm", "remind me at 5pm" with nothing else) '
+    "— there is nothing to remind about, so classify as OTHER instead so Madan gets asked what the reminder "
+    "should be for, instead of creating a reminder with a placeholder/meaningless text.\n"
     "Use LIST_REMINDERS when the user wants to see, view, check, or be shown their current/upcoming reminders "
     '(e.g. "show me my reminders list", "what reminders do I have", "bring up my reminders", "list reminders", '
     '"hey jarvis show off the reminders") — any phrasing asking to see existing reminders, not set a new one. '
@@ -3853,7 +3858,14 @@ CHAT_UI_HTML = """<!DOCTYPE html>
       <div id="input-frame">
         <input id="msg-input" type="text" placeholder="Message JARVIS..." autocomplete="off">
       </div>
-      <button id="mic-btn" title="Voice input">🎤</button>
+      <button id="mic-btn" title="Voice input">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+          <path d="M19 10v1a7 7 0 0 1-14 0v-1"></path>
+          <line x1="12" y1="18" x2="12" y2="22"></line>
+          <line x1="8" y1="22" x2="16" y2="22"></line>
+        </svg>
+      </button>
       <button id="send-btn">SEND</button>
     </div>
   </div>
