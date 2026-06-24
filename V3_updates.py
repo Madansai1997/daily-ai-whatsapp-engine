@@ -1,4 +1,5 @@
 import os
+import time
 import sqlite3
 import aiosqlite
 import asyncio
@@ -3610,11 +3611,13 @@ async def chat_message(request: Request):
     user_msg = body.get("message", "").strip()
     if not user_msg:
         return JSONResponse({"reply": "Please type a message."})
+    t0 = time.time()
     try:
         reply = await process_message(user_msg, source="web")
+        print(f"⏱️ [chat-message] process_message took {time.time() - t0:.2f}s")
         return JSONResponse({"reply": reply or "✅ Done — check WhatsApp for details."})
     except Exception as e:
-        print(f"❌ chat-message error: {e}")
+        print(f"❌ chat-message error after {time.time() - t0:.2f}s: {e}")
         return JSONResponse({"reply": "Something went wrong. Try again."})
 
 
@@ -3649,26 +3652,31 @@ async def text_to_speech(request: Request):
     text = body.get("text", "").strip()
     if not text:
         return Response(status_code=204)
+    t0 = time.time()
     try:
         speech_text = text
         if len(text) > 400:
+            t_summary = time.time()
             try:
                 summary = await asyncio.wait_for(
                     call_llm(TTS_SUMMARY_PROMPT, text, max_tokens=100), timeout=TTS_SUMMARY_TIMEOUT_SEC
                 )
                 speech_text = summary.strip() or text
+                print(f"⏱️ [tts] summary took {time.time() - t_summary:.2f}s")
             except asyncio.TimeoutError:
-                print("⚠️ tts summary timed out, using fast fallback summary")
+                print(f"⚠️ [tts] summary timed out after {time.time() - t_summary:.2f}s, using fast fallback")
                 speech_text = _fallback_speech_summary(text)
             except Exception as e:
-                print(f"⚠️ tts summary failed, using fast fallback summary: {e}")
+                print(f"⚠️ [tts] summary failed after {time.time() - t_summary:.2f}s, using fast fallback: {e}")
                 speech_text = _fallback_speech_summary(text)
+        t_synth = time.time()
         audio_bytes = await asyncio.get_event_loop().run_in_executor(None, synthesize_speech, speech_text)
+        print(f"⏱️ [tts] synthesis took {time.time() - t_synth:.2f}s (text len {len(speech_text)}) | total {time.time() - t0:.2f}s")
         if not audio_bytes:
             return Response(status_code=204)
         return Response(content=audio_bytes, media_type="audio/wav")
     except Exception as e:
-        print(f"❌ tts error: {e}")
+        print(f"❌ tts error after {time.time() - t0:.2f}s: {e}")
         return Response(status_code=204)
 
 
