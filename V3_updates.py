@@ -3929,8 +3929,10 @@ function timeNow() {
 }
 
 function formatStoredTimestamp(ts) {
+  if (!ts) return '';
   // SQLite CURRENT_TIMESTAMP is "YYYY-MM-DD HH:MM:SS" in UTC, no timezone marker
   const d = new Date(ts.replace(' ', 'T') + 'Z');
+  if (isNaN(d.getTime())) return '';
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
@@ -3941,40 +3943,48 @@ function escapeHtml(str) {
 }
 
 function renderMarkdown(raw) {
-  // Pull fenced code blocks out first so their content survives untouched by other rules.
-  const codeBlocks = [];
-  let text = raw.replace(/```[a-zA-Z0-9]*\n?([\s\S]*?)```/g, (match, code) => {
-    codeBlocks.push(code.replace(/\n$/, ''));
-    return ' CODEBLOCK' + (codeBlocks.length - 1) + ' ';
-  });
+  if (typeof raw !== 'string') {
+    return raw == null ? '' : escapeHtml(String(raw));
+  }
+  try {
+    // Pull fenced code blocks out first so their content survives untouched by other rules.
+    const codeBlocks = [];
+    let text = raw.replace(/```[a-zA-Z0-9]*\\n?([\s\S]*?)```/g, (match, code) => {
+      codeBlocks.push(code.replace(/\\n$/, ''));
+      return ' CODEBLOCK' + (codeBlocks.length - 1) + ' ';
+    });
 
-  text = escapeHtml(text);
+    text = escapeHtml(text);
 
-  // Headers (#, ##, ###) — only when they start a line.
-  text = text.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-  text = text.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-  text = text.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+    // Headers (#, ##, ###) — only when they start a line.
+    text = text.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+    text = text.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+    text = text.replace(/^# (.+)$/gm, '<h1>$1</h1>');
 
-  // Inline code.
-  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // Inline code.
+    text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
 
-  // Bold: **text** then leftover single-asterisk *text* (WhatsApp-style, used elsewhere in this app).
-  text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  text = text.replace(/\*([^*]+)\*/g, '<strong>$1</strong>');
+    // Bold: **text** then leftover single-asterisk *text* (WhatsApp-style, used elsewhere in this app).
+    text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    text = text.replace(/\*([^*]+)\*/g, '<strong>$1</strong>');
 
-  // Consecutive "- " / "* " lines become a real <ul>.
-  text = text.replace(/(?:^|\n)((?:[-*] .+)(?:\n[-*] .+)*)/g, (match, block) => {
-    const items = block.split('\n').map(line => '<li>' + line.replace(/^[-*]\s+/, '') + '</li>').join('');
-    return '\n<ul>' + items + '</ul>';
-  });
+    // Consecutive "- " / "* " lines become a real <ul>.
+    text = text.replace(/(?:^|\\n)((?:[-*] .+)(?:\\n[-*] .+)*)/g, (match, block) => {
+      const items = block.split('\\n').map(line => '<li>' + line.replace(/^[-*]\s+/, '') + '</li>').join('');
+      return '\\n<ul>' + items + '</ul>';
+    });
 
-  text = text.replace(/\n/g, '<br>');
+    text = text.replace(/\\n/g, '<br>');
 
-  text = text.replace(/ CODEBLOCK(\d+) /g, (match, idx) => {
-    return '<pre><code>' + escapeHtml(codeBlocks[Number(idx)]) + '</code></pre>';
-  });
+    text = text.replace(/ CODEBLOCK(\d+) /g, (match, idx) => {
+      return '<pre><code>' + escapeHtml(codeBlocks[Number(idx)]) + '</code></pre>';
+    });
 
-  return text;
+    return text;
+  } catch (err) {
+    console.error('renderMarkdown failed, falling back to plain text', err);
+    return escapeHtml(raw).replace(/\\n/g, '<br>');
+  }
 }
 
 function appendBubble(text, who, timeStr) {
@@ -4093,7 +4103,11 @@ async function loadHistory() {
     const messages = data.messages || [];
     if (messages.length > 0) {
       messages.forEach(m => {
-        appendBubble(m.content, m.role === 'user' ? 'user' : 'agent', formatStoredTimestamp(m.timestamp));
+        try {
+          appendBubble(m.content, m.role === 'user' ? 'user' : 'agent', formatStoredTimestamp(m.timestamp));
+        } catch (err) {
+          console.error('Failed to render a history message, skipping it', err);
+        }
       });
       return;
     }
