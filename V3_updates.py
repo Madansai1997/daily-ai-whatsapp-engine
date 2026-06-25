@@ -3970,7 +3970,7 @@ async def privachat_ws_proxy(websocket: WebSocket, room_code: str, alias: str):
     await websocket.accept()
     upstream_url = f"{PRIVACHAT_WS_BASE}/privachat/ws/{room_code}/{alias}"
     try:
-        async with ws_lib.connect(upstream_url) as upstream:
+        async with ws_lib.connect(upstream_url, ping_interval=10, ping_timeout=10) as upstream:
             async def client_to_upstream():
                 while True:
                     msg = await websocket.receive_text()
