@@ -11,7 +11,7 @@ register_all_active_reminders() must be called once at startup to re-add anythin
 
 import os
 import sqlite3
-import aiosqlite
+import db_compat as aiosqlite
 from datetime import datetime, timezone
 from apscheduler.triggers.date import DateTrigger
 
@@ -20,7 +20,7 @@ DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "agent_memory.db"))
 
 
 def init_reminder_tables():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = aiosqlite.connect_sync(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute('''CREATE TABLE IF NOT EXISTS reminders (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

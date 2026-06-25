@@ -149,6 +149,52 @@ def execute_command(command_type: str, payload: str) -> str:
                 f"*Disk:*\n{disk.stdout}"
             )
 
+        elif command_type == "claude_code_propose":
+            # Read-only investigation only — plan mode never edits files, runs
+            # write bash commands, or touches git. Real execution only ever
+            # happens via claude_code_execute below, after a human approves.
+            # The trailing instruction guards against `-p` only capturing the
+            # final turn's text: without it, Claude sometimes wraps up with
+            # "as shown above" instead of restating findings, leaving stdout vague.
+            prompt = (
+                f"{payload}\n\n"
+                "Your final message must be fully self-contained — restate your "
+                "complete findings/plan in it. Do not refer back to earlier output "
+                "(e.g. 'as shown above') since only this final message is captured."
+            )
+            try:
+                result = subprocess.run(
+                    ["claude", "-p", prompt, "--permission-mode", "plan", "--max-turns", "20"],
+                    cwd=PROJECT_FOLDER, capture_output=True, text=True, timeout=600,
+                )
+            except subprocess.TimeoutExpired:
+                return "⏱️ Claude Code timed out after 10 minutes while investigating."
+            except FileNotFoundError:
+                return "❌ `claude` CLI not found on PATH. Install it (curl -fsSL https://claude.ai/install.sh | bash) and log in first."
+            return result.stdout.strip() or f"(no output)\n{result.stderr.strip()}"
+
+        elif command_type == "claude_code_execute":
+            # Full permissions, unattended — only reached after explicit human
+            # approval of the proposal above. max-turns/max-budget-usd bound
+            # runaway loops/cost on this unsupervised run.
+            prompt = (
+                f"{payload}\n\n"
+                "Your final message must be fully self-contained — summarize what "
+                "you actually did/changed in it. Do not refer back to earlier output "
+                "(e.g. 'as shown above') since only this final message is captured."
+            )
+            try:
+                result = subprocess.run(
+                    ["claude", "-p", prompt, "--permission-mode", "bypassPermissions",
+                     "--max-turns", "40", "--max-budget-usd", "5.00"],
+                    cwd=PROJECT_FOLDER, capture_output=True, text=True, timeout=1800,
+                )
+            except subprocess.TimeoutExpired:
+                return "⏱️ Claude Code timed out after 30 minutes while executing."
+            except FileNotFoundError:
+                return "❌ `claude` CLI not found on PATH. Install it (curl -fsSL https://claude.ai/install.sh | bash) and log in first."
+            return result.stdout.strip() or f"(no output)\n{result.stderr.strip()}"
+
         else:
             return f"Unknown command: {command_type}"
 

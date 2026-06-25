@@ -1,6 +1,7 @@
 import os
+import time
 import sqlite3
-import aiosqlite
+import db_compat as aiosqlite
 import asyncio
 import json
 import random
@@ -41,6 +42,7 @@ from email_triage import (
     cancel_composed_draft,
     send_composed_email,
     create_gmail_draft,
+    get_connected_gmail_address,
 )
 from reminders import (
     init_reminder_tables,
@@ -101,23 +103,21 @@ SCHEDULE_CONFIG = {
 }
 
 
-OPENROUTER_MODEL = "openai/gpt-oss-120b:free"
-OPENROUTER_MODEL_FAST = "openai/gpt-oss-120b:free"
+OPENROUTER_MODEL = "openai/gpt-oss-120b"
+OPENROUTER_MODEL_FAST = "openai/gpt-oss-120b"
 
 FREE_MODELS = [
-    "openai/gpt-oss-120b:free",                 # GPT OSS — currently the most reliable free tier
-    "meta-llama/llama-4-maverick:free",         # Llama 4 — reliable backup
-    "nvidia/nemotron-3-super-120b-a12b:free",   # Nemotron Super — best for agents, but daily free quota exhausts fast
-    "google/gemma-4-31b-it:free",               # Gemma 4 — highest quality score, tight per-min rate limit
-    # "nvidia/nemotron-3-ultra:free" removed — not a valid OpenRouter model ID, always 400s
+    "openai/gpt-oss-120b",          # GPT OSS — same model as before, now on Groq's LPU hardware
+    "llama-3.3-70b-versatile",      # Llama 3.3 70B — reliable backup
+    "llama-3.1-8b-instant",         # Llama 3.1 8B — smallest/fastest backup
 ]
 
 MEMORY_INTENT_PROMPT = (
     "Classify the user's message into exactly one intent. The message is preceded by the current date/time "
     "(Asia/Kolkata) for resolving relative dates. Respond with STRICT JSON only, no markdown, no commentary, "
     "matching exactly this shape:\n"
-    '{"intent": "SAVE_FACT" or "RECALL_FACT" or "SET_REMINDER" or "LIST_REMINDERS" or "COMPOSE_EMAIL" or '
-    '"CALENDAR_ACTION" or "OTHER", '
+    '{"intent": "SAVE_FACT" or "RECALL_FACT" or "LIST_FACTS" or "SET_REMINDER" or "LIST_REMINDERS" or '
+    '"COMPOSE_EMAIL" or "CALENDAR_ACTION" or "OTHER", '
     '"content": "string" or null, '
     '"reminder": {"text": "string", "kind": "once" or "daily" or "weekly", "run_at": "ISO 8601 datetime" or null, '
     '"hour": 0-23 or null, "minute": 0-59 or null, "day_of_week": "mon"/"tue"/"wed"/"thu"/"fri"/"sat"/"sun" or null} '
@@ -127,18 +127,40 @@ MEMORY_INTENT_PROMPT = (
     '"calendar": {"action": "list" or "check" or "create" or "delete", "summary": "string" or null, '
     '"start_dt": "ISO 8601 datetime" or null, "end_dt": "ISO 8601 datetime" or null, '
     '"description": "string" or null, "attendees": ["email", ...] or null} or null}\n'
+    "You are given the recent conversation alongside the latest message. If the latest message references "
+    'something from it instead of stating it directly (e.g. "send the same email again", "remind me about that '
+    'at the same time", "email her the same thing") — resolve the reference using the recent conversation and '
+    "fill in the actual recipient/subject/body/time/etc. you find there, rather than leaving fields empty or "
+    "falling back to OTHER just because the latest message alone doesn't contain them.\n"
     "Use SAVE_FACT when the user is asking you to remember/note/save a fact about themselves or their plans "
-    '(e.g. "remember that my exam is in August", "note that I prefer Python"). content = the fact itself, '
-    "cleaned up as a standalone statement. reminder = null.\n"
-    "Use RECALL_FACT when the user is asking what you remember/know about something "
-    '(e.g. "do you remember my exam date", "what do you know about my AWS plans"). content = the topic/keywords '
-    "to search for. reminder = null.\n"
+    '(e.g. "remember that my exam is in August", "note that I prefer Python") OR when they plainly state a '
+    'personal detail with no explicit save-verb at all, which still needs saving (e.g. "email id would be '
+    'madansai97@gmail.com", "my phone number is...", "my email is..."). content = the fact itself, cleaned up '
+    'as a standalone statement (e.g. "Madan\'s email address is madansai97@gmail.com"), using whatever literal '
+    "value the user gave even if it looks unusual — never correct, guess, or reformat it. reminder = null.\n"
+    "Use RECALL_FACT when the user is asking what you remember/know about ONE SPECIFIC topic, including direct "
+    'questions about their own stored details (e.g. "do you remember my exam date", "what do you know about '
+    'my AWS plans", "what\'s my email id", "what\'s my phone number"). content = the topic/keywords to search '
+    "for (e.g. \"email address\"). reminder = null.\n"
+    "Use LIST_FACTS when the user wants to see EVERYTHING saved so far, with no specific topic named — e.g. "
+    '"what did you remember", "what have you saved so far", "tell me everything you know about me", "how many '
+    'things have you remembered", "what did I make you remember", "next one" (asking to continue a list), "tell '
+    'me those" (referring back to a list just mentioned). This is the correct choice whenever the message is '
+    "about the stored-facts list as a whole rather than asking about one named topic — never invent a topic "
+    'string and force it into RECALL_FACT for these (e.g. never use content like "all remembered facts" or '
+    '"number of remembered items" — that\'s a sign LIST_FACTS was the right call instead). content = null, '
+    "reminder = null.\n"
     "Use SET_REMINDER when the user asks to be reminded/notified about something at a specific time, or on a "
     'recurring schedule (e.g. "remind me to call mom tomorrow at 5pm", "remind me every day at 9am to drink '
     'water"). content = null. Fill reminder: kind="once" with run_at as a full ISO 8601 datetime (resolve relative '
     'phrases like "tomorrow"/"in 2 hours" against the given current date/time) for a single occurrence; '
     'kind="daily" with hour/minute for every-day reminders; kind="weekly" with day_of_week/hour/minute for a '
-    "specific weekday. reminder.text = the reminder message itself.\n"
+    "specific weekday. reminder.text = the actual task/subject to be reminded about — e.g. for \"remind me to "
+    'call mom tomorrow at 5pm" that\'s "call mom", NOT the whole sentence and NOT meta-words like "reminder" or '
+    '"the job". Only use SET_REMINDER if the message actually states what to be reminded about. If it only gives '
+    'a time/schedule with no real task (e.g. "set the reminder at 1:28pm", "remind me at 5pm" with nothing else) '
+    "— there is nothing to remind about, so classify as OTHER instead so Madan gets asked what the reminder "
+    "should be for, instead of creating a reminder with a placeholder/meaningless text.\n"
     "Use LIST_REMINDERS when the user wants to see, view, check, or be shown their current/upcoming reminders "
     '(e.g. "show me my reminders list", "what reminders do I have", "bring up my reminders", "list reminders", '
     '"hey jarvis show off the reminders") — any phrasing asking to see existing reminders, not set a new one. '
@@ -165,28 +187,42 @@ MEMORY_INTENT_PROMPT = (
     "title/keyword identifies which event to remove. This is NOT for confirming/cancelling an event already shown "
     "to the user in this conversation — those are separate explicit commands and should be OTHER. content = null, "
     "reminder = null, email = null.\n"
-    "Use OTHER for everything else — general conversation, questions, commands. content = null, reminder = null, "
+    "Use OTHER for everything else — general conversation, questions, commands. This explicitly includes general "
+    'knowledge/curiosity questions phrased like "tell me about X", "what is X", "explain X", "how does X work" — '
+    "these are OTHER even when X sounds like a topic, unless the message is clearly asking to save/recall a "
+    "personal fact already established about Madan, or explicitly states a time/schedule to be reminded at. Never "
+    "force a general-knowledge question into SAVE_FACT, RECALL_FACT, LIST_FACTS, or SET_REMINDER just because it "
+    "contains a noun that could be mistaken for a fact or task. content = null, reminder = null, "
     "email = null, calendar = null."
 )
 
 def get_llm_client() -> AsyncOpenAI:
-    key = os.environ.get("OPENROUTER_API_KEY", "")
+    key = os.environ.get("GROQ_API_KEY", "")
     if not key:
-        print("⚠️ WARNING: OPENROUTER_API_KEY not set!")
+        print("⚠️ WARNING: GROQ_API_KEY not set!")
     return AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
+        base_url="https://api.groq.com/openai/v1",
         api_key=key or "missing",
     )
 
 anthropic_client = get_llm_client()  # kept same name so all call sites work unchanged
 
 async def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 1000) -> str:
-    """Call LLM with automatic fallback through FREE_MODELS on rate limit or error."""
+    """Call LLM with automatic fallback through FREE_MODELS on rate limit or error.
+
+    GPT-OSS models on Groq spend tokens on hidden reasoning before the visible answer —
+    with a tight max_tokens budget this can consume the whole budget and return empty
+    content (finish_reason="length", zero actual answer). reasoning_effort="low" fixes
+    this, but only gpt-oss models accept that parameter — other free-tier fallbacks
+    (Llama, etc.) hard-error on it, so it's only added when the model name matches.
+    """
     for model in FREE_MODELS:
         try:
+            extra_body = {"reasoning_effort": "low"} if "gpt-oss" in model else {}
             response = await anthropic_client.chat.completions.create(
                 model=model,
                 max_tokens=max_tokens,
+                extra_body=extra_body,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -200,7 +236,7 @@ async def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 1000)
 
 
 def init_db_tables():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = aiosqlite.connect_sync(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS user_profile (key TEXT PRIMARY KEY, value TEXT)''')
@@ -322,6 +358,13 @@ def init_db_tables():
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         completed_at DATETIME)''')
 
+    cursor.execute('''CREATE TABLE IF NOT EXISTS pending_claude_code_task (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_text TEXT,
+        proposed_plan TEXT,
+        status TEXT DEFAULT 'proposed',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
     conn.commit()
     conn.close()
     print("✅ State Engine: All database tables verified and ready.")
@@ -337,8 +380,8 @@ init_automation_tables()
 # USER SETTINGS HELPERS (sync, single-user)
 # ==========================================
 def _get_db_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = aiosqlite.connect_sync(DB_PATH)
+    conn.row_factory = aiosqlite.Row
     return conn
 
 def get_setting(key: str, default=None):
@@ -387,17 +430,26 @@ async def dispatch_automation(action_type: str, payload: dict):
 # ==========================================
 # LIFESPAN & SCHEDULER
 # ==========================================
+CONNECTED_GMAIL_ADDRESS = None  # populated once at startup by lifespan() below
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     missing_env = []
     if not TWILIO_SID: missing_env.append("TWILIO_SID")
     if not TWILIO_TOKEN: missing_env.append("TWILIO_TOKEN")
-    if not os.environ.get("OPENROUTER_API_KEY"): missing_env.append("OPENROUTER_API_KEY")
+    if not os.environ.get("GROQ_API_KEY"): missing_env.append("GROQ_API_KEY")
 
     if missing_env:
         print(f"⚠️ STARTUP WARNING: Missing: {', '.join(missing_env)}")
     else:
         print("✅ Environment Variables Verified.")
+
+    global CONNECTED_GMAIL_ADDRESS
+    CONNECTED_GMAIL_ADDRESS = get_connected_gmail_address()
+    if CONNECTED_GMAIL_ADDRESS:
+        print(f"✅ Gmail integration confirmed: {CONNECTED_GMAIL_ADDRESS}")
+    else:
+        print("⚠️ Could not confirm which Gmail account is connected.")
 
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
     scheduler.add_job(run_morning_digest, "cron", hour=SCHEDULE_CONFIG["digest_hour"], minute=0)
@@ -416,6 +468,15 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
 
 app = FastAPI(lifespan=lifespan)
+
+EMAIL_ADDRESS_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+
+def _is_valid_email(addr: str) -> bool:
+    """Catches obviously-malformed recipients (a bare name, missing domain, etc.) before they
+    ever reach Gmail's API, which hard-rejects them with an opaque 'Invalid To header' error."""
+    return bool(EMAIL_ADDRESS_RE.match((addr or "").strip()))
+
 
 def _split_message(text: str, limit: int = 1500) -> list[str]:
     """Split a long string into ≤limit-char chunks at sentence boundaries."""
@@ -474,11 +535,13 @@ def send_whatsapp_chunked(body: str, to_number: str = None, from_number: str = N
 
 
 @app.get("/")
+@app.head("/")
 def health_check():
     return {"status": "healthy", "message": "Engine is awake"}
 
 
 @app.get("/ping")
+@app.head("/ping")
 def ping():
     return {"status": "alive", "timestamp": dt.datetime.utcnow().isoformat()}
 
@@ -491,7 +554,10 @@ LOCAL_QUEUE_ALLOWED_COMMANDS = [
     "list_folder", "read_file",
     "search_files", "system_info",
     "list_recent_files",
+    "claude_code_propose", "claude_code_execute",
 ]
+
+CLAUDE_CODE_TRIGGER_SECRET = os.environ.get("CLAUDE_CODE_TRIGGER_SECRET", "")
 
 
 @app.post("/local-queue")
@@ -575,6 +641,53 @@ async def get_command_result(command_id: int):
         "status": row[0],
         "result": row[1]
     })
+
+
+@app.get("/local-queue/history")
+async def get_local_queue_history(after_id: int = 0, limit: int = 30):
+    """Recent local_command_queue rows for the Terminal tab's live feed —
+    after_id lets the frontend poll for only what's new since its last fetch."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT id, command_type, payload, status, result, created_at, completed_at "
+            "FROM local_command_queue WHERE id > ? ORDER BY id ASC LIMIT ?",
+            (after_id, limit)
+        )
+        rows = await cur.fetchall()
+    return JSONResponse({"commands": [dict(r) for r in rows]})
+
+
+# =========================================================================
+# CLAUDE CODE BRIDGE — propose/execute helpers for pending_claude_code_task.
+# Only one task in flight at a time, same single-active-item discipline as
+# get_active_draft()/get_latest_pending_event() elsewhere in this file.
+# =========================================================================
+async def get_pending_claude_code_task():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM pending_claude_code_task WHERE status IN ('proposed', 'executing') "
+            "ORDER BY created_at DESC LIMIT 1"
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def save_proposed_claude_code_task(task_text: str, proposed_plan: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "INSERT INTO pending_claude_code_task (task_text, proposed_plan, status) VALUES (?, ?, 'proposed')",
+            (task_text, proposed_plan),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def update_claude_code_task_status(task_id: int, status: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE pending_claude_code_task SET status = ? WHERE id = ?", (status, task_id))
+        await db.commit()
 
 
 @app.get("/admin", response_class=Response)
@@ -791,6 +904,7 @@ Output raw JSON array of strings only. If no facts, output [].
     try:
         response = await anthropic_client.chat.completions.create(
             model=OPENROUTER_MODEL, max_tokens=300, temperature=0.0,
+            extra_body={"reasoning_effort": "low"},
             messages=[{"role": "user", "content": prompt}]
         )
         text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.choices[0].message.content.strip(), flags=re.MULTILINE).strip()
@@ -1023,7 +1137,7 @@ OUTPUT ONLY THIS JSON, NOTHING ELSE:
     try:
         response = await anthropic_client.chat.completions.create(
             model=OPENROUTER_MODEL, max_tokens=500, temperature=0.4,
-            extra_body={"thinking": False},
+            extra_body={"reasoning_effort": "low"},
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -1121,6 +1235,7 @@ Return a JSON object with keys "project_title" and "subtasks" (array of 7 object
     try:
         response = await anthropic_client.chat.completions.create(
             model=OPENROUTER_MODEL, max_tokens=1500, temperature=0.3,
+            extra_body={"reasoning_effort": "low"},
             messages=[{"role": "user", "content": prompt}]
         )
         text = response.choices[0].message.content.strip()
@@ -1205,6 +1320,7 @@ Verdict is PASS if average_score >= 6.0, otherwise FAIL.
     try:
         response = await anthropic_client.chat.completions.create(
             model=OPENROUTER_MODEL, max_tokens=600, temperature=0.0,
+            extra_body={"reasoning_effort": "low"},
             messages=[{"role": "user", "content": prompt}]
         )
         text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.choices[0].message.content.strip(), flags=re.MULTILINE).strip()
@@ -1568,7 +1684,7 @@ Example:
 
     response = await anthropic_client.chat.completions.create(
         model=OPENROUTER_MODEL, max_tokens=2000, temperature=0.2,
-        extra_body={"thinking": False},
+        extra_body={"reasoning_effort": "low"},
         messages=[{"role": "user", "content": prompt}]
     )
 
@@ -1653,6 +1769,7 @@ Generate all 10 questions following this exact structure.
     try:
         response = await anthropic_client.chat.completions.create(
             model=OPENROUTER_MODEL_FAST, max_tokens=2000, temperature=0.3,
+            extra_body={"reasoning_effort": "low"},
             messages=[{"role": "user", "content": prompt}]
         )
         text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.choices[0].message.content.strip(), flags=re.MULTILINE).strip()
@@ -1843,6 +1960,7 @@ Output raw JSON only:
         try:
             response = await anthropic_client.chat.completions.create(
                 model=OPENROUTER_MODEL, max_tokens=400, temperature=0.2,
+                extra_body={"reasoning_effort": "low"},
                 messages=[{"role": "user", "content": prompt}]
             )
             text = re.sub(r'^```(?:json)?\s*|\s*```$', '', response.choices[0].message.content.strip(), flags=re.MULTILINE).strip()
@@ -2516,6 +2634,23 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
         await log_chat_message("user", user_message)
         help_msg = (
             "📖 *Commands*\n\n"
+            "Most of this works in plain English — just say what you mean. The lines below "
+            "are examples, not exact syntax you have to match.\n\n"
+            "*🧠 Memory*\n"
+            "- \"Remember that...\" — save a fact\n"
+            "- \"What's my...?\" — recall one specific thing\n"
+            "- \"What have you remembered?\" — list everything saved\n\n"
+            "*⏰ Reminders*\n"
+            "- \"Remind me to... at...\" — set a one-time or recurring reminder\n"
+            "- \"Show me my reminders\" — list active reminders\n\n"
+            "*📧 Email*\n"
+            "- \"Draft an email to x@example.com about...\" — compose (add \"save it as a draft\" "
+            "instead of sending right away)\n"
+            "- *SEND* / *EDIT EMAIL: ...* / *CANCEL* — manage a pending draft\n\n"
+            "*📅 Calendar*\n"
+            "- \"What's on my calendar today?\" / \"Am I free at 3pm tomorrow?\"\n"
+            "- \"Put a meeting on my calendar tomorrow at 3pm\" — create an event\n\n"
+            "*📚 Learning*\n"
             "*digest* — Today's learning now\n"
             "*quiz* — Start a quiz\n"
             "*EXPLAIN: topic* — Explain anything\n"
@@ -2596,6 +2731,151 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
             return result
 
     # =========================================================================
+    # CLAUDE CODE BRIDGE — passphrase-gated trigger for a real Claude Code agent
+    # on Madan's Mac, via local_bridge.py. Literal exact-match parsing (not the
+    # AI intent classifier) — same reasoning as the email/calendar approval
+    # commands: this is security-sensitive and needs predictable, deterministic
+    # matching, not an LLM's best guess.
+    #
+    # Two-phase by design: this block ONLY EVER queues a read-only
+    # claude_code_propose task (--permission-mode plan in local_bridge.py —
+    # no file edits, no bash writes, no git). Real execution only happens via
+    # the explicit "approve claude code" command further down, after Madan
+    # has reviewed the proposed plan. A leaked passphrase alone can only make
+    # Claude Code *look* at the codebase and propose, never act.
+    #
+    # If the passphrase is missing/wrong: fall through silently to normal
+    # chat handling. Acknowledging "that's the right command but wrong
+    # password" to an unauthenticated caller is its own information leak.
+    # =========================================================================
+    if user_message_clean.startswith("claude code:") and CLAUDE_CODE_TRIGGER_SECRET:
+        _cc_rest = user_message[len("claude code:"):].strip()
+        _cc_parts = _cc_rest.split(None, 1)
+        if len(_cc_parts) == 2 and _cc_parts[0] == CLAUDE_CODE_TRIGGER_SECRET:
+            cc_task_text = _cc_parts[1].strip()
+            await log_chat_message("user", user_message)
+
+            existing_task = await get_pending_claude_code_task()
+            if existing_task:
+                msg = (
+                    f"⚠️ Already have a pending Claude Code task (status: {existing_task['status']}). "
+                    f"Reply *approve claude code* or *cancel* first."
+                )
+                await log_chat_message("assistant", msg)
+                return msg
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                cursor = await db.execute(
+                    "INSERT INTO local_command_queue (command_type, payload) VALUES (?, ?)",
+                    ("claude_code_propose", cc_task_text)
+                )
+                cc_command_id = cursor.lastrowid
+                await db.commit()
+
+            async def _poll_claude_code_queue(cmd_id: int, max_wait_seconds: int):
+                for _ in range(max_wait_seconds):
+                    await asyncio.sleep(1)
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        cur = await db.execute(
+                            "SELECT status, result FROM local_command_queue WHERE id=?", (cmd_id,)
+                        )
+                        row = await cur.fetchone()
+                    if row and row[0] == "completed":
+                        return row[1] or "No result"
+                return None
+
+            async def _propose_and_deliver():
+                # 650s > local_bridge.py's own 600s subprocess timeout for this command,
+                # so by the time this gives up, the bridge will already have posted some
+                # result (real plan, or its own timeout message) — None here only really
+                # means the bridge isn't running at all.
+                plan_text = await _poll_claude_code_queue(cc_command_id, max_wait_seconds=650)
+                if plan_text is None:
+                    msg = "⏳ Local bridge not running. Start local_bridge.py on your Mac, then try again."
+                else:
+                    await save_proposed_claude_code_task(cc_task_text, plan_text)
+                    msg = (
+                        f"🤖 *Claude Code's proposed plan:*\n\n{plan_text}\n\n"
+                        f"─────────────────\n"
+                        f"Reply *approve claude code* to let it actually run this, or *cancel* to discard."
+                    )
+                await log_chat_message("assistant", msg)
+                if source == "whatsapp":
+                    send_whatsapp(msg)
+                return msg
+
+            if source == "whatsapp":
+                asyncio.create_task(_propose_and_deliver())
+                return None
+            else:
+                ack = "🤖 Investigating — this can take a few minutes, I'll have a plan shortly."
+                await log_chat_message("assistant", ack)
+                asyncio.create_task(_propose_and_deliver())
+                return ack
+        # wrong/missing passphrase: fall through silently, no return
+
+    # =========================================================================
+    # CLAUDE CODE BRIDGE — approve a proposed plan. Re-runs the ORIGINAL task
+    # text (not the proposed_plan text) with full permissions
+    # (--permission-mode bypassPermissions in local_bridge.py) — Claude Code
+    # re-investigates and acts, rather than literally replaying the
+    # human-readable plan summary as a prompt.
+    # =========================================================================
+    if user_message_clean == "approve claude code":
+        await log_chat_message("user", user_message)
+        cc_task = await get_pending_claude_code_task()
+        if not cc_task or cc_task["status"] != "proposed":
+            msg = "No pending Claude Code plan to approve."
+            await log_chat_message("assistant", msg)
+            return msg
+
+        await update_claude_code_task_status(cc_task["id"], "executing")
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "INSERT INTO local_command_queue (command_type, payload) VALUES (?, ?)",
+                ("claude_code_execute", cc_task["task_text"])
+            )
+            cc_command_id = cursor.lastrowid
+            await db.commit()
+
+        async def _poll_claude_code_execute(cmd_id: int, max_wait_seconds: int):
+            for _ in range(max_wait_seconds):
+                await asyncio.sleep(1)
+                async with aiosqlite.connect(DB_PATH) as db:
+                    cur = await db.execute(
+                        "SELECT status, result FROM local_command_queue WHERE id=?", (cmd_id,)
+                    )
+                    row = await cur.fetchone()
+                if row and row[0] == "completed":
+                    return row[1] or "No result"
+            return None
+
+        async def _execute_and_deliver():
+            # 1850s > local_bridge.py's own 1800s subprocess timeout for this command —
+            # same reasoning as the propose phase above.
+            result_text = await _poll_claude_code_execute(cc_command_id, max_wait_seconds=1850)
+            if result_text is None:
+                msg = "⏳ Local bridge not running. Start local_bridge.py on your Mac — the task is still queued."
+                await update_claude_code_task_status(cc_task["id"], "cancelled")
+            else:
+                await update_claude_code_task_status(cc_task["id"], "done")
+                msg = f"✅ *Claude Code finished:*\n\n{result_text}"
+            await log_chat_message("assistant", msg)
+            if source == "whatsapp":
+                send_whatsapp(msg)
+            return msg
+
+        if source == "whatsapp":
+            asyncio.create_task(_execute_and_deliver())
+            return None
+        else:
+            ack = "🚀 Running it now with full permissions — this can take a while, I'll update you here."
+            await log_chat_message("assistant", ack)
+            asyncio.create_task(_execute_and_deliver())
+            return ack
+
+    # =========================================================================
     # EMAIL TRIAGE — approve the active draft reply, then advance the queue
     # =========================================================================
     if user_message_clean in ["approve email", "yes email"]:
@@ -2667,8 +2947,11 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
         body = draft.get("draft_reply", "")
         draft_id = draft.get("id")
 
-        if not to_addr or not body:
-            msg = "⚠️ Draft is incomplete — missing recipient or body. Please compose again."
+        if not to_addr or not body or not _is_valid_email(to_addr):
+            msg = (
+                f"⚠️ This draft's recipient (\"{to_addr}\") isn't a valid email address. "
+                "Please compose it again with a real address, e.g. \"draft an email to x@example.com about ...\""
+            )
             await log_chat_message("assistant", msg)
             return msg
 
@@ -2761,6 +3044,14 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
             await log_chat_message("assistant", msg)
             return msg
 
+        cc_pending = await get_pending_claude_code_task()
+        if cc_pending and cc_pending["status"] == "proposed":
+            await log_chat_message("user", user_message)
+            await update_claude_code_task_status(cc_pending["id"], "cancelled")
+            msg = "🗑️ Claude Code plan cancelled."
+            await log_chat_message("assistant", msg)
+            return msg
+
     # =========================================================================
     # NOTES — force-save a fact on demand
     # Usage: "remember: <something>"
@@ -2846,6 +3137,7 @@ When explaining:
 You are not limited to any domain. Explain whatever the user asks."""
             explain_response = await anthropic_client.chat.completions.create(
                 model=OPENROUTER_MODEL, max_tokens=500, temperature=0.3,
+                extra_body={"reasoning_effort": "low"},
                 messages=[
                     {"role": "system", "content": explain_system},
                     {"role": "user", "content": f"Explain this concept clearly: {concept_to_explain}"},
@@ -2918,6 +3210,7 @@ You are not limited to any domain. Explain whatever the user asks."""
         try:
             review_response = await anthropic_client.chat.completions.create(
                 model=OPENROUTER_MODEL, max_tokens=600, temperature=0.2,
+                extra_body={"reasoning_effort": "medium"},
                 messages=[{"role": "user", "content": (
                     f"Review this code snippet for an {skill_level} student learning {concept}.\n"
                     f"```\n{code_snippet}\n```\n"
@@ -3186,7 +3479,8 @@ You are not limited to any domain. Explain whatever the user asks."""
             print("🧠 [AI Architect]: Generating surgical patch...")
 
             patch_response = await anthropic_client.chat.completions.create(
-                model=OPENROUTER_MODEL, max_tokens=1500, temperature=0.1,
+                model=OPENROUTER_MODEL, max_tokens=2500, temperature=0.1,
+                extra_body={"reasoning_effort": "medium"},
                 messages=[
                     {"role": "system", "content": (
                         "You are an expert Python code surgeon. "
@@ -3252,7 +3546,17 @@ You are not limited to any domain. Explain whatever the user asks."""
     # =========================================================================
     try:
         now_str = dt.datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
-        intent_raw = await call_llm(MEMORY_INTENT_PROMPT, f"Current datetime: {now_str}\n\nMessage: {user_message}", max_tokens=500)
+        recent_history = await get_recent_chat_history(limit=6)
+        history_str = "\n".join(f"{m['role']}: {m['content']}" for m in recent_history) or "(none)"
+        t_intent = time.time()
+        intent_raw = await call_llm(
+            MEMORY_INTENT_PROMPT,
+            f"Current datetime: {now_str}\n\nRecent conversation (use this to resolve references like "
+            f"\"the same email\"/\"that person\"/\"send it again\" into concrete values):\n{history_str}\n\n"
+            f"Latest message: {user_message}",
+            max_tokens=500,
+        )
+        print(f"⏱️ [process_message] intent classification took {time.time() - t_intent:.2f}s")
         intent_parsed = json.loads(intent_raw)
         memory_intent = intent_parsed.get("intent", "OTHER")
         memory_content = intent_parsed.get("content")
@@ -3284,6 +3588,16 @@ You are not limited to any domain. Explain whatever the user asks."""
         await log_chat_message("assistant", msg)
         return msg
 
+    if memory_intent == "LIST_FACTS":
+        await log_chat_message("user", user_message)
+        all_facts = await get_user_facts(limit=50)
+        if all_facts:
+            msg = f"🧠 *Everything I've got saved ({len(all_facts)}):*\n\n" + "\n".join(f"- {f}" for f in all_facts)
+        else:
+            msg = "🤷 Nothing saved yet."
+        await log_chat_message("assistant", msg)
+        return msg
+
     if memory_intent == "SET_REMINDER" and memory_reminder:
         await log_chat_message("user", user_message)
         app_scheduler = getattr(app.state, "scheduler", None)
@@ -3308,9 +3622,9 @@ You are not limited to any domain. Explain whatever the user asks."""
         body = (memory_email.get("body") or "").strip()
         save_as_draft = bool(memory_email.get("save_as_draft"))
 
-        if not to_address or not body:
+        if not to_address or not body or not _is_valid_email(to_address):
             msg = (
-                "⚠️ I need a recipient email address and what the email should say.\n"
+                "⚠️ I need a valid recipient email address and what the email should say.\n"
                 "Try: \"draft an email to x@example.com about ...\""
             )
             await log_chat_message("assistant", msg)
@@ -3463,57 +3777,100 @@ You are not limited to any domain. Explain whatever the user asks."""
         context_str = "\n".join([f"- {c['content']}" for c in relevant_context])
         facts_str = "\n".join([f"- {f}" for f in user_facts])
 
+        if CONNECTED_GMAIL_ADDRESS:
+            gmail_fact_line = (
+                f"- Gmail is connected via OAuth to {CONNECTED_GMAIL_ADDRESS} — you CAN draft "
+                "(save to Gmail Drafts) or send real emails when asked. Never deny this. This is "
+                "the exact account drafts/sends actually go through — state it plainly if asked. "
+                "It is NOT necessarily the same as any personal email address saved as a fact "
+                "about Madan elsewhere; never conflate the two.\n"
+            )
+        else:
+            gmail_fact_line = (
+                "- Gmail is connected via OAuth — you CAN draft (save to Gmail Drafts) or send "
+                "real emails when asked. Never deny this. But the exact linked address couldn't "
+                "be confirmed at startup — never name any specific email address as the connected "
+                "one until it's verified. Just say the integration is live and working.\n"
+            )
+
         if source == "web":
             system_prompt = (
                 "You are JARVIS, Madan's personal AI executive assistant. "
                 "You are direct, concise, and conversational — like a smart "
                 "assistant who knows Madan well, not a teacher or a chatbot.\n\n"
+
+                "YOUR PERSONALITY:\n"
+                "You're Madan's sharp, dry COO — you respect his time, lead with "
+                "the answer, and never over-explain unless asked. Occasionally "
+                "witty, never chatty. You know his full system and never pretend "
+                "otherwise.\n\n"
+
                 "RESPONSE RULES — follow these strictly:\n"
-                "1. Answer in 1-3 sentences maximum for simple questions\n"
-                "2. Never show code unless Madan explicitly asks for code\n"
-                "3. Never give tutorials, step-by-step guides, or long "
-                "explanations unless specifically asked\n"
-                "4. If the answer is yes or no, say yes or no first, "
-                "then one sentence of context if needed\n"
-                "5. Use plain conversational English, no markdown headers, "
-                "no bullet lists unless listing actual items\n"
-                "6. You know Madan's full system — here are the real facts:\n"
+                "1. Always lead with the answer or conclusion first. Context and "
+                "reasoning come after, only if needed.\n"
+                "2. Never narrate what you're about to do. Don't say 'Sure, let me "
+                "check that!' — just do it and report what happened.\n"
+                "3. Answer in 1-3 sentences maximum for simple questions.\n"
+                "4. For multi-item outputs (emails, reminders, news, briefings): "
+                "bullet list — max 5 items, each under 15 words. Drop the rest "
+                "unless Madan asks for more.\n"
+                "5. End every response with exactly one of: ✅ Done | "
+                "⚡ Needs your input | 📌 FYI only — this tag comes AFTER your real "
+                "answer or question, it never replaces it. Never reply with just the "
+                "tag alone; if you're asking for clarification, write the actual "
+                "clarifying question first, then the tag.\n"
+                "6. If the answer is yes or no, say yes or no first, "
+                "then one sentence of context if needed.\n"
+                "7. Never give tutorials, step-by-step guides, or long "
+                "explanations unless specifically asked.\n"
+                "8. Use plain conversational English for simple answers — no "
+                "headers, no bullet lists, no code. But if Madan asks for "
+                "multiple syntaxes, options, or steps, structure the answer "
+                "with real markdown: a short bullet list for the items and a "
+                "fenced code block for each code example — don't cram it "
+                "all into one prose paragraph.\n"
+                "9. Never show code unless Madan explicitly asks for it. "
+                "When he does: wrap multi-line code in fenced code blocks "
+                "(```language ... ```). Use single backticks only for short "
+                "inline references like `.filter()`.\n"
+                "10. Never suggest Madan install or set up things already "
+                "built into his system.\n\n"
+
+                "MADAN'S SYSTEM — real facts only, never guess or invent:\n"
                 "- Project folder: /Users/madansaidaram/Desktop/Daily_AI_updates\n"
                 "- Main app file: V3_updates.py in that folder\n"
+                "- Database: agent_memory.db in the project folder\n"
                 "- Deployed on Render (always-on cloud hosting)\n"
                 "- Reminders fire via WhatsApp using Twilio (already configured)\n"
                 "- Emails triage to WhatsApp every hour\n"
                 "- Briefings go to WhatsApp\n"
-                "- Gmail is connected via OAuth — you CAN draft (save to Gmail Drafts) or send real "
-                "emails when asked (e.g. 'draft an email to x@example.com about...'). Never deny this "
-                "capability or claim you lack Gmail access. But you have NO WAY to know which exact "
-                "address the OAuth connection points to — not madansai97@gmail.com, not any other "
-                "address, nothing. If asked which exact account it is, or whether it's a specific "
-                "address, say plainly that you can't confirm or name the exact linked address — never "
-                "name ANY specific email address as 'the' connected one, even Madan's own. Only say the "
-                "integration itself is live and working.\n"
-                "- Calendar features are built in (ask things like 'what's on my calendar today' or 'put "
-                "a meeting on my calendar tomorrow at 3pm'), but unlike Gmail you do NOT know for certain "
-                "the calendar OAuth scope is active yet — if a calendar request fails or says credentials "
-                "need refreshing, that's expected until the one-time OAuth re-authorization step is done; "
-                "don't claim calendar access definitely works OR definitely doesn't.\n"
-                "- Database: agent_memory.db in the project folder\n"
-                "- Do NOT invent or guess folder paths, file names, or "
-                "project structure — use only what is stated here\n"
-                "- If asked about something not in these facts, say "
-                "'I don't have that info — check your project folder "
-                "at /Users/madansaidaram/Desktop/Daily_AI_updates'\n\n"
-                "7. Never suggest Madan install things or set things up "
-                "that are already built into his system\n\n"
-                "8. You are NOT shown Madan's actual reminders, emails, drafts, or schedule in this "
-                "conversation, and reaching this fallback means nothing else handled the request — "
-                "you have NO ability to actually create reminders, drafts, or sent emails, save files, "
-                "or perform any other real action here. NEVER claim you did something or that something "
-                "exists/is scheduled (e.g. 'Draft created in...', 'your next reminder is scheduled for...', "
-                "'I've sent...') unless it is something you can see was already done. If Madan asked you to "
-                "do something actionable, tell him plainly this specific phrasing didn't trigger a real "
-                "action and suggest rephrasing (e.g. 'draft an email to x@example.com about...') instead of "
-                "pretending it succeeded.\n\n"
+                f"{gmail_fact_line}"
+                "- Calendar features are built in (e.g. 'what's on my calendar "
+                "today', 'put a meeting tomorrow at 3pm') — but do NOT claim "
+                "calendar access definitely works OR definitely doesn't until "
+                "OAuth re-authorization is confirmed.\n"
+                "- These facts describe your OWN system only. If asked specifically whether YOU "
+                "(JARVIS) have some feature/capability not listed above (e.g. 'can you do X', "
+                "'do you have a Y feature'), say plainly you don't have that capability — never "
+                "invent one, and never tell Madan to go check his own project folder for it. This "
+                "restriction does NOT apply to general knowledge questions (news, concepts, how "
+                "something works, advice, etc.) — answer those normally and fully using what you "
+                "actually know, exactly like any knowledgeable assistant would.\n\n"
+
+                "WHAT YOU CANNOT DO — never fake this:\n"
+                "You are NOT shown Madan's actual reminders, emails, drafts, or "
+                "live schedule in this conversation. You have NO ability to "
+                "actually create reminders, send emails, save files, or perform "
+                "real actions here — ever, under any circumstances.\n"
+                "NEVER claim you did something that didn't happen. No 'Draft "
+                "created!', no 'Email sent!', no 'Reminder scheduled!' — unless "
+                "a real action route triggered it and confirmed it.\n"
+                "Seeing something discussed in past messages does NOT mean it just "
+                "happened again. If Madan asks to repeat or resend something, "
+                "tell him plainly this phrasing didn't trigger a real action and "
+                "suggest rephrasing — e.g. 'draft an email to x@example.com "
+                "about...' — instead of faking a success.\n\n"
+
                 f"Facts about Madan:\n{facts_str}\n\n"
                 f"Relevant context:\n{context_str}"
             )
@@ -3524,10 +3881,13 @@ You are not limited to any domain. Explain whatever the user asks."""
                 f"RULES: 2-4 sentences max. Use asterisks (*) for bold. End with one open-ended learning question."
             )
         system_msg = {"role": "system", "content": system_prompt}
+        t_reply = time.time()
         response = await anthropic_client.chat.completions.create(
             model=OPENROUTER_MODEL, max_tokens=800,
+            extra_body={"reasoning_effort": "low"},
             messages=[system_msg] + chat_history + [{"role": "user", "content": user_message}]
         )
+        print(f"⏱️ [process_message] general-chat reply call took {time.time() - t_reply:.2f}s")
 
         ai_response = response.choices[0].message.content.strip()
         await log_chat_message("assistant", ai_response)
@@ -3537,7 +3897,9 @@ You are not limited to any domain. Explain whatever the user asks."""
         elif "to *Foundational*" in ai_response:
             await update_db_skill("Foundational")
 
-        await extract_and_save_facts(user_message, ai_response)
+        # Fire-and-forget: this LLM call only saves background memory facts, it has
+        # no bearing on ai_response, so it must not block the user's reply latency.
+        asyncio.create_task(extract_and_save_facts(user_message, ai_response))
 
     except Exception as e:
         print(f"❌ Webhook LLM error: {e}")
@@ -3577,12 +3939,67 @@ async def chat_message(request: Request):
     user_msg = body.get("message", "").strip()
     if not user_msg:
         return JSONResponse({"reply": "Please type a message."})
+    t0 = time.time()
     try:
         reply = await process_message(user_msg, source="web")
+        print(f"⏱️ [chat-message] process_message took {time.time() - t0:.2f}s")
         return JSONResponse({"reply": reply or "✅ Done — check WhatsApp for details."})
     except Exception as e:
-        print(f"❌ chat-message error: {e}")
+        print(f"❌ chat-message error after {time.time() - t0:.2f}s: {e}")
         return JSONResponse({"reply": "Something went wrong. Try again."})
+
+
+TTS_SUMMARY_PROMPT = (
+    "You are JARVIS, about to speak the verbal version of a longer written answer you already "
+    "gave. Read it, actually understand the point being made, then brief it back in 2-3 sentences "
+    "the way a composed, confident assistant would summarize something out loud to someone — not "
+    "a list of facts, the actual takeaway. Skip code, skip numbers/lists, skip markdown entirely. "
+    "End with a short, natural pointer back to the full answer on screen, phrased differently each "
+    "time, not a fixed disclaimer — e.g. mention the complete breakdown/details/steps are there to "
+    "read. Output plain spoken sentences only, nothing else."
+)
+TTS_SUMMARY_TIMEOUT_SEC = 3.0
+
+
+def _fallback_speech_summary(text: str, max_chars: int = 280) -> str:
+    """No-LLM summary used when the real summarizer is too slow/rate-limited — keeps voice from stalling."""
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    summary = ""
+    for sentence in sentences:
+        if summary and len(summary) + len(sentence) > max_chars:
+            break
+        summary += (" " if summary else "") + sentence
+    if not summary:
+        summary = text[:max_chars]
+    return summary.strip() + " The full details are right there in the chat."
+
+
+@app.post("/tts")
+async def text_to_speech(request: Request):
+    """Returns the text JARVIS should speak — actual audio is generated client-side via the
+    browser's own SpeechSynthesis API (works on Chrome, Safari/iOS, etc. with zero server
+    compute and no per-character quota). Only does real work for long replies, where an LLM
+    pass turns them into a short natural spoken summary instead of reading everything verbatim."""
+    body = await request.json()
+    text = body.get("text", "").strip()
+    if not text:
+        return JSONResponse({"speech_text": ""})
+    if len(text) <= 400:
+        return JSONResponse({"speech_text": text})
+    t_summary = time.time()
+    try:
+        summary = await asyncio.wait_for(
+            call_llm(TTS_SUMMARY_PROMPT, text, max_tokens=100), timeout=TTS_SUMMARY_TIMEOUT_SEC
+        )
+        speech_text = summary.strip() or text
+        print(f"⏱️ [tts] summary took {time.time() - t_summary:.2f}s")
+    except asyncio.TimeoutError:
+        print(f"⚠️ [tts] summary timed out after {time.time() - t_summary:.2f}s, using fast fallback")
+        speech_text = _fallback_speech_summary(text)
+    except Exception as e:
+        print(f"⚠️ [tts] summary failed after {time.time() - t_summary:.2f}s, using fast fallback: {e}")
+        speech_text = _fallback_speech_summary(text)
+    return JSONResponse({"speech_text": speech_text})
 
 
 CHAT_UI_HTML = """<!DOCTYPE html>
@@ -3590,58 +4007,155 @@ CHAT_UI_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>JARVIS</title>
+<title>J.A.R.V.I.S.</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <style>
   * { box-sizing: border-box; }
+  :root {
+    --cyan: #00e5ff;
+    --cyan-dim: rgba(0, 229, 255, 0.35);
+    --cyan-faint: rgba(0, 229, 255, 0.12);
+  }
   html, body {
     margin: 0; padding: 0; height: 100%;
-    background: #0a0a0a; color: #fff;
+    background: #000509; color: #d7f6ff;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     overflow: hidden;
   }
-  #app { display: flex; flex-direction: column; height: 100vh; }
+  #app {
+    position: relative;
+    display: flex; flex-direction: column; height: 100vh;
+    background:
+      radial-gradient(ellipse at top, rgba(0, 229, 255, 0.07), transparent 60%),
+      repeating-linear-gradient(0deg, rgba(0, 229, 255, 0.025) 0px, rgba(0, 229, 255, 0.025) 1px, transparent 1px, transparent 28px),
+      repeating-linear-gradient(90deg, rgba(0, 229, 255, 0.025) 0px, rgba(0, 229, 255, 0.025) 1px, transparent 1px, transparent 28px),
+      #000509;
+  }
+  #scanline {
+    position: absolute; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--cyan-dim), transparent);
+    opacity: 0.5; pointer-events: none; z-index: 50;
+    animation: scan 6s linear infinite;
+  }
+  @keyframes scan {
+    0%   { top: 0%; }
+    100% { top: 100%; }
+  }
 
   header {
     flex: 0 0 auto;
     display: flex; align-items: center; justify-content: space-between;
-    padding: 14px 18px;
-    background: #0a0a0a;
-    border-bottom: 1px solid #1a1a1a;
+    padding: 16px 20px;
+    background: linear-gradient(180deg, rgba(0,229,255,0.06), transparent);
+    border-bottom: 1px solid var(--cyan-dim);
+    position: relative; z-index: 10;
   }
-  header .brand { font-size: 18px; font-weight: 700; color: #fff; }
+  header .brand {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 18px; font-weight: 700; letter-spacing: 3px;
+    color: var(--cyan);
+    text-shadow: 0 0 8px var(--cyan-dim), 0 0 18px var(--cyan-dim);
+  }
+  header .subtitle {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px; letter-spacing: 2px; color: rgba(0,229,255,0.5);
+    margin-top: 2px;
+  }
+  .status-ring {
+    position: relative; width: 22px; height: 22px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .status-ring::before {
+    content: ''; position: absolute; inset: 0;
+    border: 1px solid var(--cyan-dim); border-radius: 50%;
+    animation: ring-pulse 2s ease-out infinite;
+  }
   .pulse-dot {
-    width: 10px; height: 10px; border-radius: 50%;
+    width: 8px; height: 8px; border-radius: 50%;
     background: #22c55e;
-    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);
-    animation: pulse 1.6s infinite;
+    box-shadow: 0 0 6px #22c55e, 0 0 12px rgba(34, 197, 94, 0.6);
   }
-  @keyframes pulse {
-    0%   { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
-    70%  { box-shadow: 0 0 0 8px rgba(34, 197, 94, 0); }
-    100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+  @keyframes ring-pulse {
+    0%   { transform: scale(0.6); opacity: 1; }
+    100% { transform: scale(1.8); opacity: 0; }
   }
 
   #chat-window {
     flex: 1 1 auto;
     overflow-y: auto;
-    padding: 16px;
+    padding: 18px;
     display: flex; flex-direction: column; gap: 12px;
+    position: relative; z-index: 10;
   }
   .bubble-row { display: flex; flex-direction: column; max-width: 75%; }
   .bubble-row.user { align-self: flex-end; align-items: flex-end; }
   .bubble-row.agent { align-self: flex-start; align-items: flex-start; }
   .bubble {
-    padding: 10px 14px; border-radius: 14px;
+    padding: 10px 14px; border-radius: 10px;
     white-space: pre-wrap; word-wrap: break-word;
     font-size: 16px; line-height: 1.4;
   }
-  .bubble-row.user .bubble { background: #1a56db; color: #fff; }
-  .bubble-row.agent .bubble { background: #1a1a1a; color: #fff; }
-  .timestamp { font-size: 11px; color: #777; margin-top: 4px; padding: 0 4px; }
+  .bubble-row.user .bubble {
+    background: rgba(0, 229, 255, 0.08);
+    color: #eafffd;
+    border: 1px solid var(--cyan);
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.3);
+  }
+  .bubble-row.agent .bubble {
+    background: rgba(0, 20, 28, 0.85);
+    color: #d7f6ff;
+    border: 1px solid var(--cyan-dim);
+    box-shadow: 0 0 10px rgba(0, 229, 255, 0.08);
+  }
+  .timestamp {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px; letter-spacing: 1px; color: rgba(0, 229, 255, 0.45);
+    margin-top: 4px; padding: 0 4px;
+  }
+  .bubble pre {
+    background: rgba(0, 8, 12, 0.9);
+    border: 1px solid var(--cyan-dim);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin: 8px 0;
+    overflow-x: auto;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px; line-height: 1.5;
+  }
+  .bubble pre code {
+    background: none; border: none; padding: 0; color: #9bf6ff;
+  }
+  .bubble code {
+    background: rgba(0, 229, 255, 0.1);
+    border: 1px solid rgba(0, 229, 255, 0.25);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.9em;
+    color: #7df9ff;
+  }
+  .bubble strong { color: var(--cyan); font-weight: 700; }
+  .bubble ul, .bubble ol { margin: 6px 0; padding-left: 22px; }
+  .bubble li { margin: 2px 0; }
+  .bubble h1, .bubble h2, .bubble h3 {
+    font-family: 'Orbitron', sans-serif;
+    color: var(--cyan);
+    margin: 8px 0 4px;
+    line-height: 1.3;
+  }
+  .bubble h1 { font-size: 1.15em; }
+  .bubble h2 { font-size: 1.08em; }
+  .bubble h3 { font-size: 1.02em; }
 
-  .typing-dots { display: flex; gap: 4px; padding: 10px 14px; background: #1a1a1a; border-radius: 14px; width: fit-content; }
+  .typing-dots {
+    display: flex; gap: 4px; padding: 10px 14px;
+    background: rgba(0, 20, 28, 0.85); border: 1px solid var(--cyan-dim);
+    border-radius: 10px; width: fit-content;
+    box-shadow: 0 0 10px rgba(0, 229, 255, 0.08);
+  }
   .typing-dots span {
-    width: 6px; height: 6px; border-radius: 50%; background: #888;
+    width: 6px; height: 6px; border-radius: 50%; background: var(--cyan);
     animation: blink 1.2s infinite ease-in-out;
   }
   .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
@@ -3650,48 +4164,115 @@ CHAT_UI_HTML = """<!DOCTYPE html>
 
   #input-bar {
     flex: 0 0 auto;
-    display: flex; align-items: center; gap: 8px;
-    padding: 10px 12px;
-    padding-bottom: max(10px, env(safe-area-inset-bottom));
-    background: #111111;
-    border-top: 1px solid #1a1a1a;
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 14px;
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+    background: linear-gradient(0deg, rgba(0,229,255,0.05), transparent);
+    border-top: 1px solid var(--cyan-dim);
+    position: relative; z-index: 10;
+  }
+  #input-frame {
+    flex: 1 1 auto; position: relative;
+    border: 1px solid var(--cyan-dim); border-radius: 6px;
+    background: rgba(0, 20, 28, 0.6);
+    transition: box-shadow 0.2s ease, border-color 0.2s ease;
+  }
+  #input-frame:focus-within {
+    border-color: var(--cyan);
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.35);
+  }
+  #input-frame::before, #input-frame::after {
+    content: ''; position: absolute; width: 8px; height: 8px;
+    border-top: 2px solid var(--cyan); border-left: 2px solid var(--cyan);
+    top: -1px; left: -1px;
+  }
+  #input-frame::after {
+    border-top: none; border-left: none;
+    border-bottom: 2px solid var(--cyan); border-right: 2px solid var(--cyan);
+    top: auto; left: auto; bottom: -1px; right: -1px;
   }
   #msg-input {
-    flex: 1 1 auto;
-    background: #1a1a1a; color: #fff;
-    border: none; border-radius: 20px;
-    padding: 12px 16px;
+    width: 100%;
+    background: transparent; color: #eafffd;
+    border: none; border-radius: 6px;
+    padding: 12px 14px;
     font-size: 16px;
+    font-family: 'Share Tech Mono', monospace;
     outline: none;
   }
-  #msg-input::placeholder { color: #777; }
+  #msg-input::placeholder { color: rgba(0, 229, 255, 0.4); }
   #send-btn {
-    background: #1a56db; color: #fff; border: none;
-    border-radius: 20px; padding: 12px 18px;
-    font-size: 15px; font-weight: 600; cursor: pointer;
+    background: rgba(0, 229, 255, 0.08); color: var(--cyan);
+    border: 1px solid var(--cyan); border-radius: 6px; padding: 12px 18px;
+    font-family: 'Orbitron', sans-serif;
+    font-size: 13px; font-weight: 700; letter-spacing: 1px; cursor: pointer;
+    transition: background 0.2s ease, box-shadow 0.2s ease;
   }
+  #send-btn:hover { background: rgba(0, 229, 255, 0.2); box-shadow: 0 0 14px rgba(0, 229, 255, 0.4); }
   #mic-btn {
-    background: #2a2a2a; color: #fff; border: none;
-    border-radius: 50%; width: 44px; height: 44px;
+    position: relative;
+    background: rgba(0, 229, 255, 0.06); color: var(--cyan); border: 1px solid var(--cyan-dim);
+    border-radius: 50%; width: 46px; height: 46px;
     font-size: 18px; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
   }
-  #mic-btn.recording { background: #dc2626; }
-
+  #mic-btn:hover { box-shadow: 0 0 10px rgba(0, 229, 255, 0.3); }
+  #mic-btn.recording {
+    border-color: #ff3b5c; color: #ff3b5c;
+    box-shadow: 0 0 14px rgba(255, 59, 92, 0.5);
+    animation: mic-pulse 1s ease-in-out infinite;
+  }
+  @keyframes mic-pulse {
+    0%, 100% { box-shadow: 0 0 8px rgba(255, 59, 92, 0.4); }
+    50%      { box-shadow: 0 0 18px rgba(255, 59, 92, 0.8); }
+  }
+  #voice-toggle-btn {
+    position: relative;
+    background: rgba(0, 229, 255, 0.06); color: var(--cyan); border: 1px solid var(--cyan-dim);
+    border-radius: 50%; width: 46px; height: 46px;
+    font-size: 18px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+  #voice-toggle-btn:hover { box-shadow: 0 0 10px rgba(0, 229, 255, 0.3); }
+  #voice-toggle-btn .icon-off { display: none; }
+  #voice-toggle-btn.muted { border-color: rgba(0, 229, 255, 0.2); color: rgba(0, 229, 255, 0.35); }
+  #voice-toggle-btn.muted .icon-on { display: none; }
+  #voice-toggle-btn.muted .icon-off { display: block; }
+  #voice-toggle-btn.speaking {
+    border-color: var(--cyan);
+    box-shadow: 0 0 14px rgba(0, 229, 255, 0.6);
+    animation: mic-pulse 1s ease-in-out infinite;
+  }
+  #voice-toggle-btn.pending {
+    border-color: var(--cyan-dim);
+    animation: mic-pulse 1.6s ease-in-out infinite;
+  }
   .header-right { display: flex; align-items: center; gap: 14px; }
-  .tab-bar { display: flex; gap: 4px; background: #1a1a1a; border-radius: 10px; padding: 3px; }
+  .tab-bar {
+    display: flex; gap: 4px;
+    background: rgba(0, 20, 28, 0.6); border: 1px solid var(--cyan-dim);
+    border-radius: 8px; padding: 3px;
+  }
   .tab-btn {
     position: relative;
-    background: none; border: none; color: #888;
-    font-size: 13px; font-weight: 600; font-family: inherit;
-    padding: 6px 14px; border-radius: 8px; cursor: pointer;
+    background: none; border: none; color: rgba(0, 229, 255, 0.5);
+    font-family: 'Orbitron', sans-serif; text-transform: uppercase;
+    font-size: 11px; font-weight: 700; letter-spacing: 1px;
+    padding: 7px 14px; border-radius: 6px; cursor: pointer;
+    transition: background 0.2s ease, color 0.2s ease;
   }
-  .tab-btn.active { background: #1a56db; color: #fff; }
+  .tab-btn.active {
+    background: rgba(0, 229, 255, 0.15); color: var(--cyan);
+    box-shadow: 0 0 10px rgba(0, 229, 255, 0.25);
+  }
   .tab-badge {
     display: none;
     position: absolute; top: -4px; right: -4px;
     min-width: 16px; height: 16px; padding: 0 3px;
-    background: #dc2626; color: #fff;
+    background: #ff3b5c; color: #fff;
+    box-shadow: 0 0 8px rgba(255, 59, 92, 0.6);
     border-radius: 8px; font-size: 10px; font-weight: 700;
     align-items: center; justify-content: center;
   }
@@ -3701,12 +4282,42 @@ CHAT_UI_HTML = """<!DOCTYPE html>
   .view.active { display: flex; }
   #privachat-view { padding: 0; }
   #privachat-frame { flex: 1 1 auto; width: 100%; height: 100%; border: none; }
+
+  #terminal-log {
+    flex: 1 1 auto; overflow-y: auto; padding: 14px 18px;
+    background: #00060a;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px; line-height: 1.6;
+  }
+  .term-line { white-space: pre-wrap; word-wrap: break-word; margin-bottom: 6px; }
+  .term-line.cmd { color: var(--cyan); }
+  .term-line.cmd::before { content: '$ '; color: rgba(0, 229, 255, 0.5); }
+  .term-line.result { color: #9bf6ff; padding-left: 4px; }
+  .term-line.status { color: rgba(0, 229, 255, 0.4); font-style: italic; }
+  #terminal-input-bar {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+    padding: 12px 14px; padding-bottom: max(12px, env(safe-area-inset-bottom));
+    background: linear-gradient(0deg, rgba(0,229,255,0.05), transparent);
+    border-top: 1px solid var(--cyan-dim);
+  }
+  .terminal-prompt {
+    font-family: 'Share Tech Mono', monospace; color: var(--cyan); font-size: 15px;
+  }
+  #terminal-input {
+    flex: 1 1 auto; background: transparent; color: #eafffd; border: none; outline: none;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px; padding: 6px 0;
+  }
+  #terminal-input::placeholder { color: rgba(0, 229, 255, 0.35); }
 </style>
 </head>
 <body>
 <div id="app">
+  <div id="scanline"></div>
   <header>
-    <div class="brand">⚡ JARVIS</div>
+    <div>
+      <div class="brand">J.A.R.V.I.S.</div>
+      <div class="subtitle">PERSONAL AI INTERFACE</div>
+    </div>
     <div class="header-right">
       <div class="tab-bar">
         <button class="tab-btn active" id="tab-jarvis" onclick="switchView('jarvis')">JARVIS</button>
@@ -3714,20 +4325,49 @@ CHAT_UI_HTML = """<!DOCTYPE html>
           PrivaChat
           <span class="tab-badge" id="privachat-badge">0</span>
         </button>
+        <button class="tab-btn" id="tab-terminal" onclick="switchView('terminal')">Terminal</button>
       </div>
-      <div class="pulse-dot"></div>
+      <div class="status-ring"><div class="pulse-dot"></div></div>
     </div>
   </header>
   <div id="jarvis-view" class="view active">
     <div id="chat-window"></div>
     <div id="input-bar">
-      <input id="msg-input" type="text" placeholder="Message JARVIS..." autocomplete="off">
-      <button id="mic-btn" title="Voice input">🎤</button>
-      <button id="send-btn">Send</button>
+      <div id="input-frame">
+        <input id="msg-input" type="text" placeholder="Message JARVIS..." autocomplete="off">
+      </div>
+      <button id="voice-toggle-btn" title="Toggle JARVIS voice">
+        <svg class="icon-on" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+          <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+          <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+        </svg>
+        <svg class="icon-off" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+          <line x1="23" y1="9" x2="17" y2="15"></line>
+          <line x1="17" y1="9" x2="23" y2="15"></line>
+        </svg>
+      </button>
+      <button id="mic-btn" title="Voice input">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+          <path d="M19 10v1a7 7 0 0 1-14 0v-1"></path>
+          <line x1="12" y1="18" x2="12" y2="22"></line>
+          <line x1="8" y1="22" x2="16" y2="22"></line>
+        </svg>
+      </button>
+      <button id="send-btn">SEND</button>
     </div>
   </div>
   <div id="privachat-view" class="view">
     <iframe id="privachat-frame" src="" title="PrivaChat"></iframe>
+  </div>
+  <div id="terminal-view" class="view">
+    <div id="terminal-log"></div>
+    <div id="terminal-input-bar">
+      <span class="terminal-prompt">&gt;</span>
+      <input id="terminal-input" type="text" placeholder="Type a command (e.g. list folder, system info)..." autocomplete="off">
+    </div>
   </div>
 </div>
 
@@ -3736,15 +4376,165 @@ const chatWindow = document.getElementById('chat-window');
 const input = document.getElementById('msg-input');
 const sendBtn = document.getElementById('send-btn');
 const micBtn = document.getElementById('mic-btn');
+const voiceToggleBtn = document.getElementById('voice-toggle-btn');
+
+let voiceEnabled = localStorage.getItem('jarvis_voice_enabled') !== 'false';
+voiceToggleBtn.classList.toggle('muted', !voiceEnabled);
+
+const hasSpeechSynthesis = 'speechSynthesis' in window;
+
+// Voice list loads asynchronously on most browsers (notably Chrome) — cache + refresh on change.
+let cachedVoices = [];
+function refreshVoices() {
+  cachedVoices = hasSpeechSynthesis ? window.speechSynthesis.getVoices() : [];
+}
+if (hasSpeechSynthesis) {
+  refreshVoices();
+  window.speechSynthesis.onvoiceschanged = refreshVoices;
+}
+
+function pickVoice() {
+  if (!cachedVoices.length) return null;
+  return cachedVoices.find(v => /en-GB/i.test(v.lang) && /male|daniel|arthur|oliver|james/i.test(v.name))
+      || cachedVoices.find(v => /en-GB/i.test(v.lang))
+      || cachedVoices.find(v => /^en/i.test(v.lang))
+      || cachedVoices[0];
+}
+
+// iOS Safari can silently drop the first speak() call unless it happens inside (or very
+// close to) a real user-gesture handler — a silent warm-up utterance on the first tap fixes it.
+let speechUnlocked = false;
+function unlockSpeechSynthesis() {
+  if (speechUnlocked || !hasSpeechSynthesis) return;
+  speechUnlocked = true;
+  const warmup = new SpeechSynthesisUtterance('');
+  warmup.volume = 0;
+  window.speechSynthesis.speak(warmup);
+}
+sendBtn.addEventListener('click', unlockSpeechSynthesis, { once: true });
+micBtn.addEventListener('click', unlockSpeechSynthesis, { once: true });
+input.addEventListener('keydown', unlockSpeechSynthesis, { once: true });
+
+function setSpeaking(isSpeaking) {
+  voiceToggleBtn.classList.toggle('speaking', isSpeaking);
+}
+
+function cleanForSpeech(text) {
+  if (!text) return '';
+  let cleaned = text.replace(/```[\\s\\S]*?```/g, ' Code example shown in the chat. ');
+  cleaned = cleaned.replace(/`([^`]+)`/g, '$1');
+  cleaned = cleaned.replace(/\\*\\*([^*]+)\\*\\*/g, '$1');
+  cleaned = cleaned.replace(/\\*([^*]+)\\*/g, '$1');
+  cleaned = cleaned.replace(/^#{1,3}\\s*/gm, '');
+  cleaned = cleaned.replace(/^[-*]\\s+/gm, '');
+  return cleaned.trim();
+}
+
+async function speak(text) {
+  if (!voiceEnabled || !text || !hasSpeechSynthesis) return;
+  voiceToggleBtn.classList.add('pending');
+  try {
+    let speechText = text;
+    if (text.length > 400) {
+      const res = await fetch('/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        speechText = data.speech_text || text;
+      }
+    }
+    speechText = cleanForSpeech(speechText);
+    voiceToggleBtn.classList.remove('pending');
+    if (!speechText) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(speechText);
+    const voice = pickVoice();
+    if (voice) utterance.voice = voice;
+    utterance.onstart = () => setSpeaking(true);
+    utterance.onend = () => setSpeaking(false);
+    utterance.onerror = () => setSpeaking(false);
+    window.speechSynthesis.speak(utterance);
+  } catch (err) {
+    console.error('Voice playback failed', err);
+    voiceToggleBtn.classList.remove('pending');
+    setSpeaking(false);
+  }
+}
+
+voiceToggleBtn.addEventListener('click', () => {
+  voiceEnabled = !voiceEnabled;
+  localStorage.setItem('jarvis_voice_enabled', String(voiceEnabled));
+  voiceToggleBtn.classList.toggle('muted', !voiceEnabled);
+  if (!voiceEnabled && hasSpeechSynthesis) {
+    window.speechSynthesis.cancel();
+    setSpeaking(false);
+  }
+});
 
 function timeNow() {
   return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 function formatStoredTimestamp(ts) {
+  if (!ts) return '';
   // SQLite CURRENT_TIMESTAMP is "YYYY-MM-DD HH:MM:SS" in UTC, no timezone marker
   const d = new Date(ts.replace(' ', 'T') + 'Z');
+  if (isNaN(d.getTime())) return '';
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function renderMarkdown(raw) {
+  if (typeof raw !== 'string') {
+    return raw == null ? '' : escapeHtml(String(raw));
+  }
+  try {
+    // Pull fenced code blocks out first so their content survives untouched by other rules.
+    const codeBlocks = [];
+    let text = raw.replace(/```[a-zA-Z0-9]*\\n?([\\s\\S]*?)```/g, (match, code) => {
+      codeBlocks.push(code.replace(/\\n$/, ''));
+      return ' CODEBLOCK' + (codeBlocks.length - 1) + ' ';
+    });
+
+    text = escapeHtml(text);
+
+    // Headers (#, ##, ###) — only when they start a line.
+    text = text.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+    text = text.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+    text = text.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+    // Inline code.
+    text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+    // Bold: **text** then leftover single-asterisk *text* (WhatsApp-style, used elsewhere in this app).
+    text = text.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+    text = text.replace(/\\*([^*]+)\\*/g, '<strong>$1</strong>');
+
+    // Consecutive "- " / "* " lines become a real <ul>.
+    text = text.replace(/(?:^|\\n)((?:[-*] .+)(?:\\n[-*] .+)*)/g, (match, block) => {
+      const items = block.split('\\n').map(line => '<li>' + line.replace(/^[-*]\\s+/, '') + '</li>').join('');
+      return '\\n<ul>' + items + '</ul>';
+    });
+
+    text = text.replace(/\\n/g, '<br>');
+
+    text = text.replace(/ CODEBLOCK(\\d+) /g, (match, idx) => {
+      return '<pre><code>' + escapeHtml(codeBlocks[Number(idx)]) + '</code></pre>';
+    });
+
+    return text;
+  } catch (err) {
+    console.error('renderMarkdown failed, falling back to plain text', err);
+    return escapeHtml(raw).replace(/\\n/g, '<br>');
+  }
 }
 
 function appendBubble(text, who, timeStr) {
@@ -3752,7 +4542,11 @@ function appendBubble(text, who, timeStr) {
   row.className = 'bubble-row ' + who;
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
-  bubble.textContent = text;
+  if (who === 'agent') {
+    bubble.innerHTML = renderMarkdown(text);
+  } else {
+    bubble.textContent = text;
+  }
   const ts = document.createElement('div');
   ts.className = 'timestamp';
   ts.textContent = timeStr || timeNow();
@@ -3789,6 +4583,10 @@ async function sendMessage() {
   if (!text) return;
   appendBubble(text, 'user');
   input.value = '';
+  if (/^open terminal$/i.test(text)) {
+    switchView('terminal');
+    return;
+  }
   showTyping();
   try {
     const res = await fetch('/chat-message', {
@@ -3799,6 +4597,7 @@ async function sendMessage() {
     const data = await res.json();
     hideTyping();
     appendBubble(data.reply, 'agent');
+    speak(data.reply);
   } catch (err) {
     hideTyping();
     appendBubble('⚠️ Connection error. Try again.', 'agent');
@@ -3813,7 +4612,9 @@ input.addEventListener('keydown', (e) => {
   }
 });
 
-// Voice input — webkitSpeechRecognition, fills input but does not auto-send
+// Voice input — webkitSpeechRecognition. Auto-sends once it detects you've
+// stopped talking (continuous=false + interimResults=false means onresult
+// only fires after the browser's own end-of-speech detection).
 let recognizing = false;
 let recognizer = null;
 if ('webkitSpeechRecognition' in window) {
@@ -3825,6 +4626,7 @@ if ('webkitSpeechRecognition' in window) {
   recognizer.onresult = (event) => {
     const transcript = event.results[0][0].transcript;
     input.value = transcript;
+    sendMessage();
   };
   recognizer.onend = () => {
     recognizing = false;
@@ -3859,7 +4661,11 @@ async function loadHistory() {
     const messages = data.messages || [];
     if (messages.length > 0) {
       messages.forEach(m => {
-        appendBubble(m.content, m.role === 'user' ? 'user' : 'agent', formatStoredTimestamp(m.timestamp));
+        try {
+          appendBubble(m.content, m.role === 'user' ? 'user' : 'agent', formatStoredTimestamp(m.timestamp));
+        } catch (err) {
+          console.error('Failed to render a history message, skipping it', err);
+        }
       });
       return;
     }
@@ -3885,8 +4691,13 @@ function switchView(view) {
   currentView = view;
   document.getElementById('tab-jarvis').classList.toggle('active', view === 'jarvis');
   document.getElementById('tab-privachat').classList.toggle('active', view === 'privachat');
+  document.getElementById('tab-terminal').classList.toggle('active', view === 'terminal');
   document.getElementById('jarvis-view').classList.toggle('active', view === 'jarvis');
   document.getElementById('privachat-view').classList.toggle('active', view === 'privachat');
+  document.getElementById('terminal-view').classList.toggle('active', view === 'terminal');
+  if (view === 'terminal') {
+    document.getElementById('terminal-input').focus();
+  }
   if (view === 'privachat') {
     const frame = document.getElementById('privachat-frame');
     if (!frame.dataset.loaded) {
@@ -3920,6 +4731,69 @@ window.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'privachat:new-message' && currentView !== 'privachat') {
     privachatUnread += 1;
     updatePrivachatBadge();
+  }
+});
+
+// ── Terminal tab: live feed of local_command_queue + direct command input ──
+const terminalLog = document.getElementById('terminal-log');
+const terminalInput = document.getElementById('terminal-input');
+let terminalLastId = 0;
+
+function appendTerminalLine(text, cls) {
+  const line = document.createElement('div');
+  line.className = 'term-line ' + cls;
+  line.textContent = text;
+  terminalLog.appendChild(line);
+  terminalLog.scrollTop = terminalLog.scrollHeight;
+}
+
+async function pollTerminalHistory() {
+  try {
+    const res = await fetch(`/local-queue/history?after_id=${terminalLastId}`);
+    const data = await res.json();
+    const commands = data.commands || [];
+    commands.forEach(c => {
+      terminalLastId = Math.max(terminalLastId, c.id);
+      const label = c.payload ? `${c.command_type} ${c.payload}` : c.command_type;
+      appendTerminalLine(label, 'cmd');
+      if (c.status === 'completed') {
+        appendTerminalLine(c.result || '(no output)', 'result');
+      } else {
+        appendTerminalLine(`[${c.status}]`, 'status');
+      }
+    });
+  } catch (err) {
+    console.error('Terminal history poll failed', err);
+  }
+}
+pollTerminalHistory();
+setInterval(pollTerminalHistory, 4000);
+
+async function sendTerminalCommand() {
+  const text = terminalInput.value.trim();
+  if (!text) return;
+  appendTerminalLine(text, 'cmd');
+  terminalInput.value = '';
+  appendTerminalLine('[running...]', 'status');
+  try {
+    const res = await fetch('/chat-message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text })
+    });
+    const data = await res.json();
+    terminalLog.lastChild.remove();
+    appendTerminalLine(data.reply, 'result');
+  } catch (err) {
+    terminalLog.lastChild.remove();
+    appendTerminalLine('⚠️ Connection error.', 'result');
+  }
+}
+
+terminalInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    sendTerminalCommand();
   }
 });
 </script>

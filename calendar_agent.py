@@ -18,7 +18,7 @@ Events with no attendees are created immediately, same as setting a reminder.
 import os
 import json
 import sqlite3
-import aiosqlite
+import db_compat as aiosqlite
 from datetime import datetime, timezone
 
 from google.oauth2.credentials import Credentials
@@ -43,7 +43,7 @@ TIMEZONE = "Asia/Kolkata"
 
 def init_calendar_tables():
     """Synchronous, mirrors init_db_tables() in V3_updates.py — called once at import/startup time."""
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = aiosqlite.connect_sync(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute('''CREATE TABLE IF NOT EXISTS pending_calendar_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

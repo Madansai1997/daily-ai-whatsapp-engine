@@ -10,7 +10,7 @@ import json
 import uuid
 import base64
 import sqlite3
-import aiosqlite
+import db_compat as aiosqlite
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
 
@@ -44,7 +44,7 @@ TRIAGE_SYSTEM_PROMPT = (
 
 def init_email_tables():
     """Synchronous, mirrors init_db_tables() in V3_updates.py — called once at import/startup time."""
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = aiosqlite.connect_sync(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute('''CREATE TABLE IF NOT EXISTS pending_drafts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,6 +83,18 @@ def _get_gmail_service():
     )
     creds.refresh(GoogleAuthRequest())
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
+
+
+def get_connected_gmail_address() -> str | None:
+    """One-shot lookup of which Gmail account the OAuth refresh token actually authenticates as —
+    queried directly from Gmail rather than assumed, since the .env credentials don't state it."""
+    try:
+        service = _get_gmail_service()
+        profile = service.users().getProfile(userId="me").execute()
+        return profile.get("emailAddress")
+    except Exception as e:
+        print(f"⚠️ [email_triage] Failed to fetch connected Gmail address: {e}")
+        return None
 
 
 def _extract_header(headers, name):
