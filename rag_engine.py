@@ -1,11 +1,11 @@
 import re
 import math
 import collections
-import aiosqlite
+import db_compat as aiosqlite
 import os
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "agent_memory.db")
+DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "agent_memory.db"))
 
 # Standard search stopwords to filter out low-signal tokens
 STOP_WORDS = {

@@ -10,7 +10,7 @@ import json
 import uuid
 import base64
 import sqlite3
-import aiosqlite
+import db_compat as aiosqlite
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
 
@@ -44,7 +44,7 @@ TRIAGE_SYSTEM_PROMPT = (
 
 def init_email_tables():
     """Synchronous, mirrors init_db_tables() in V3_updates.py — called once at import/startup time."""
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = aiosqlite.connect_sync(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute('''CREATE TABLE IF NOT EXISTS pending_drafts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

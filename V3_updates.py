@@ -1,7 +1,7 @@
 import os
 import time
 import sqlite3
-import aiosqlite
+import db_compat as aiosqlite
 import asyncio
 import json
 import random
@@ -231,7 +231,7 @@ async def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 1000)
 
 
 def init_db_tables():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = aiosqlite.connect_sync(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS user_profile (key TEXT PRIMARY KEY, value TEXT)''')
@@ -368,8 +368,8 @@ init_automation_tables()
 # USER SETTINGS HELPERS (sync, single-user)
 # ==========================================
 def _get_db_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = aiosqlite.connect_sync(DB_PATH)
+    conn.row_factory = aiosqlite.Row
     return conn
 
 def get_setting(key: str, default=None):
