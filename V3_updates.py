@@ -187,7 +187,12 @@ MEMORY_INTENT_PROMPT = (
     "title/keyword identifies which event to remove. This is NOT for confirming/cancelling an event already shown "
     "to the user in this conversation — those are separate explicit commands and should be OTHER. content = null, "
     "reminder = null, email = null.\n"
-    "Use OTHER for everything else — general conversation, questions, commands. content = null, reminder = null, "
+    "Use OTHER for everything else — general conversation, questions, commands. This explicitly includes general "
+    'knowledge/curiosity questions phrased like "tell me about X", "what is X", "explain X", "how does X work" — '
+    "these are OTHER even when X sounds like a topic, unless the message is clearly asking to save/recall a "
+    "personal fact already established about Madan, or explicitly states a time/schedule to be reminded at. Never "
+    "force a general-knowledge question into SAVE_FACT, RECALL_FACT, LIST_FACTS, or SET_REMINDER just because it "
+    "contains a noun that could be mistaken for a fact or task. content = null, reminder = null, "
     "email = null, calendar = null."
 )
 
@@ -352,6 +357,13 @@ def init_db_tables():
         result TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         completed_at DATETIME)''')
+
+    cursor.execute('''CREATE TABLE IF NOT EXISTS pending_claude_code_task (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_text TEXT,
+        proposed_plan TEXT,
+        status TEXT DEFAULT 'proposed',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
     conn.commit()
     conn.close()
@@ -542,7 +554,10 @@ LOCAL_QUEUE_ALLOWED_COMMANDS = [
     "list_folder", "read_file",
     "search_files", "system_info",
     "list_recent_files",
+    "claude_code_propose", "claude_code_execute",
 ]
+
+CLAUDE_CODE_TRIGGER_SECRET = os.environ.get("CLAUDE_CODE_TRIGGER_SECRET", "")
 
 
 @app.post("/local-queue")
@@ -626,6 +641,53 @@ async def get_command_result(command_id: int):
         "status": row[0],
         "result": row[1]
     })
+
+
+@app.get("/local-queue/history")
+async def get_local_queue_history(after_id: int = 0, limit: int = 30):
+    """Recent local_command_queue rows for the Terminal tab's live feed —
+    after_id lets the frontend poll for only what's new since its last fetch."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT id, command_type, payload, status, result, created_at, completed_at "
+            "FROM local_command_queue WHERE id > ? ORDER BY id ASC LIMIT ?",
+            (after_id, limit)
+        )
+        rows = await cur.fetchall()
+    return JSONResponse({"commands": [dict(r) for r in rows]})
+
+
+# =========================================================================
+# CLAUDE CODE BRIDGE — propose/execute helpers for pending_claude_code_task.
+# Only one task in flight at a time, same single-active-item discipline as
+# get_active_draft()/get_latest_pending_event() elsewhere in this file.
+# =========================================================================
+async def get_pending_claude_code_task():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM pending_claude_code_task WHERE status IN ('proposed', 'executing') "
+            "ORDER BY created_at DESC LIMIT 1"
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def save_proposed_claude_code_task(task_text: str, proposed_plan: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "INSERT INTO pending_claude_code_task (task_text, proposed_plan, status) VALUES (?, ?, 'proposed')",
+            (task_text, proposed_plan),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def update_claude_code_task_status(task_id: int, status: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE pending_claude_code_task SET status = ? WHERE id = ?", (status, task_id))
+        await db.commit()
 
 
 @app.get("/admin", response_class=Response)
@@ -2669,6 +2731,151 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
             return result
 
     # =========================================================================
+    # CLAUDE CODE BRIDGE — passphrase-gated trigger for a real Claude Code agent
+    # on Madan's Mac, via local_bridge.py. Literal exact-match parsing (not the
+    # AI intent classifier) — same reasoning as the email/calendar approval
+    # commands: this is security-sensitive and needs predictable, deterministic
+    # matching, not an LLM's best guess.
+    #
+    # Two-phase by design: this block ONLY EVER queues a read-only
+    # claude_code_propose task (--permission-mode plan in local_bridge.py —
+    # no file edits, no bash writes, no git). Real execution only happens via
+    # the explicit "approve claude code" command further down, after Madan
+    # has reviewed the proposed plan. A leaked passphrase alone can only make
+    # Claude Code *look* at the codebase and propose, never act.
+    #
+    # If the passphrase is missing/wrong: fall through silently to normal
+    # chat handling. Acknowledging "that's the right command but wrong
+    # password" to an unauthenticated caller is its own information leak.
+    # =========================================================================
+    if user_message_clean.startswith("claude code:") and CLAUDE_CODE_TRIGGER_SECRET:
+        _cc_rest = user_message[len("claude code:"):].strip()
+        _cc_parts = _cc_rest.split(None, 1)
+        if len(_cc_parts) == 2 and _cc_parts[0] == CLAUDE_CODE_TRIGGER_SECRET:
+            cc_task_text = _cc_parts[1].strip()
+            await log_chat_message("user", user_message)
+
+            existing_task = await get_pending_claude_code_task()
+            if existing_task:
+                msg = (
+                    f"⚠️ Already have a pending Claude Code task (status: {existing_task['status']}). "
+                    f"Reply *approve claude code* or *cancel* first."
+                )
+                await log_chat_message("assistant", msg)
+                return msg
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                cursor = await db.execute(
+                    "INSERT INTO local_command_queue (command_type, payload) VALUES (?, ?)",
+                    ("claude_code_propose", cc_task_text)
+                )
+                cc_command_id = cursor.lastrowid
+                await db.commit()
+
+            async def _poll_claude_code_queue(cmd_id: int, max_wait_seconds: int):
+                for _ in range(max_wait_seconds):
+                    await asyncio.sleep(1)
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        cur = await db.execute(
+                            "SELECT status, result FROM local_command_queue WHERE id=?", (cmd_id,)
+                        )
+                        row = await cur.fetchone()
+                    if row and row[0] == "completed":
+                        return row[1] or "No result"
+                return None
+
+            async def _propose_and_deliver():
+                # 650s > local_bridge.py's own 600s subprocess timeout for this command,
+                # so by the time this gives up, the bridge will already have posted some
+                # result (real plan, or its own timeout message) — None here only really
+                # means the bridge isn't running at all.
+                plan_text = await _poll_claude_code_queue(cc_command_id, max_wait_seconds=650)
+                if plan_text is None:
+                    msg = "⏳ Local bridge not running. Start local_bridge.py on your Mac, then try again."
+                else:
+                    await save_proposed_claude_code_task(cc_task_text, plan_text)
+                    msg = (
+                        f"🤖 *Claude Code's proposed plan:*\n\n{plan_text}\n\n"
+                        f"─────────────────\n"
+                        f"Reply *approve claude code* to let it actually run this, or *cancel* to discard."
+                    )
+                await log_chat_message("assistant", msg)
+                if source == "whatsapp":
+                    send_whatsapp(msg)
+                return msg
+
+            if source == "whatsapp":
+                asyncio.create_task(_propose_and_deliver())
+                return None
+            else:
+                ack = "🤖 Investigating — this can take a few minutes, I'll have a plan shortly."
+                await log_chat_message("assistant", ack)
+                asyncio.create_task(_propose_and_deliver())
+                return ack
+        # wrong/missing passphrase: fall through silently, no return
+
+    # =========================================================================
+    # CLAUDE CODE BRIDGE — approve a proposed plan. Re-runs the ORIGINAL task
+    # text (not the proposed_plan text) with full permissions
+    # (--permission-mode bypassPermissions in local_bridge.py) — Claude Code
+    # re-investigates and acts, rather than literally replaying the
+    # human-readable plan summary as a prompt.
+    # =========================================================================
+    if user_message_clean == "approve claude code":
+        await log_chat_message("user", user_message)
+        cc_task = await get_pending_claude_code_task()
+        if not cc_task or cc_task["status"] != "proposed":
+            msg = "No pending Claude Code plan to approve."
+            await log_chat_message("assistant", msg)
+            return msg
+
+        await update_claude_code_task_status(cc_task["id"], "executing")
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "INSERT INTO local_command_queue (command_type, payload) VALUES (?, ?)",
+                ("claude_code_execute", cc_task["task_text"])
+            )
+            cc_command_id = cursor.lastrowid
+            await db.commit()
+
+        async def _poll_claude_code_execute(cmd_id: int, max_wait_seconds: int):
+            for _ in range(max_wait_seconds):
+                await asyncio.sleep(1)
+                async with aiosqlite.connect(DB_PATH) as db:
+                    cur = await db.execute(
+                        "SELECT status, result FROM local_command_queue WHERE id=?", (cmd_id,)
+                    )
+                    row = await cur.fetchone()
+                if row and row[0] == "completed":
+                    return row[1] or "No result"
+            return None
+
+        async def _execute_and_deliver():
+            # 1850s > local_bridge.py's own 1800s subprocess timeout for this command —
+            # same reasoning as the propose phase above.
+            result_text = await _poll_claude_code_execute(cc_command_id, max_wait_seconds=1850)
+            if result_text is None:
+                msg = "⏳ Local bridge not running. Start local_bridge.py on your Mac — the task is still queued."
+                await update_claude_code_task_status(cc_task["id"], "cancelled")
+            else:
+                await update_claude_code_task_status(cc_task["id"], "done")
+                msg = f"✅ *Claude Code finished:*\n\n{result_text}"
+            await log_chat_message("assistant", msg)
+            if source == "whatsapp":
+                send_whatsapp(msg)
+            return msg
+
+        if source == "whatsapp":
+            asyncio.create_task(_execute_and_deliver())
+            return None
+        else:
+            ack = "🚀 Running it now with full permissions — this can take a while, I'll update you here."
+            await log_chat_message("assistant", ack)
+            asyncio.create_task(_execute_and_deliver())
+            return ack
+
+    # =========================================================================
     # EMAIL TRIAGE — approve the active draft reply, then advance the queue
     # =========================================================================
     if user_message_clean in ["approve email", "yes email"]:
@@ -2834,6 +3041,14 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
             await log_chat_message("user", user_message)
             await cancel_pending_event(pending_event["id"])
             msg = "🗑️ Event invite cancelled."
+            await log_chat_message("assistant", msg)
+            return msg
+
+        cc_pending = await get_pending_claude_code_task()
+        if cc_pending and cc_pending["status"] == "proposed":
+            await log_chat_message("user", user_message)
+            await update_claude_code_task_status(cc_pending["id"], "cancelled")
+            msg = "🗑️ Claude Code plan cancelled."
             await log_chat_message("assistant", msg)
             return msg
 
@@ -3634,9 +3849,13 @@ You are not limited to any domain. Explain whatever the user asks."""
                 "today', 'put a meeting tomorrow at 3pm') — but do NOT claim "
                 "calendar access definitely works OR definitely doesn't until "
                 "OAuth re-authorization is confirmed.\n"
-                "- If asked about anything not in these facts, say: 'I don't have "
-                "that info — check your project folder at "
-                "/Users/madansaidaram/Desktop/Daily_AI_updates'\n\n"
+                "- These facts describe your OWN system only. If asked specifically whether YOU "
+                "(JARVIS) have some feature/capability not listed above (e.g. 'can you do X', "
+                "'do you have a Y feature'), say plainly you don't have that capability — never "
+                "invent one, and never tell Madan to go check his own project folder for it. This "
+                "restriction does NOT apply to general knowledge questions (news, concepts, how "
+                "something works, advice, etc.) — answer those normally and fully using what you "
+                "actually know, exactly like any knowledgeable assistant would.\n\n"
 
                 "WHAT YOU CANNOT DO — never fake this:\n"
                 "You are NOT shown Madan's actual reminders, emails, drafts, or "
@@ -4063,6 +4282,32 @@ CHAT_UI_HTML = """<!DOCTYPE html>
   .view.active { display: flex; }
   #privachat-view { padding: 0; }
   #privachat-frame { flex: 1 1 auto; width: 100%; height: 100%; border: none; }
+
+  #terminal-log {
+    flex: 1 1 auto; overflow-y: auto; padding: 14px 18px;
+    background: #00060a;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px; line-height: 1.6;
+  }
+  .term-line { white-space: pre-wrap; word-wrap: break-word; margin-bottom: 6px; }
+  .term-line.cmd { color: var(--cyan); }
+  .term-line.cmd::before { content: '$ '; color: rgba(0, 229, 255, 0.5); }
+  .term-line.result { color: #9bf6ff; padding-left: 4px; }
+  .term-line.status { color: rgba(0, 229, 255, 0.4); font-style: italic; }
+  #terminal-input-bar {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+    padding: 12px 14px; padding-bottom: max(12px, env(safe-area-inset-bottom));
+    background: linear-gradient(0deg, rgba(0,229,255,0.05), transparent);
+    border-top: 1px solid var(--cyan-dim);
+  }
+  .terminal-prompt {
+    font-family: 'Share Tech Mono', monospace; color: var(--cyan); font-size: 15px;
+  }
+  #terminal-input {
+    flex: 1 1 auto; background: transparent; color: #eafffd; border: none; outline: none;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px; padding: 6px 0;
+  }
+  #terminal-input::placeholder { color: rgba(0, 229, 255, 0.35); }
 </style>
 </head>
 <body>
@@ -4080,6 +4325,7 @@ CHAT_UI_HTML = """<!DOCTYPE html>
           PrivaChat
           <span class="tab-badge" id="privachat-badge">0</span>
         </button>
+        <button class="tab-btn" id="tab-terminal" onclick="switchView('terminal')">Terminal</button>
       </div>
       <div class="status-ring"><div class="pulse-dot"></div></div>
     </div>
@@ -4115,6 +4361,13 @@ CHAT_UI_HTML = """<!DOCTYPE html>
   </div>
   <div id="privachat-view" class="view">
     <iframe id="privachat-frame" src="" title="PrivaChat"></iframe>
+  </div>
+  <div id="terminal-view" class="view">
+    <div id="terminal-log"></div>
+    <div id="terminal-input-bar">
+      <span class="terminal-prompt">&gt;</span>
+      <input id="terminal-input" type="text" placeholder="Type a command (e.g. list folder, system info)..." autocomplete="off">
+    </div>
   </div>
 </div>
 
@@ -4330,6 +4583,10 @@ async function sendMessage() {
   if (!text) return;
   appendBubble(text, 'user');
   input.value = '';
+  if (/^open terminal$/i.test(text)) {
+    switchView('terminal');
+    return;
+  }
   showTyping();
   try {
     const res = await fetch('/chat-message', {
@@ -4434,8 +4691,13 @@ function switchView(view) {
   currentView = view;
   document.getElementById('tab-jarvis').classList.toggle('active', view === 'jarvis');
   document.getElementById('tab-privachat').classList.toggle('active', view === 'privachat');
+  document.getElementById('tab-terminal').classList.toggle('active', view === 'terminal');
   document.getElementById('jarvis-view').classList.toggle('active', view === 'jarvis');
   document.getElementById('privachat-view').classList.toggle('active', view === 'privachat');
+  document.getElementById('terminal-view').classList.toggle('active', view === 'terminal');
+  if (view === 'terminal') {
+    document.getElementById('terminal-input').focus();
+  }
   if (view === 'privachat') {
     const frame = document.getElementById('privachat-frame');
     if (!frame.dataset.loaded) {
@@ -4469,6 +4731,69 @@ window.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'privachat:new-message' && currentView !== 'privachat') {
     privachatUnread += 1;
     updatePrivachatBadge();
+  }
+});
+
+// ── Terminal tab: live feed of local_command_queue + direct command input ──
+const terminalLog = document.getElementById('terminal-log');
+const terminalInput = document.getElementById('terminal-input');
+let terminalLastId = 0;
+
+function appendTerminalLine(text, cls) {
+  const line = document.createElement('div');
+  line.className = 'term-line ' + cls;
+  line.textContent = text;
+  terminalLog.appendChild(line);
+  terminalLog.scrollTop = terminalLog.scrollHeight;
+}
+
+async function pollTerminalHistory() {
+  try {
+    const res = await fetch(`/local-queue/history?after_id=${terminalLastId}`);
+    const data = await res.json();
+    const commands = data.commands || [];
+    commands.forEach(c => {
+      terminalLastId = Math.max(terminalLastId, c.id);
+      const label = c.payload ? `${c.command_type} ${c.payload}` : c.command_type;
+      appendTerminalLine(label, 'cmd');
+      if (c.status === 'completed') {
+        appendTerminalLine(c.result || '(no output)', 'result');
+      } else {
+        appendTerminalLine(`[${c.status}]`, 'status');
+      }
+    });
+  } catch (err) {
+    console.error('Terminal history poll failed', err);
+  }
+}
+pollTerminalHistory();
+setInterval(pollTerminalHistory, 4000);
+
+async function sendTerminalCommand() {
+  const text = terminalInput.value.trim();
+  if (!text) return;
+  appendTerminalLine(text, 'cmd');
+  terminalInput.value = '';
+  appendTerminalLine('[running...]', 'status');
+  try {
+    const res = await fetch('/chat-message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text })
+    });
+    const data = await res.json();
+    terminalLog.lastChild.remove();
+    appendTerminalLine(data.reply, 'result');
+  } catch (err) {
+    terminalLog.lastChild.remove();
+    appendTerminalLine('⚠️ Connection error.', 'result');
+  }
+}
+
+terminalInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    sendTerminalCommand();
   }
 });
 </script>
