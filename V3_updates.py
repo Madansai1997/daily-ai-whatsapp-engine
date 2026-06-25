@@ -4046,10 +4046,17 @@ CHAT_UI_HTML = """<!DOCTYPE html>
   header {
     flex: 0 0 auto;
     display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; row-gap: 10px;
     padding: 16px 20px;
     background: linear-gradient(180deg, rgba(0,229,255,0.06), transparent);
     border-bottom: 1px solid var(--cyan-dim);
     position: relative; z-index: 10;
+  }
+  @media (max-width: 480px) {
+    header { padding: 12px 14px; }
+    .header-right { width: 100%; justify-content: space-between; }
+    .tab-bar { flex: 1 1 auto; }
+    .tab-btn { flex: 1 1 auto; padding: 6px 6px; font-size: 9px; letter-spacing: 0.5px; }
   }
   header .brand {
     font-family: 'Orbitron', sans-serif;
