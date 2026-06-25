@@ -2696,10 +2696,26 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
        user_message_clean in ["show my project", "list my files", "show project folder"]:
         await log_chat_message("user", user_message)
 
+        # Optional folder argument after the trigger phrase, e.g. "list folder Documents"
+        # or "show folder /Users/madansaidaram/Desktop" — bare phrases (or the fixed
+        # "show my project"-style ones) fall back to the project folder as before.
+        # local_bridge.py's own ALLOWED_FOLDERS check still rejects anything outside
+        # the whitelist (Desktop, Documents, Daily_AI_updates) — this just lets you
+        # pick which of those to browse instead of always getting the project folder.
+        folder_arg = ""
+        if user_message_clean.startswith("show folder"):
+            folder_arg = user_message[len("show folder"):].strip().lstrip(":").strip()
+        elif user_message_clean.startswith("list folder"):
+            folder_arg = user_message[len("list folder"):].strip().lstrip(":").strip()
+        if folder_arg:
+            target_folder = folder_arg if folder_arg.startswith("/") else f"/Users/madansaidaram/{folder_arg}"
+        else:
+            target_folder = "/Users/madansaidaram/Desktop/Daily_AI_updates"
+
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
                 "INSERT INTO local_command_queue (command_type, payload) VALUES (?, ?)",
-                ("list_folder", "/Users/madansaidaram/Desktop/Daily_AI_updates")
+                ("list_folder", target_folder)
             )
             command_id = cursor.lastrowid
             await db.commit()

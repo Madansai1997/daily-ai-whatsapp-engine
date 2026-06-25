@@ -16,7 +16,7 @@ from pathlib import Path
 import requests
 
 # ── CONFIG ──────────────────────────────
-RENDER_URL = "https://YOUR-RENDER-APP.onrender.com"
+RENDER_URL = "https://daily-ai-whatsapp-engine.onrender.com"
 POLL_INTERVAL = 10  # seconds between polls
 PROJECT_FOLDER = "/Users/madansaidaram/Desktop/Daily_AI_updates"
 
