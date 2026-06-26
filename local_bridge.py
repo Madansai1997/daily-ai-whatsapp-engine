@@ -9,6 +9,7 @@ Command: python local_bridge.py
 
 import os
 import time
+import json
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -194,6 +195,53 @@ def execute_command(command_type: str, payload: str) -> str:
             except FileNotFoundError:
                 return "❌ `claude` CLI not found on PATH. Install it (curl -fsSL https://claude.ai/install.sh | bash) and log in first."
             return result.stdout.strip() or f"(no output)\n{result.stderr.strip()}"
+
+        elif command_type == "claude_code_chat":
+            # One turn of a live interactive session — full permissions, no
+            # plan/approve gate, same as the propose/execute pair above but
+            # resumable: --resume continues the same `claude` conversation
+            # across separate subprocess calls (one per chat message), since
+            # there's no long-lived process to keep open across HTTP polling.
+            # The session id needed for the next --resume isn't returned any
+            # other way, so it's smuggled back in the result via a prefix the
+            # server strips before display.
+            try:
+                data = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                return "❌ Bad claude_code_chat payload"
+            message = data.get("message", "")
+            resume_id = data.get("resume_id")
+
+            args = [
+                "claude", "-p", message,
+                "--permission-mode", "bypassPermissions",
+                "--output-format", "json",
+                "--max-turns", "40", "--max-budget-usd", "5.00",
+            ]
+            if resume_id:
+                args += ["--resume", resume_id]
+
+            try:
+                result = subprocess.run(
+                    args, cwd=PROJECT_FOLDER, capture_output=True, text=True, timeout=600,
+                )
+            except subprocess.TimeoutExpired:
+                return "⏱️ Claude Code timed out after 10 minutes on this turn."
+            except FileNotFoundError:
+                return "❌ `claude` CLI not found on PATH. Install it (curl -fsSL https://claude.ai/install.sh | bash) and log in first."
+
+            try:
+                parsed = json.loads(result.stdout)
+            except (json.JSONDecodeError, ValueError):
+                raw = (result.stdout or result.stderr).strip()
+                return f"❌ Claude Code returned malformed output:\n{raw[:1500]}"
+
+            if parsed.get("is_error"):
+                return f"❌ Claude Code error: {parsed.get('result') or parsed.get('subtype') or 'unknown error'}"
+
+            text = parsed.get("result") or "(no output)"
+            new_session_id = parsed.get("session_id", "")
+            return f"__SESSION_ID__{new_session_id}__\n{text}"
 
         else:
             return f"Unknown command: {command_type}"

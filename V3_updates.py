@@ -366,6 +366,8 @@ def init_db_tables():
             cursor.execute("ALTER TABLE local_command_queue ADD COLUMN source TEXT")
         if 'cc_task_id' not in cols:
             cursor.execute("ALTER TABLE local_command_queue ADD COLUMN cc_task_id INTEGER")
+        if 'cc_session_row_id' not in cols:
+            cursor.execute("ALTER TABLE local_command_queue ADD COLUMN cc_session_row_id INTEGER")
     except Exception:
         pass
 
@@ -374,6 +376,12 @@ def init_db_tables():
         task_text TEXT,
         proposed_plan TEXT,
         status TEXT DEFAULT 'proposed',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+    cursor.execute('''CREATE TABLE IF NOT EXISTS claude_code_live_session (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cc_session_id TEXT,
+        status TEXT DEFAULT 'active',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
     conn.commit()
@@ -565,7 +573,7 @@ LOCAL_QUEUE_ALLOWED_COMMANDS = [
     "list_folder", "read_file",
     "search_files", "system_info",
     "list_recent_files",
-    "claude_code_propose", "claude_code_execute",
+    "claude_code_propose", "claude_code_execute", "claude_code_chat",
 ]
 
 CLAUDE_CODE_TRIGGER_SECRET = os.environ.get("CLAUDE_CODE_TRIGGER_SECRET", "")
@@ -630,10 +638,22 @@ async def post_command_result(request: Request):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            "SELECT command_type, payload, source, cc_task_id FROM local_command_queue WHERE id=?",
+            "SELECT command_type, payload, source, cc_task_id, cc_session_row_id FROM local_command_queue WHERE id=?",
             (command_id,)
         )
         row = await cur.fetchone()
+
+        # claude_code_chat results carry a "__SESSION_ID__<id>__\n" prefix so the
+        # live session's --resume id can be captured here, since local_bridge.py
+        # has no other side channel back to the server. Strip it before storing
+        # so the Terminal tab's raw queue feed shows clean text too.
+        new_cc_session_id = None
+        if row and row["command_type"] == "claude_code_chat" and result.startswith("__SESSION_ID__"):
+            try:
+                marker, result = result.split("__\n", 1)
+                new_cc_session_id = marker[len("__SESSION_ID__"):]
+            except ValueError:
+                pass
 
         await db.execute(
             "UPDATE local_command_queue "
@@ -665,6 +685,13 @@ async def post_command_result(request: Request):
             await log_chat_message("assistant", msg)
             if source == "whatsapp":
                 send_whatsapp(msg)
+
+        elif command_type == "claude_code_chat" and row["cc_session_row_id"]:
+            if new_cc_session_id:
+                await update_cc_session(row["cc_session_row_id"], cc_session_id=new_cc_session_id)
+            await log_chat_message("assistant", result)
+            if source == "whatsapp":
+                send_whatsapp(result)
 
     return JSONResponse({"status": "saved"})
 
@@ -732,6 +759,45 @@ async def save_proposed_claude_code_task(task_text: str, proposed_plan: str) -> 
 async def update_claude_code_task_status(task_id: int, status: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE pending_claude_code_task SET status = ? WHERE id = ?", (status, task_id))
+        await db.commit()
+
+
+# =========================================================================
+# CLAUDE CODE BRIDGE — live interactive session helpers. Unlike the
+# propose/execute flow (one-shot, plan-gated), a live session is modal: once
+# active, every chat message routes straight to a real `claude` process with
+# full permissions via --resume, the same way you'd interact with Claude Code
+# directly in a terminal. Only one session active at a time.
+# =========================================================================
+async def get_active_cc_session():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM claude_code_live_session WHERE status='active' ORDER BY created_at DESC LIMIT 1"
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def start_cc_session() -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("INSERT INTO claude_code_live_session (status) VALUES ('active')")
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def update_cc_session(session_row_id: int, cc_session_id: str = None, status: str = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        if cc_session_id is not None:
+            await db.execute(
+                "UPDATE claude_code_live_session SET cc_session_id = ? WHERE id = ?",
+                (cc_session_id, session_row_id)
+            )
+        if status is not None:
+            await db.execute(
+                "UPDATE claude_code_live_session SET status = ? WHERE id = ?",
+                (status, session_row_id)
+            )
         await db.commit()
 
 
@@ -2653,6 +2719,45 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
     # ── Normal command processing continues below ──
 
     # =========================================================================
+    # CLAUDE CODE BRIDGE — live interactive session (modal). Checked before
+    # every other command: once a session is active, every message except the
+    # end-session phrase routes straight to the live `claude` process with full
+    # permissions, the same way typing into the `claude` CLI itself works —
+    # you have to exit before anything else is reachable. "cancel" is
+    # deliberately NOT overloaded here, since during a live session you might
+    # legitimately tell the agent itself to cancel/undo something.
+    # =========================================================================
+    if user_message_clean in ["end claude code session", "exit claude code session", "exit claude code"]:
+        await log_chat_message("user", user_message)
+        _cc_session = await get_active_cc_session()
+        if not _cc_session:
+            msg = "No live Claude Code session is active."
+            await log_chat_message("assistant", msg)
+            return msg
+        await update_cc_session(_cc_session["id"], status="ended")
+        msg = "🔴 Live Claude Code session ended."
+        await log_chat_message("assistant", msg)
+        return msg
+
+    _active_cc_session = await get_active_cc_session()
+    if _active_cc_session:
+        await log_chat_message("user", user_message)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO local_command_queue (command_type, payload, source, cc_session_row_id) VALUES (?, ?, ?, ?)",
+                (
+                    "claude_code_chat",
+                    json.dumps({"message": user_message, "resume_id": _active_cc_session["cc_session_id"]}),
+                    source,
+                    _active_cc_session["id"],
+                )
+            )
+            await db.commit()
+        if source == "whatsapp":
+            return None
+        return "🤖 working..."
+
+    # =========================================================================
     # WEB UI — natural greeting (bypasses the learning-engine help menu)
     # =========================================================================
     if source == "web" and user_message_clean in [
@@ -2842,6 +2947,52 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
                 ack = "🤖 Investigating — this can take a few minutes, I'll post the plan here once it's ready."
                 await log_chat_message("assistant", ack)
                 return ack
+        # wrong/missing passphrase: fall through silently, no return
+
+    # =========================================================================
+    # CLAUDE CODE BRIDGE — start a live interactive session. Same secret gate
+    # as the propose trigger, but instead of one-shot plan-then-approve, this
+    # opens a modal session (handled at the top of this function) where every
+    # subsequent message goes straight to a real `claude` process with full
+    # permissions via --resume, the same way this very Claude Code session
+    # works — no per-message plan/approve gate, just live back-and-forth.
+    # Usage: "claude code session: <secret> [optional first message]"
+    # =========================================================================
+    if user_message_clean.startswith("claude code session:") and CLAUDE_CODE_TRIGGER_SECRET:
+        _ccs_rest = user_message[len("claude code session:"):].strip()
+        _ccs_parts = _ccs_rest.split(None, 1)
+        if len(_ccs_parts) >= 1 and _ccs_parts[0] == CLAUDE_CODE_TRIGGER_SECRET:
+            await log_chat_message("user", user_message)
+
+            if await get_active_cc_session():
+                msg = "⚠️ A live Claude Code session is already active. Reply *end claude code session* to close it first."
+                await log_chat_message("assistant", msg)
+                return msg
+
+            session_row_id = await start_cc_session()
+            first_message = _ccs_parts[1].strip() if len(_ccs_parts) == 2 else ""
+
+            if not first_message:
+                msg = (
+                    "🟢 Live Claude Code session started — full permissions, every message now goes "
+                    "straight to it. Use the Terminal tab to drive it (it auto-refreshes); reply "
+                    "*end claude code session* to exit."
+                )
+                await log_chat_message("assistant", msg)
+                return msg
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "INSERT INTO local_command_queue (command_type, payload, source, cc_session_row_id) VALUES (?, ?, ?, ?)",
+                    ("claude_code_chat", json.dumps({"message": first_message, "resume_id": None}), source, session_row_id)
+                )
+                await db.commit()
+
+            if source == "whatsapp":
+                return None
+            ack = "🟢 Live Claude Code session started — working on it now."
+            await log_chat_message("assistant", ack)
+            return ack
         # wrong/missing passphrase: fall through silently, no return
 
     # =========================================================================
@@ -4747,6 +4898,8 @@ window.addEventListener('message', (event) => {
 const terminalLog = document.getElementById('terminal-log');
 const terminalInput = document.getElementById('terminal-input');
 let terminalLastId = 0;
+const terminalRenderedIds = new Set();
+const terminalOpenRows = new Map(); // id -> status line element, for rows not yet completed
 
 function appendTerminalLine(text, cls) {
   const line = document.createElement('div');
@@ -4754,22 +4907,47 @@ function appendTerminalLine(text, cls) {
   line.textContent = text;
   terminalLog.appendChild(line);
   terminalLog.scrollTop = terminalLog.scrollHeight;
+  return line;
 }
 
 async function pollTerminalHistory() {
   try {
-    const res = await fetch(`/local-queue/history?after_id=${terminalLastId}`);
+    // While any row is still open (pending/executing), keep re-fetching from
+    // just before it — otherwise its completion update is never seen once
+    // its id falls below the watermark.
+    const fetchFrom = terminalOpenRows.size
+      ? Math.min(...terminalOpenRows.keys()) - 1
+      : terminalLastId;
+    const res = await fetch(`/local-queue/history?after_id=${fetchFrom}`);
     const data = await res.json();
     const commands = data.commands || [];
     commands.forEach(c => {
       terminalLastId = Math.max(terminalLastId, c.id);
-      const label = c.payload ? `${c.command_type} ${c.payload}` : c.command_type;
-      appendTerminalLine(label, 'cmd');
+      const openStatusEl = terminalOpenRows.get(c.id);
+      // claude_code_chat turns are echoed by sendTerminalCommand() already
+      // (the user's own typed message) — skip the redundant raw-payload cmd line.
+      const isChat = c.command_type === 'claude_code_chat';
+
       if (c.status === 'completed') {
-        appendTerminalLine(c.result || '(no output)', 'result');
-      } else {
-        appendTerminalLine(`[${c.status}]`, 'status');
+        if (openStatusEl) {
+          openStatusEl.textContent = c.result || '(no output)';
+          openStatusEl.className = 'term-line result';
+          terminalOpenRows.delete(c.id);
+        } else if (!terminalRenderedIds.has(c.id)) {
+          if (!isChat) {
+            const label = c.payload ? `${c.command_type} ${c.payload}` : c.command_type;
+            appendTerminalLine(label, 'cmd');
+          }
+          appendTerminalLine(c.result || '(no output)', 'result');
+        }
+      } else if (!terminalRenderedIds.has(c.id)) {
+        if (!isChat) {
+          const label = c.payload ? `${c.command_type} ${c.payload}` : c.command_type;
+          appendTerminalLine(label, 'cmd');
+        }
+        terminalOpenRows.set(c.id, appendTerminalLine(isChat ? '🤖 thinking...' : `[${c.status}]`, 'status'));
       }
+      terminalRenderedIds.add(c.id);
     });
   } catch (err) {
     console.error('Terminal history poll failed', err);
