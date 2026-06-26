@@ -65,6 +65,11 @@ from automations import (
     init_automation_tables,
     register_all_active_automations,
 )
+from pattern_learning import (
+    init_pattern_tables,
+    record_email_edit,
+    refresh_email_tone_pattern,
+)
 try:
     from weather_agent import get_weather, get_weather_brief
 except Exception as e:
@@ -393,6 +398,7 @@ init_email_tables()
 init_reminder_tables()
 init_calendar_tables()
 init_automation_tables()
+init_pattern_tables()
 
 
 # ==========================================
@@ -3074,7 +3080,9 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
             return "⚠️ *No active email draft.*"
         if not new_text:
             return "⚠️ Usage: EDIT: <your new reply text>"
+        await record_email_edit(draft["id"], draft["draft_reply"], new_text)
         await edit_draft(draft["id"], new_text)
+        await refresh_email_tone_pattern(call_llm)
         msg = f"✏️ *Draft updated.*\n\n{new_text}\n\nReply *APPROVE EMAIL* to send it, or *DON'T SEND* to discard it."
         await log_chat_message("assistant", msg)
         return msg

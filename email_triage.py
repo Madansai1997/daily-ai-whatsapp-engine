@@ -19,6 +19,8 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from pattern_learning import get_pattern_context
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "agent_memory.db"))
 
@@ -199,8 +201,13 @@ async def check_inbox_and_notify(call_llm_fn, notify_fn):
             snippet = msg.get("snippet", "")
 
             try:
+                tone_note = await get_pattern_context("email_tone")
+                system_prompt = (
+                    f"{TRIAGE_SYSTEM_PROMPT}\n\nLearned preference from past edits: {tone_note}"
+                    if tone_note else TRIAGE_SYSTEM_PROMPT
+                )
                 raw = await call_llm_fn(
-                    TRIAGE_SYSTEM_PROMPT,
+                    system_prompt,
                     f"From: {sender}\nSubject: {subject}\nSnippet: {snippet}",
                     max_tokens=400,
                 )
