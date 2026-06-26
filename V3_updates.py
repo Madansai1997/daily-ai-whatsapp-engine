@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 import httpx
 import websockets as ws_lib
-from fastapi import FastAPI, Response, Form, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Response, Form, Request, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.responses import JSONResponse, HTMLResponse
 from twilio.rest import Client
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -70,6 +70,7 @@ from pattern_learning import (
     record_email_edit,
     refresh_email_tone_pattern,
 )
+from pdf_import import extract_pdf_text
 try:
     from weather_agent import get_weather, get_weather_brief
 except Exception as e:
@@ -4110,6 +4111,41 @@ async def chat_message(request: Request):
         return JSONResponse({"reply": "Something went wrong. Try again."})
 
 
+PDF_SUMMARY_PROMPT = (
+    "You are JARVIS. The user just handed you a PDF. Read the extracted text and brief them "
+    "on it the way a composed, sharp assistant would — 2-4 sentences on what it actually is and "
+    "the substantive content, not a generic 'this document discusses...' filler. If the text is "
+    "garbled or empty, say so plainly instead of guessing. End by noting it's saved and they can "
+    "ask you about it anytime. Plain text only, no markdown."
+)
+
+
+@app.post("/web-terminal/upload-pdf")
+async def upload_pdf(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(".pdf"):
+        return JSONResponse({"reply": "⚠️ Only PDF files are supported here."})
+    try:
+        file_bytes = await file.read()
+        text = extract_pdf_text(file_bytes)
+    except Exception as e:
+        print(f"❌ upload-pdf extraction error for {file.filename}: {e}")
+        return JSONResponse({"reply": f"⚠️ Couldn't read that PDF: {e}"})
+
+    if not text:
+        return JSONResponse({"reply": f"⚠️ *{file.filename}* has no extractable text (likely a scanned image PDF)."})
+
+    pseudo_url = f"pdf://{file.filename}-{dt.datetime.now(dt.timezone.utc).isoformat()}"
+    await save_articles_to_knowledge_store([{"url": pseudo_url, "title": file.filename, "content": text}])
+
+    try:
+        summary = await call_llm(PDF_SUMMARY_PROMPT, text[:6000], max_tokens=300)
+    except Exception as e:
+        print(f"⚠️ upload-pdf summary failed for {file.filename}: {e}")
+        summary = "Saved it, but couldn't generate a summary right now — ask me about it directly."
+
+    return JSONResponse({"reply": f"📄 *{file.filename}*\n\n{summary}"})
+
+
 TTS_SUMMARY_PROMPT = (
     "You are JARVIS, about to speak the verbal version of a longer written answer you already "
     "gave. Read it, actually understand the point being made, then brief it back in 2-3 sentences "
@@ -4476,6 +4512,15 @@ CHAT_UI_HTML = """<!DOCTYPE html>
     font-family: 'Share Tech Mono', monospace; font-size: 14px; padding: 6px 0;
   }
   #terminal-input::placeholder { color: rgba(0, 229, 255, 0.35); }
+  #terminal-pdf-btn {
+    flex: 0 0 auto;
+    background: rgba(0, 229, 255, 0.06); color: var(--cyan); border: 1px solid var(--cyan-dim);
+    border-radius: 50%; width: 36px; height: 36px;
+    font-size: 15px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+  #terminal-pdf-btn:hover { box-shadow: 0 0 10px rgba(0, 229, 255, 0.3); }
 </style>
 </head>
 <body>
@@ -4535,6 +4580,8 @@ CHAT_UI_HTML = """<!DOCTYPE html>
     <div id="terminal-input-bar">
       <span class="terminal-prompt">&gt;</span>
       <input id="terminal-input" type="text" placeholder="Type a command (e.g. list folder, system info)..." autocomplete="off">
+      <input id="terminal-pdf-input" type="file" accept="application/pdf" style="display:none">
+      <button id="terminal-pdf-btn" title="Upload a PDF" onclick="document.getElementById('terminal-pdf-input').click()">📎</button>
     </div>
   </div>
 </div>
@@ -4989,6 +5036,26 @@ terminalInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     e.preventDefault();
     sendTerminalCommand();
+  }
+});
+
+const terminalPdfInput = document.getElementById('terminal-pdf-input');
+terminalPdfInput.addEventListener('change', async () => {
+  const file = terminalPdfInput.files[0];
+  terminalPdfInput.value = '';
+  if (!file) return;
+  appendTerminalLine(`📎 ${file.name}`, 'cmd');
+  appendTerminalLine('[uploading PDF...]', 'status');
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const res = await fetch('/web-terminal/upload-pdf', { method: 'POST', body: formData });
+    const data = await res.json();
+    terminalLog.lastChild.remove();
+    appendTerminalLine(data.reply, 'result');
+  } catch (err) {
+    terminalLog.lastChild.remove();
+    appendTerminalLine('⚠️ Upload failed.', 'result');
   }
 });
 </script>
