@@ -357,6 +357,17 @@ def init_db_tables():
         result TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         completed_at DATETIME)''')
+    # Migration: source/cc_task_id let /local-queue/result deliver claude_code_propose
+    # and claude_code_execute results itself once the bridge posts them, instead of
+    # relying on an in-memory polling task that dies if the server process restarts.
+    try:
+        cols = [row[1] for row in cursor.execute("PRAGMA table_info(local_command_queue)").fetchall()]
+        if 'source' not in cols:
+            cursor.execute("ALTER TABLE local_command_queue ADD COLUMN source TEXT")
+        if 'cc_task_id' not in cols:
+            cursor.execute("ALTER TABLE local_command_queue ADD COLUMN cc_task_id INTEGER")
+    except Exception:
+        pass
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS pending_claude_code_task (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -606,12 +617,24 @@ async def get_pending_commands():
 
 @app.post("/local-queue/result")
 async def post_command_result(request: Request):
+    """Bridge posts results here. For claude_code_propose/execute, this is the ONLY
+    reliable delivery point — unlike an in-memory polling task started by the
+    original chat request, this handler only runs because the bridge is actively
+    calling it, so it can't be silently lost to a server restart/redeploy/idle-sleep
+    mid-wait."""
     body = await request.json()
     command_id = body.get("command_id")
     result = body.get("result", "")
     status = body.get("status", "completed")
 
     async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT command_type, payload, source, cc_task_id FROM local_command_queue WHERE id=?",
+            (command_id,)
+        )
+        row = await cur.fetchone()
+
         await db.execute(
             "UPDATE local_command_queue "
             "SET status=?, result=?, "
@@ -620,6 +643,28 @@ async def post_command_result(request: Request):
             (status, result, command_id)
         )
         await db.commit()
+
+    if row and status == "completed":
+        command_type = row["command_type"]
+        source = row["source"]
+
+        if command_type == "claude_code_propose":
+            await save_proposed_claude_code_task(row["payload"], result)
+            msg = (
+                f"🤖 *Claude Code's proposed plan:*\n\n{result}\n\n"
+                f"─────────────────\n"
+                f"Reply *approve claude code* to let it actually run this, or *cancel* to discard."
+            )
+            await log_chat_message("assistant", msg)
+            if source == "whatsapp":
+                send_whatsapp(msg)
+
+        elif command_type == "claude_code_execute" and row["cc_task_id"]:
+            await update_claude_code_task_status(row["cc_task_id"], "done")
+            msg = f"✅ *Claude Code finished:*\n\n{result}"
+            await log_chat_message("assistant", msg)
+            if source == "whatsapp":
+                send_whatsapp(msg)
 
     return JSONResponse({"status": "saved"})
 
@@ -2781,52 +2826,21 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
                 return msg
 
             async with aiosqlite.connect(DB_PATH) as db:
-                cursor = await db.execute(
-                    "INSERT INTO local_command_queue (command_type, payload) VALUES (?, ?)",
-                    ("claude_code_propose", cc_task_text)
+                await db.execute(
+                    "INSERT INTO local_command_queue (command_type, payload, source) VALUES (?, ?, ?)",
+                    ("claude_code_propose", cc_task_text, source)
                 )
-                cc_command_id = cursor.lastrowid
                 await db.commit()
 
-            async def _poll_claude_code_queue(cmd_id: int, max_wait_seconds: int):
-                for _ in range(max_wait_seconds):
-                    await asyncio.sleep(1)
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        cur = await db.execute(
-                            "SELECT status, result FROM local_command_queue WHERE id=?", (cmd_id,)
-                        )
-                        row = await cur.fetchone()
-                    if row and row[0] == "completed":
-                        return row[1] or "No result"
-                return None
-
-            async def _propose_and_deliver():
-                # 650s > local_bridge.py's own 600s subprocess timeout for this command,
-                # so by the time this gives up, the bridge will already have posted some
-                # result (real plan, or its own timeout message) — None here only really
-                # means the bridge isn't running at all.
-                plan_text = await _poll_claude_code_queue(cc_command_id, max_wait_seconds=650)
-                if plan_text is None:
-                    msg = "⏳ Local bridge not running. Start local_bridge.py on your Mac, then try again."
-                else:
-                    await save_proposed_claude_code_task(cc_task_text, plan_text)
-                    msg = (
-                        f"🤖 *Claude Code's proposed plan:*\n\n{plan_text}\n\n"
-                        f"─────────────────\n"
-                        f"Reply *approve claude code* to let it actually run this, or *cancel* to discard."
-                    )
-                await log_chat_message("assistant", msg)
-                if source == "whatsapp":
-                    send_whatsapp(msg)
-                return msg
-
+            # Delivery of the plan happens in /local-queue/result once the bridge
+            # actually posts it back — not here. An in-memory wait-and-deliver task
+            # would be silently lost if this server process restarts/redeploys/idles
+            # before the bridge responds, even though the bridge's result lands fine.
             if source == "whatsapp":
-                asyncio.create_task(_propose_and_deliver())
                 return None
             else:
-                ack = "🤖 Investigating — this can take a few minutes, I'll have a plan shortly."
+                ack = "🤖 Investigating — this can take a few minutes, I'll post the plan here once it's ready."
                 await log_chat_message("assistant", ack)
-                asyncio.create_task(_propose_and_deliver())
                 return ack
         # wrong/missing passphrase: fall through silently, no return
 
@@ -2848,47 +2862,19 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
         await update_claude_code_task_status(cc_task["id"], "executing")
 
         async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
-                "INSERT INTO local_command_queue (command_type, payload) VALUES (?, ?)",
-                ("claude_code_execute", cc_task["task_text"])
+            await db.execute(
+                "INSERT INTO local_command_queue (command_type, payload, source, cc_task_id) VALUES (?, ?, ?, ?)",
+                ("claude_code_execute", cc_task["task_text"], source, cc_task["id"])
             )
-            cc_command_id = cursor.lastrowid
             await db.commit()
 
-        async def _poll_claude_code_execute(cmd_id: int, max_wait_seconds: int):
-            for _ in range(max_wait_seconds):
-                await asyncio.sleep(1)
-                async with aiosqlite.connect(DB_PATH) as db:
-                    cur = await db.execute(
-                        "SELECT status, result FROM local_command_queue WHERE id=?", (cmd_id,)
-                    )
-                    row = await cur.fetchone()
-                if row and row[0] == "completed":
-                    return row[1] or "No result"
-            return None
-
-        async def _execute_and_deliver():
-            # 1850s > local_bridge.py's own 1800s subprocess timeout for this command —
-            # same reasoning as the propose phase above.
-            result_text = await _poll_claude_code_execute(cc_command_id, max_wait_seconds=1850)
-            if result_text is None:
-                msg = "⏳ Local bridge not running. Start local_bridge.py on your Mac — the task is still queued."
-                await update_claude_code_task_status(cc_task["id"], "cancelled")
-            else:
-                await update_claude_code_task_status(cc_task["id"], "done")
-                msg = f"✅ *Claude Code finished:*\n\n{result_text}"
-            await log_chat_message("assistant", msg)
-            if source == "whatsapp":
-                send_whatsapp(msg)
-            return msg
-
+        # Delivery happens in /local-queue/result once the bridge posts the result —
+        # see the comment on the propose branch above for why.
         if source == "whatsapp":
-            asyncio.create_task(_execute_and_deliver())
             return None
         else:
-            ack = "🚀 Running it now with full permissions — this can take a while, I'll update you here."
+            ack = "🚀 Running it now with full permissions — this can take a while, I'll post the result here once it's done."
             await log_chat_message("assistant", ack)
-            asyncio.create_task(_execute_and_deliver())
             return ack
 
     # =========================================================================
