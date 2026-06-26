@@ -586,6 +586,47 @@ LOCAL_QUEUE_ALLOWED_COMMANDS = [
 CLAUDE_CODE_TRIGGER_SECRET = os.environ.get("CLAUDE_CODE_TRIGGER_SECRET", "")
 
 
+async def _queue_local_command(command_type: str, payload: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "INSERT INTO local_command_queue (command_type, payload) VALUES (?, ?)",
+            (command_type, payload)
+        )
+        command_id = cursor.lastrowid
+        await db.commit()
+    return command_id
+
+
+async def _poll_local_result(cmd_id: int, max_wait_seconds: int) -> str:
+    for _ in range(max_wait_seconds):
+        await asyncio.sleep(1)
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                "SELECT status, result FROM local_command_queue WHERE id=?",
+                (cmd_id,)
+            )
+            row = await cur.fetchone()
+        if row and row[0] == "completed":
+            return row[1] or "No result"
+    return "⏳ Local bridge not running. Start local_bridge.py on your Mac."
+
+
+async def _deliver_local_result(command_id: int, source: str):
+    # WhatsApp's webhook has a ~15s ack timeout, so it queues+acks immediately and
+    # delivers via a background task; the web chat UI has no such timeout and waits inline.
+    if source == "whatsapp":
+        async def _deliver_when_ready():
+            result = await _poll_local_result(command_id, max_wait_seconds=60)
+            await log_chat_message("assistant", result)
+            send_whatsapp(result)
+        asyncio.create_task(_deliver_when_ready())
+        return None
+    else:
+        result = await _poll_local_result(command_id, max_wait_seconds=15)
+        await log_chat_message("assistant", result)
+        return result
+
+
 @app.post("/local-queue")
 async def queue_local_command(request: Request):
     body = await request.json()
@@ -2869,39 +2910,57 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
         else:
             target_folder = "/Users/madansaidaram/Desktop/Daily_AI_updates"
 
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
-                "INSERT INTO local_command_queue (command_type, payload) VALUES (?, ?)",
-                ("list_folder", target_folder)
-            )
-            command_id = cursor.lastrowid
-            await db.commit()
+        command_id = await _queue_local_command("list_folder", target_folder)
+        return await _deliver_local_result(command_id, source)
 
-        async def _poll_local_result(cmd_id: int, max_wait_seconds: int) -> str:
-            for _ in range(max_wait_seconds):
-                await asyncio.sleep(1)
-                async with aiosqlite.connect(DB_PATH) as db:
-                    cur = await db.execute(
-                        "SELECT status, result FROM local_command_queue WHERE id=?",
-                        (cmd_id,)
-                    )
-                    row = await cur.fetchone()
-                if row and row[0] == "completed":
-                    return row[1] or "No result"
-            return "⏳ Local bridge not running. Start local_bridge.py on your Mac."
+    # ---- READ FILE — "read file <path>" (relative paths resolve under the
+    # project folder; local_bridge.py's own allowlist/extension checks still apply) ----
+    if user_message_clean.startswith("read file") or \
+       user_message_clean.startswith("show file") or \
+       user_message_clean.startswith("open file"):
+        await log_chat_message("user", user_message)
+        file_arg = ""
+        for prefix in ("read file", "show file", "open file"):
+            if user_message_clean.startswith(prefix):
+                file_arg = user_message[len(prefix):].strip().lstrip(":").strip()
+                break
+        if not file_arg:
+            msg = "Which file? e.g. *read file local_bridge.py*"
+            await log_chat_message("assistant", msg)
+            return msg
+        target_file = file_arg if file_arg.startswith("/") else f"/Users/madansaidaram/Desktop/Daily_AI_updates/{file_arg}"
+        command_id = await _queue_local_command("read_file", target_file)
+        return await _deliver_local_result(command_id, source)
 
-        if source == "whatsapp":
-            async def _deliver_when_ready():
-                result = await _poll_local_result(command_id, max_wait_seconds=60)
-                await log_chat_message("assistant", result)
-                send_whatsapp(result)
+    # ---- SEARCH FILES — "search files <name>" (matches by filename, project folder only) ----
+    if user_message_clean.startswith("search files") or \
+       user_message_clean.startswith("search file") or \
+       user_message_clean.startswith("find files") or \
+       user_message_clean.startswith("find file"):
+        await log_chat_message("user", user_message)
+        query_arg = ""
+        for prefix in ("search files", "search file", "find files", "find file"):
+            if user_message_clean.startswith(prefix):
+                query_arg = user_message[len(prefix):].strip().lstrip(":").strip()
+                break
+        if not query_arg:
+            msg = "What filename should I search for? e.g. *search files reminder*"
+            await log_chat_message("assistant", msg)
+            return msg
+        command_id = await _queue_local_command("search_files", query_arg)
+        return await _deliver_local_result(command_id, source)
 
-            asyncio.create_task(_deliver_when_ready())
-            return None
-        else:
-            result = await _poll_local_result(command_id, max_wait_seconds=15)
-            await log_chat_message("assistant", result)
-            return result
+    # ---- SYSTEM INFO — "system info" (Mac OS version + disk usage) ----
+    if user_message_clean in ["system info", "mac info", "machine info", "system status"]:
+        await log_chat_message("user", user_message)
+        command_id = await _queue_local_command("system_info", "")
+        return await _deliver_local_result(command_id, source)
+
+    # ---- RECENT FILES — "recent files" (last 10 modified files in the project folder) ----
+    if user_message_clean in ["recent files", "recently modified files", "show recent files", "what files changed"]:
+        await log_chat_message("user", user_message)
+        command_id = await _queue_local_command("list_recent_files", "")
+        return await _deliver_local_result(command_id, source)
 
     # =========================================================================
     # CLAUDE CODE BRIDGE — passphrase-gated trigger for a real Claude Code agent
