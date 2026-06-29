@@ -49,6 +49,7 @@ from reminders import (
     register_all_active_reminders,
     create_reminder_from_intent,
     get_active_reminders,
+    mark_fired as mark_reminder_fired,
 )
 from calendar_agent import (
     init_calendar_tables,
@@ -64,6 +65,8 @@ from calendar_agent import (
 from automations import (
     init_automation_tables,
     register_all_active_automations,
+    get_active_automations,
+    mark_fired as mark_automation_fired,
 )
 from pattern_learning import (
     init_pattern_tables,
@@ -107,6 +110,16 @@ SCHEDULE_CONFIG = {
     ],
     "weekly_report_hour": 9,
 }
+
+# Scheduling source.
+#   "internal" (default): APScheduler fires the fixed jobs in-process — requires the
+#       service to stay awake 24/7, which burns Render's free instance-hours.
+#   "external": the fixed jobs are NOT registered in-process. An outside cron
+#       (cron-job.org) wakes the sleeping service and triggers each job via the
+#       secret-guarded /cron/* endpoints, so the instance can sleep between jobs.
+#       User reminders/automations are fired by /cron/reminders-due instead of an
+#       in-process DateTrigger. Set SCHEDULER_MODE=external on Render to enable.
+SCHEDULER_MODE = os.environ.get("SCHEDULER_MODE", "internal").strip().lower()
 
 
 OPENROUTER_MODEL = "openai/gpt-oss-120b"
@@ -377,6 +390,15 @@ def init_db_tables():
     except Exception:
         pass
 
+    # Dedup log for the external-cron poll: records that a recurring (daily/weekly)
+    # reminder/automation already fired on a given IST date, so an extra wake-up ping
+    # in the same window can't double-send. 'once' items dedup via their status column.
+    cursor.execute('''CREATE TABLE IF NOT EXISTS cron_fire_log (
+        scope TEXT,
+        item_id INTEGER,
+        fired_on TEXT,
+        PRIMARY KEY (scope, item_id, fired_on))''')
+
     cursor.execute('''CREATE TABLE IF NOT EXISTS pending_claude_code_task (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         task_text TEXT,
@@ -479,17 +501,26 @@ async def lifespan(app: FastAPI):
         print("⚠️ Could not confirm which Gmail account is connected.")
 
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
-    scheduler.add_job(run_morning_digest, "cron", hour=SCHEDULE_CONFIG["digest_hour"], minute=0)
-    for r in SCHEDULE_CONFIG["reminders"]:
-        scheduler.add_job(send_checkin_reminder, "cron", hour=r["hour"], minute=0, kwargs={"reminder_number": r["number"]})
-    scheduler.add_job(send_weekly_report, "cron", day_of_week="sun", hour=SCHEDULE_CONFIG["weekly_report_hour"], minute=0)
-    scheduler.add_job(check_inbox_and_notify, "interval", hours=1, args=[call_llm, send_whatsapp_chunked])
-    scheduler.start()
     app.state.scheduler = scheduler
-    restored = await register_all_active_reminders(scheduler, send_whatsapp_chunked)
-    automations_restored = await register_all_active_automations(scheduler, dispatch_automation)
-    reminder_times = ", ".join([f"{r['hour']}:00" for r in SCHEDULE_CONFIG["reminders"]])
-    print(f"⏰ Scheduler: Digest {SCHEDULE_CONFIG['digest_hour']}:00 | Check-ins {reminder_times} | Report Sunday {SCHEDULE_CONFIG['weekly_report_hour']}:00 | Restored {restored} reminder(s), {automations_restored} automation(s)")
+
+    if SCHEDULER_MODE == "external":
+        # Fixed jobs and reminder/automation DateTriggers are NOT registered — an outside
+        # cron drives them via /cron/* so the instance can sleep. The scheduler still runs
+        # for any in-process DateTrigger set while awake (e.g. same-day quiz auto-trigger).
+        scheduler.start()
+        print("⏰ Scheduler: EXTERNAL mode — fixed jobs driven by /cron/* endpoints; "
+              "reminders fired via /cron/reminders-due. In-process cron jobs not registered.")
+    else:
+        scheduler.add_job(run_morning_digest, "cron", hour=SCHEDULE_CONFIG["digest_hour"], minute=0)
+        for r in SCHEDULE_CONFIG["reminders"]:
+            scheduler.add_job(send_checkin_reminder, "cron", hour=r["hour"], minute=0, kwargs={"reminder_number": r["number"]})
+        scheduler.add_job(send_weekly_report, "cron", day_of_week="sun", hour=SCHEDULE_CONFIG["weekly_report_hour"], minute=0)
+        scheduler.add_job(check_inbox_and_notify, "interval", hours=1, args=[call_llm, send_whatsapp_chunked])
+        scheduler.start()
+        restored = await register_all_active_reminders(scheduler, send_whatsapp_chunked)
+        automations_restored = await register_all_active_automations(scheduler, dispatch_automation)
+        reminder_times = ", ".join([f"{r['hour']}:00" for r in SCHEDULE_CONFIG["reminders"]])
+        print(f"⏰ Scheduler: INTERNAL mode — Digest {SCHEDULE_CONFIG['digest_hour']}:00 | Check-ins {reminder_times} | Report Sunday {SCHEDULE_CONFIG['weekly_report_hour']}:00 | Restored {restored} reminder(s), {automations_restored} automation(s)")
 
     yield
     scheduler.shutdown()
@@ -2667,6 +2698,165 @@ async def morning_digest_endpoint():
 
 
 # ==========================================
+# EXTERNAL CRON TRIGGERS (SCHEDULER_MODE=external)
+# An outside scheduler (cron-job.org) wakes the sleeping free instance and hits these
+# to drive the fixed jobs, so the service doesn't need to stay awake 24/7. Each is
+# guarded by CLAUDE_CODE_TRIGGER_SECRET and kicks the job off in the background,
+# returning 202 immediately so a cold-start + long job can't time out the cron request.
+# ==========================================
+
+_CRON_BG_TASKS: set = set()
+
+
+def _cron_authorized(token: str) -> bool:
+    return bool(CLAUDE_CODE_TRIGGER_SECRET) and token == CLAUDE_CODE_TRIGGER_SECRET
+
+
+def _run_bg(coro):
+    """Fire-and-forget an async job, keeping a strong ref so it isn't GC'd mid-flight."""
+    task = asyncio.create_task(coro)
+    _CRON_BG_TASKS.add(task)
+    task.add_done_callback(_CRON_BG_TASKS.discard)
+
+
+def _cron_guard(token: str):
+    """Returns a JSONResponse to short-circuit with, or None if authorized."""
+    if not CLAUDE_CODE_TRIGGER_SECRET:
+        return JSONResponse({"error": "CLAUDE_CODE_TRIGGER_SECRET not set"}, status_code=503)
+    if not _cron_authorized(token):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return None
+
+
+@app.post("/cron/digest")
+async def cron_digest(token: str = ""):
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    _run_bg(run_morning_digest())
+    return JSONResponse({"status": "digest triggered"}, status_code=202)
+
+
+@app.post("/cron/inbox")
+async def cron_inbox(token: str = ""):
+    """Hourly tick: inbox check + fire any reminders/automations now due (one ping covers both)."""
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    _run_bg(check_inbox_and_notify(call_llm, send_whatsapp_chunked))
+    fired = await _fire_due_reminders_and_automations()
+    return JSONResponse({"status": "inbox triggered", "reminders_fired": fired}, status_code=202)
+
+
+@app.post("/cron/checkin")
+async def cron_checkin(token: str = "", n: int = 1):
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    _run_bg(send_checkin_reminder(n))
+    return JSONResponse({"status": f"checkin {n} triggered"}, status_code=202)
+
+
+@app.post("/cron/weekly")
+async def cron_weekly(token: str = ""):
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    _run_bg(send_weekly_report())
+    return JSONResponse({"status": "weekly report triggered"}, status_code=202)
+
+
+@app.post("/cron/reminders-due")
+async def cron_reminders_due(token: str = ""):
+    """Fire user reminders/automations whose time has arrived. Idempotent: 'once' items
+    dedup via their status, recurring via cron_fire_log. Safe to call as often as you like."""
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    fired = await _fire_due_reminders_and_automations()
+    return JSONResponse({"status": "ok", "fired": fired})
+
+
+async def _already_fired_today(scope: str, item_id: int, day: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT 1 FROM cron_fire_log WHERE scope=? AND item_id=? AND fired_on=?",
+            (scope, item_id, day),
+        ) as cur:
+            return (await cur.fetchone()) is not None
+
+
+async def _mark_fired_today(scope: str, item_id: int, day: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO cron_fire_log (scope, item_id, fired_on) VALUES (?, ?, ?)",
+            (scope, item_id, day),
+        )
+        await db.commit()
+
+
+def _recurring_due_now(row: dict, now_ist) -> bool:
+    """True if a daily/weekly item's slot matches the current IST hour (within-the-hour
+    granularity — we poll hourly). Weekly also matches the weekday."""
+    if row.get("hour") is None or int(row["hour"]) != now_ist.hour:
+        return False
+    if row["kind"] == "weekly":
+        dow = (row.get("day_of_week") or "").strip().lower()[:3]
+        if dow and dow != now_ist.strftime("%a").lower():
+            return False
+    return True
+
+
+async def _fire_due_reminders_and_automations() -> int:
+    """Send any reminders / dispatch any automations whose time has arrived. Returns count fired."""
+    now_ist = dt.datetime.now(ZoneInfo("Asia/Kolkata"))
+    now_naive = now_ist.replace(tzinfo=None)
+    today = now_ist.date().isoformat()
+    fired = 0
+
+    # ---- Reminders ----
+    try:
+        for row in await get_active_reminders():
+            kind = row.get("kind")
+            try:
+                if kind == "once":
+                    run_at = dt.datetime.fromisoformat(row["run_at"]).replace(tzinfo=None)
+                    if run_at <= now_naive:
+                        send_whatsapp_chunked(f"⏰ *Reminder:* {row['text']}")
+                        await mark_reminder_fired(row["id"])
+                        fired += 1
+                elif kind in ("daily", "weekly") and _recurring_due_now(row, now_ist):
+                    if not await _already_fired_today("reminder", row["id"], today):
+                        send_whatsapp_chunked(f"⏰ *Reminder:* {row['text']}")
+                        await _mark_fired_today("reminder", row["id"], today)
+                        fired += 1
+            except Exception as e:
+                print(f"⚠️ [cron] reminder {row.get('id')} failed: {e}")
+    except Exception as e:
+        print(f"⚠️ [cron] reminder poll failed: {e}")
+
+    # ---- Automations ----
+    try:
+        for row in await get_active_automations():
+            kind = row.get("kind")
+            try:
+                due = False
+                if kind == "once":
+                    run_at = dt.datetime.fromisoformat(row["run_at"]).replace(tzinfo=None)
+                    due = run_at <= now_naive
+                elif kind in ("daily", "weekly"):
+                    due = _recurring_due_now(row, now_ist) and not await _already_fired_today("automation", row["id"], today)
+                if due:
+                    await dispatch_automation(row["action_type"], row["payload"])
+                    if kind == "once":
+                        await mark_automation_fired(row["id"])
+                    else:
+                        await _mark_fired_today("automation", row["id"], today)
+                    fired += 1
+            except Exception as e:
+                print(f"⚠️ [cron] automation {row.get('id')} failed: {e}")
+    except Exception as e:
+        print(f"⚠️ [cron] automation poll failed: {e}")
+
+    return fired
+
+
+# ==========================================
 # ONBOARDING HANDLER
 # ==========================================
 async def handle_onboarding(incoming_message: str) -> str:
@@ -3886,7 +4076,10 @@ You are not limited to any domain. Explain whatever the user asks."""
         if not app_scheduler:
             msg = "⚠️ *Scheduler not available right now.*"
         else:
-            success, msg = await create_reminder_from_intent(app_scheduler, memory_reminder, send_whatsapp)
+            success, msg = await create_reminder_from_intent(
+                app_scheduler, memory_reminder, send_whatsapp,
+                register=(SCHEDULER_MODE != "external"),
+            )
         await log_chat_message("assistant", msg)
         return msg
 

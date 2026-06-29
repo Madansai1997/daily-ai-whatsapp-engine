@@ -126,11 +126,14 @@ async def register_all_active_reminders(scheduler, notify_fn) -> int:
     return restored
 
 
-async def create_reminder_from_intent(scheduler, reminder: dict, notify_fn):
+async def create_reminder_from_intent(scheduler, reminder: dict, notify_fn, register: bool = True):
     """
     reminder: {"text": str, "kind": "once"|"daily"|"weekly", "run_at": iso str|None,
                "hour": int|None, "minute": int|None, "day_of_week": str|None}
-    Validates, persists, and registers the job. Returns (success, human-readable message).
+    Validates, persists, and (when register=True) adds the in-process job. Pass
+    register=False under external scheduling — the row is persisted and the /cron poll
+    fires it, so no in-process DateTrigger is created (avoids a double-send when the
+    service happens to be awake). Returns (success, human-readable message).
     """
     reminder = reminder or {}
     text = reminder.get("text")
@@ -157,7 +160,8 @@ async def create_reminder_from_intent(scheduler, reminder: dict, notify_fn):
     reminder_id = await save_reminder(text, kind, run_at, hour, minute, day_of_week)
     row = {"id": reminder_id, "text": text, "kind": kind, "run_at": run_at,
            "hour": hour, "minute": minute, "day_of_week": day_of_week}
-    register_reminder_job(scheduler, row, notify_fn)
+    if register:
+        register_reminder_job(scheduler, row, notify_fn)
 
     if kind == "once":
         when = datetime.fromisoformat(run_at).strftime("%b %d at %I:%M %p")
