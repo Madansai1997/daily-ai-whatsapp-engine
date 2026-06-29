@@ -1,0 +1,10 @@
+.git
+__pycache__/
+*.pyc
+.env
+.env.save
+agent_memory.db
+*.log
+.pytest_cache/
+.claude/
+start_bridge.sh
