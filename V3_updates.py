@@ -1,6 +1,19 @@
 import os
 import time
 import sqlite3
+
+# --- SAFE_MODE: structural guard for dev/test runs --------------------------------
+# Set SAFE_MODE (env var, e.g. `SAFE_MODE=1 uvicorn ...`) to force a throwaway local
+# SQLite DB and suppress real WhatsApp sends — so testing can NEVER write to the live
+# Turso DB or message Madan. This MUST run before `import db_compat`, which chooses its
+# backend (Turso vs sqlite) from the environment at import time. Unset in production.
+SAFE_MODE = os.environ.get("SAFE_MODE", "").strip().lower() in ("1", "true", "yes", "on")
+if SAFE_MODE:
+    os.environ.pop("TURSO_DATABASE_URL", None)
+    os.environ.pop("TURSO_AUTH_TOKEN", None)
+    os.environ.setdefault("DB_PATH", "/tmp/jarvis_safe_mode.db")
+    print("🧪 SAFE_MODE ON — throwaway local DB, WhatsApp sends suppressed.")
+
 import db_compat as aiosqlite
 import asyncio
 import json
@@ -493,6 +506,20 @@ async def lifespan(app: FastAPI):
     else:
         print("✅ Environment Variables Verified.")
 
+    # --- Startup self-check: surface config/DB problems loudly at boot ---
+    db_ok = _db_status() == "ok"
+    backend = ("local SQLite (SAFE_MODE)" if SAFE_MODE
+               else "Turso" if os.environ.get("TURSO_DATABASE_URL") else "local SQLite")
+    print(
+        f"🩺 Self-check: DB={'ok' if db_ok else 'DOWN'} via {backend} | "
+        f"scheduler={SCHEDULER_MODE} | safe_mode={'ON' if SAFE_MODE else 'off'} | "
+        f"rss={_rss_mb():.0f}MB"
+    )
+    if not db_ok:
+        print("🚨 STARTUP: database unreachable — reminders, logs and settings will fail.")
+    if missing_env and not SAFE_MODE:
+        print("🚨 STARTUP: missing prod env vars above — WhatsApp/LLM features may not work.")
+
     global CONNECTED_GMAIL_ADDRESS
     CONNECTED_GMAIL_ADDRESS = get_connected_gmail_address()
     if CONNECTED_GMAIL_ADDRESS:
@@ -526,6 +553,9 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
 
 app = FastAPI(lifespan=lifespan)
+
+
+APP_START_TIME = time.time()
 
 
 def _rss_mb() -> float:
@@ -615,6 +645,10 @@ def _split_message(text: str, limit: int = 1500) -> list[str]:
 def send_whatsapp_chunked(body: str, to_number: str = None, from_number: str = None):
     """Send a WhatsApp message, splitting into chunks if over 1500 chars."""
     import time
+    if SAFE_MODE:
+        # Single choke point for every send path — suppress real Twilio traffic in tests.
+        print(f"🧪 SAFE_MODE: WhatsApp send suppressed ({len(body)} chars): {body[:80]!r}")
+        return
     MAX_CHARS = 1500
     to_number = to_number or TO_WHATSAPP
     from_number = from_number or FROM_WHATSAPP
@@ -2743,7 +2777,13 @@ async def cron_inbox(token: str = ""):
         return deny
     _run_bg(check_inbox_and_notify(call_llm, send_whatsapp_chunked))
     fired = await _fire_due_reminders_and_automations()
-    return JSONResponse({"status": "inbox triggered", "reminders_fired": fired}, status_code=202)
+    alert = await _check_mem_alert()
+    selfheal = await _run_self_heal_check()
+    return JSONResponse(
+        {"status": "inbox triggered", "reminders_fired": fired,
+         "mem_alert": alert, "self_heal": selfheal},
+        status_code=202,
+    )
 
 
 @app.post("/cron/checkin")
@@ -2854,6 +2894,267 @@ async def _fire_due_reminders_and_automations() -> int:
         print(f"⚠️ [cron] automation poll failed: {e}")
 
     return fired
+
+
+# ==========================================
+# OPS FEATURES — health dashboard, WhatsApp alert thresholds, daily status
+# briefing, CSV log export. All admin endpoints reuse _cron_guard (token =
+# CLAUDE_CODE_TRIGGER_SECRET) since this is a single-user app — no real RBAC needed.
+# ==========================================
+
+DEFAULT_MEM_ALERT_MB = 450  # Render free tier kills around 512MB; warn before that.
+
+
+def _db_status() -> str:
+    try:
+        conn = _get_db_conn()
+        conn.execute("SELECT 1")
+        conn.close()
+        return "ok"
+    except Exception:
+        return "down"
+
+
+def _uptime_str() -> str:
+    secs = int(time.time() - APP_START_TIME)
+    d, rem = divmod(secs, 86400)
+    h, rem = divmod(rem, 3600)
+    m, _ = divmod(rem, 60)
+    parts = []
+    if d:
+        parts.append(f"{d}d")
+    if h:
+        parts.append(f"{h}h")
+    parts.append(f"{m}m")
+    return " ".join(parts)
+
+
+async def _recent_job_logs(limit: int = 10) -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT job_name, status, message, created_at FROM job_logs ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def _health_snapshot() -> dict:
+    rss = _rss_mb()
+    threshold = float(get_setting("mem_alert_threshold_mb", str(DEFAULT_MEM_ALERT_MB)))
+    return {
+        "uptime": _uptime_str(),
+        "rss_mb": round(rss, 1),
+        "mem_alert_threshold_mb": threshold,
+        "mem_status": "ok" if rss < threshold else "HIGH",
+        "scheduler_mode": SCHEDULER_MODE,
+        "db": _db_status(),
+        "recent_jobs": await _recent_job_logs(10),
+    }
+
+
+# ---- 1. Health dashboard (JSON + a no-auto-poll HTML snapshot) ----
+@app.get("/health/status")
+async def health_status(token: str = ""):
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    return await _health_snapshot()
+
+
+@app.get("/health/dashboard", response_class=HTMLResponse)
+async def health_dashboard(token: str = ""):
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    s = await _health_snapshot()
+    mem_color = "#16a34a" if s["mem_status"] == "ok" else "#dc2626"
+    db_color = "#16a34a" if s["db"] == "ok" else "#dc2626"
+    rows = "".join(
+        f"<tr><td>{j['created_at']}</td><td>{j['job_name']}</td>"
+        f"<td>{j['status']}</td><td>{(j.get('message') or '')[:80]}</td></tr>"
+        for j in s["recent_jobs"]
+    ) or "<tr><td colspan=4>No job activity logged.</td></tr>"
+    # Snapshot only — a manual Refresh link, NOT auto-polling, so viewing the
+    # dashboard doesn't keep the free instance awake.
+    html = f"""<!DOCTYPE html><html><head><meta charset=utf-8>
+<title>Engine Health</title><style>
+body{{font-family:-apple-system,sans-serif;background:#0b1120;color:#e5e7eb;padding:24px;max-width:760px;margin:auto}}
+.card{{background:#111827;border:1px solid #1f2937;border-radius:12px;padding:16px;margin-bottom:14px}}
+.val{{font-size:26px;font-weight:700}} .sub{{color:#9ca3af;font-size:13px}}
+table{{width:100%;border-collapse:collapse;font-size:13px}} td,th{{text-align:left;padding:6px 8px;border-bottom:1px solid #1f2937}}
+a.btn{{display:inline-block;background:#2563eb;color:#fff;padding:8px 14px;border-radius:8px;text-decoration:none}}
+</style></head><body>
+<h2>🖥️ Engine Health</h2>
+<div class=card><div class=sub>Memory (RSS)</div><div class=val style='color:{mem_color}'>{s['rss_mb']} MB</div>
+<div class=sub>alert at {s['mem_alert_threshold_mb']:.0f} MB · status {s['mem_status']}</div></div>
+<div class=card><div class=sub>Database</div><div class=val style='color:{db_color}'>{s['db']}</div></div>
+<div class=card><div class=sub>Uptime</div><div class=val>{s['uptime']}</div>
+<div class=sub>scheduler: {s['scheduler_mode']}</div></div>
+<div class=card><div class=sub>Recent jobs</div>
+<table><tr><th>When</th><th>Job</th><th>Status</th><th>Message</th></tr>{rows}</table></div>
+<a class=btn href="/health/dashboard?token={token}">🔄 Refresh</a>
+&nbsp;<a class=btn href="/export/job-logs?token={token}" style='background:#374151'>⬇ job_logs.csv</a>
+&nbsp;<a class=btn href="/export/chat-history?token={token}" style='background:#374151'>⬇ chat_history.csv</a>
+</body></html>"""
+    return HTMLResponse(html)
+
+
+# ---- 2. WhatsApp alert thresholds ----
+async def _check_mem_alert() -> dict:
+    """Alert on WhatsApp when RSS crosses the configured threshold. Fires at most once
+    per day; auto-rearms once memory recovers below the threshold."""
+    rss = _rss_mb()
+    threshold = float(get_setting("mem_alert_threshold_mb", str(DEFAULT_MEM_ALERT_MB)))
+    today = dt.date.today().isoformat()
+    last_fired = get_setting("mem_alert_fired_date", "")
+    if rss >= threshold:
+        if last_fired != today:
+            send_whatsapp_chunked(
+                f"🚨 *Memory alert:* engine RSS is {rss:.0f}MB, at/over your "
+                f"{threshold:.0f}MB threshold (Render kills ~512MB). Keep an eye out."
+            )
+            save_setting("mem_alert_fired_date", today)
+            return {"alerted": True, "rss_mb": round(rss, 1)}
+    elif last_fired:
+        save_setting("mem_alert_fired_date", "")  # recovered — re-arm
+    return {"alerted": False, "rss_mb": round(rss, 1)}
+
+
+@app.post("/cron/health-check")
+async def cron_health_check(token: str = ""):
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    return JSONResponse(await _check_mem_alert())
+
+
+# ---- 2b. Self-heal: detect issues, surface them, hand over a ready-to-run fix command ----
+# This NEVER edits code on its own. It detects problems (DB down, recently failed jobs),
+# WhatsApps Madan a diagnosis, and gives him a copy-paste 'claude code:' command that drops
+# straight into the existing propose -> approve -> execute flow (human-gated). Memory has its
+# own dedicated alert (_check_mem_alert), so it's excluded here to avoid double-pinging.
+async def _detect_health_issues() -> list:
+    issues = []
+    if _db_status() != "ok":
+        issues.append("Database is unreachable.")
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT job_name, message, created_at FROM job_logs "
+                "WHERE LOWER(status) IN ('failed','error') "
+                "AND created_at >= datetime('now','-6 hours') "
+                "ORDER BY id DESC LIMIT 5"
+            ) as cur:
+                for r in await cur.fetchall():
+                    issues.append(f"Job '{r['job_name']}' failed: {(r['message'] or '')[:80]}")
+    except Exception as e:
+        issues.append(f"Couldn't read job logs: {e}")
+    return issues
+
+
+async def _run_self_heal_check() -> dict:
+    """Detect → surface → propose. Dedups so the same issue set isn't re-sent the same day."""
+    issues = await _detect_health_issues()
+    if not issues:
+        if get_setting("selfheal_last_sig", ""):
+            save_setting("selfheal_last_sig", "")  # cleared → next occurrence re-notifies
+        return {"issues": 0, "notified": False}
+
+    sig = dt.date.today().isoformat() + "||" + " | ".join(issues)
+    if get_setting("selfheal_last_sig", "") == sig:
+        return {"issues": len(issues), "notified": False}  # already reported this exact set today
+    save_setting("selfheal_last_sig", sig)
+
+    if not SAFE_MODE and not CLAUDE_CODE_TRIGGER_SECRET:
+        # Can't hand over a working command without the secret; still surface the diagnosis.
+        cc_line = "(set CLAUDE_CODE_TRIGGER_SECRET to enable one-tap investigation)"
+    else:
+        task = "investigate and propose a fix for these engine issues: " + " | ".join(issues)
+        cc_line = (
+            f"To investigate + get a proposed fix you approve, reply (start the bridge first "
+            f"with start-bridge):\n`claude code: {CLAUDE_CODE_TRIGGER_SECRET} {task[:300]}`"
+        )
+    body = (
+        "🩺 *Engine self-check found issues:*\n"
+        + "\n".join(f"• {i}" for i in issues)
+        + "\n\n" + cc_line
+    )
+    send_whatsapp_chunked(body)
+    return {"issues": len(issues), "notified": True}
+
+
+@app.post("/cron/self-check")
+async def cron_self_check(token: str = ""):
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    return JSONResponse(await _run_self_heal_check())
+
+
+# ---- 3. AI-generated daily status briefing ----
+async def generate_status_briefing() -> str:
+    jobs = await _recent_job_logs(30)
+    rss = _rss_mb()
+    log_text = "\n".join(
+        f"{j['created_at']} · {j['job_name']} · {j['status']} · {(j.get('message') or '')[:120]}"
+        for j in jobs
+    ) or "No job activity logged in the recent window."
+    return await call_llm(
+        "You are JARVIS giving Madan a short daily server-status briefing. 3-5 plain-text "
+        "lines, composed and lightly witty — never a templated bot. Cover overall health, "
+        "memory vs the ~512MB Render ceiling, any failed jobs, and anything noteworthy. "
+        "End with exactly one of: ✅ All good | ⚠️ Watch this.",
+        f"Engine RSS: {rss:.0f}MB. Scheduler mode: {SCHEDULER_MODE}. Recent job logs:\n{log_text}",
+        max_tokens=320,
+    )
+
+
+async def _send_status_briefing():
+    text = await generate_status_briefing()
+    send_whatsapp_chunked(f"🖥️ *Daily Status Briefing*\n\n{text}")
+
+
+@app.post("/cron/status-briefing")
+async def cron_status_briefing(token: str = ""):
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    _run_bg(_send_status_briefing())
+    return JSONResponse({"status": "status briefing triggered"}, status_code=202)
+
+
+# ---- 4. CSV log export (job_logs + chat_history, separate files) ----
+def _csv_response(columns: list, rows: list, filename: str) -> Response:
+    import csv
+    import io
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(columns)
+    writer.writerows(rows)
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.get("/export/job-logs")
+async def export_job_logs(token: str = ""):
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    cols = ["id", "job_name", "status", "message", "created_at"]
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(f"SELECT {', '.join(cols)} FROM job_logs ORDER BY id DESC") as cur:
+            rows = await cur.fetchall()
+    return _csv_response(cols, rows, "job_logs.csv")
+
+
+@app.get("/export/chat-history")
+async def export_chat_history(token: str = ""):
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    cols = ["id", "role", "content", "timestamp"]
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(f"SELECT {', '.join(cols)} FROM chat_history ORDER BY id DESC") as cur:
+            rows = await cur.fetchall()
+    return _csv_response(cols, rows, "chat_history.csv")
 
 
 # ==========================================
@@ -3212,6 +3513,34 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
         await log_chat_message("user", user_message)
         command_id = await _queue_local_command("list_recent_files", "")
         return await _deliver_local_result(command_id, source)
+
+    # ---- MEMORY ALERT THRESHOLD — "set memory alert <MB>" / "show alerts" / "health" ----
+    if user_message_clean.startswith("set memory alert") or \
+       user_message_clean.startswith("set mem alert") or \
+       user_message_clean.startswith("set memory threshold"):
+        await log_chat_message("user", user_message)
+        m = re.search(r"(\d+)", user_message)
+        if not m:
+            msg = "Give me a number in MB — e.g. *set memory alert 420* ⚡ Needs your input"
+        else:
+            save_setting("mem_alert_threshold_mb", m.group(1))
+            msg = f"Memory alert threshold set to {m.group(1)}MB — I'll ping you here if the engine crosses it. ✅ Done"
+        await log_chat_message("assistant", msg)
+        return msg
+
+    if user_message_clean in ["alerts", "show alerts", "alert settings", "health", "engine health", "server health"]:
+        await log_chat_message("user", user_message)
+        s = await _health_snapshot()
+        last = s["recent_jobs"][0] if s["recent_jobs"] else None
+        last_job = f"{last['job_name']} ({last['status']})" if last else "none yet"
+        msg = (
+            f"🖥️ *Engine health*\n"
+            f"Memory: {s['rss_mb']}MB / alert {s['mem_alert_threshold_mb']:.0f}MB ({s['mem_status']})\n"
+            f"DB: {s['db']} · Uptime: {s['uptime']} · Scheduler: {s['scheduler_mode']}\n"
+            f"Last job: {last_job} 📌 FYI only"
+        )
+        await log_chat_message("assistant", msg)
+        return msg
 
     # =========================================================================
     # CLAUDE CODE BRIDGE — passphrase-gated trigger for a real Claude Code agent
@@ -4346,6 +4675,24 @@ You are not limited to any domain. Explain whatever the user asks."""
                 "suggest rephrasing — e.g. 'draft an email to x@example.com "
                 "about...' — instead of faking a success.\n\n"
 
+                "FILES & CODE — you are blind to them here:\n"
+                "You CANNOT see the contents of any file in Madan's project "
+                "(V3_updates.py, the database, anything) in this conversation. You have "
+                "no file access unless a real file command runs — e.g. 'read file "
+                "V3_updates.py', which goes through the local bridge on his Mac. So:\n"
+                "- NEVER reproduce, rewrite, summarize, or output the contents of "
+                "V3_updates.py or any of his real files from memory. You do not know "
+                "what is in them, and guessing produces a fabricated file.\n"
+                "- NEVER hand him a 'full updated file' or invent code and present it as "
+                "his actual codebase — pasting that in could overwrite real work.\n"
+                "- If he asks you to read, show, fix, or rewrite one of his files, say "
+                "plainly you cannot see his files from here, and tell him to run the file "
+                "command (e.g. 'read file <name>') — which needs the local bridge running "
+                "(he starts it with start-bridge on his Mac) — or to make code changes "
+                "through Claude Code directly. Then stop; do not guess at the contents.\n"
+                "- General coding questions (how does X work, syntax, a concept) you "
+                "answer normally — this restriction is ONLY about his specific files.\n\n"
+
                 f"Facts about Madan:\n{facts_str}\n\n"
                 f"Relevant context:\n{context_str}"
             )
@@ -4899,6 +5246,22 @@ CHAT_UI_HTML = """<!DOCTYPE html>
       <input id="terminal-input" type="text" placeholder="Type a command (e.g. list folder, system info)..." autocomplete="off">
       <input id="terminal-pdf-input" type="file" accept="application/pdf" style="display:none">
       <button id="terminal-pdf-btn" title="Upload a PDF" onclick="document.getElementById('terminal-pdf-input').click()">📎</button>
+      <button id="cc-approve-btn" title="Approve the proposed Claude Code change" onclick="ccApprove()" style="display:none">✅ Approve</button>
+      <button id="cc-mode-btn" title="Claude Code mode (enter secret once)" onclick="toggleCcMode()">🔐</button>
+    </div>
+  </div>
+</div>
+
+<div id="cc-unlock-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:#0f172a;border:1px solid #1e293b;border-radius:12px;padding:20px;width:300px;max-width:90%">
+    <div style="color:#e5e7eb;font-weight:600;margin-bottom:10px">🔐 Unlock Claude Code</div>
+    <div style="color:#9ca3af;font-size:12px;margin-bottom:10px">Enter your Claude Code secret. It's kept only for this browser tab.</div>
+    <input id="cc-secret-input" type="password" autocomplete="off" placeholder="secret"
+      style="width:100%;padding:9px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e5e7eb;box-sizing:border-box">
+    <div id="cc-modal-err" style="color:#f87171;font-size:12px;min-height:16px;margin-top:6px"></div>
+    <div style="display:flex;gap:8px;margin-top:6px">
+      <button onclick="submitCcSecret()" style="flex:1;padding:9px;border:0;border-radius:8px;background:#2563eb;color:#fff;cursor:pointer">Unlock</button>
+      <button onclick="closeCcModal()" style="flex:1;padding:9px;border:0;border-radius:8px;background:#374151;color:#fff;cursor:pointer">Cancel</button>
     </div>
   </div>
 </div>
@@ -5335,17 +5698,60 @@ setInterval(pollTerminalHistory, 4000);
 // Catch up immediately when the tab comes back to the foreground.
 document.addEventListener('visibilitychange', () => { if (!document.hidden) pollTerminalHistory(); });
 
+// ---- Claude Code mode: enter the secret once via a popup, then every task you type
+// is auto-prefixed with `claude code: <secret> ` so you never paste the secret again.
+// The secret lives only in this tab's sessionStorage (cleared when the tab closes).
+let ccMode = false;
+const ccModeBtn = document.getElementById('cc-mode-btn');
+const ccApproveBtn = document.getElementById('cc-approve-btn');
+const ccModal = document.getElementById('cc-unlock-modal');
+const CC_CONTROL = ['approve claude code','cancel','end claude code session','exit claude code','exit claude code session'];
+
+function ccSecret(){ return sessionStorage.getItem('cc_secret') || ''; }
+function toggleCcMode(){
+  if (ccMode){ setCcMode(false); return; }
+  if (!ccSecret()){ openCcModal(); return; }
+  setCcMode(true);
+}
+function setCcMode(on){
+  ccMode = on;
+  if (ccModeBtn){ ccModeBtn.textContent = on ? '🟢 CC' : '🔐'; ccModeBtn.style.color = on ? '#22c55e' : ''; }
+  if (ccApproveBtn) ccApproveBtn.style.display = on ? '' : 'none';
+  terminalInput.placeholder = on
+    ? 'Claude Code: describe the task (secret auto-added)…'
+    : 'Type a command (e.g. list folder, system info)...';
+}
+function openCcModal(){ document.getElementById('cc-modal-err').textContent=''; ccModal.style.display='flex'; document.getElementById('cc-secret-input').focus(); }
+function closeCcModal(){ ccModal.style.display='none'; document.getElementById('cc-secret-input').value=''; }
+function submitCcSecret(){
+  const v = document.getElementById('cc-secret-input').value.trim();
+  if (!v){ document.getElementById('cc-modal-err').textContent='Enter the secret.'; return; }
+  sessionStorage.setItem('cc_secret', v);
+  closeCcModal();
+  setCcMode(true);
+}
+function ccLock(){ sessionStorage.removeItem('cc_secret'); setCcMode(false); }
+function ccApprove(){ terminalInput.value = 'approve claude code'; sendTerminalCommand(); }
+document.addEventListener('keydown', e => { if (e.key === 'Enter' && ccModal && ccModal.style.display === 'flex') submitCcSecret(); });
+
 async function sendTerminalCommand() {
-  const text = terminalInput.value.trim();
-  if (!text) return;
-  appendTerminalLine(text, 'cmd');
+  const raw = terminalInput.value.trim();
+  if (!raw) return;
+  let toSend = raw;
+  if (ccMode && !ccSecret()){ openCcModal(); return; }
+  if (ccMode){
+    const lower = raw.toLowerCase();
+    const isControl = CC_CONTROL.includes(lower) || lower.startsWith('claude code');
+    if (!isControl) toSend = `claude code: ${ccSecret()} ${raw}`;
+  }
+  appendTerminalLine(raw, 'cmd');   // show what you typed, never the secret
   terminalInput.value = '';
   appendTerminalLine('[running...]', 'status');
   try {
     const res = await fetch('/chat-message', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text })
+      body: JSON.stringify({ message: toSend })
     });
     const data = await res.json();
     terminalLog.lastChild.remove();
