@@ -460,6 +460,7 @@ CONNECTED_GMAIL_ADDRESS = None  # populated once at startup by lifespan() below
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _tune_malloc_arenas()
     missing_env = []
     if not TWILIO_SID: missing_env.append("TWILIO_SID")
     if not TWILIO_TOKEN: missing_env.append("TWILIO_TOKEN")
@@ -494,6 +495,61 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
 
 app = FastAPI(lifespan=lifespan)
+
+
+def _rss_mb() -> float:
+    """Current resident set size in MB. Stdlib only — reads /proc on Linux (Render),
+    falls back to resource.getrusage elsewhere. Returns -1.0 if it can't be read."""
+    try:
+        # Linux (Render): /proc/self/statm field 2 = resident pages
+        with open("/proc/self/statm") as f:
+            resident_pages = int(f.read().split()[1])
+        return resident_pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
+    except Exception:
+        try:
+            import resource, sys
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            # macOS reports bytes; Linux/BSD report kilobytes
+            return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
+        except Exception:
+            return -1.0
+
+
+def _mem_probe(label: str):
+    """Print current RSS with a label so spikes are greppable in Render logs."""
+    print(f"🧠 MEM[{label}] rss={_rss_mb():.1f}MB")
+
+
+def _tune_malloc_arenas():
+    """glibc (Render/Linux) only: cap malloc arenas to 2. Blocking work runs in threads
+    (run_in_executor), and glibc spawns one memory arena per thread (up to 8×cores), each
+    hoarding freed memory — that ratcheting was OOMing the service. Equivalent to the
+    MALLOC_ARENA_MAX=2 env var, but ships with the code. No-op off glibc (e.g. macOS dev)."""
+    try:
+        import ctypes
+        M_ARENA_MAX = -8  # from glibc malloc.h
+        if ctypes.CDLL("libc.so.6").mallopt(M_ARENA_MAX, 2) == 1:
+            print("✅ malloc arenas capped at 2 (MALLOC_ARENA_MAX equivalent).")
+    except Exception:
+        pass  # not glibc — nothing to tune
+
+
+def _malloc_trim():
+    """Hand freed heap memory back to the OS after a large transient (PDF parse, digest).
+    glibc only; no-op elsewhere. Without this, freed memory inflates RSS until OOM."""
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+        _mem_probe("after-trim")
+    except Exception:
+        pass
+
+
+@app.get("/health/mem")
+async def health_mem():
+    """Current process RSS — hit this anytime to watch memory live."""
+    return {"rss_mb": round(_rss_mb(), 1)}
+
 
 EMAIL_ADDRESS_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 
@@ -2474,6 +2530,7 @@ def enforce_content_limits(text: str, max_items: int = 5, max_chars: int = 7000)
 
 async def run_morning_digest():
     await _log_job("run_morning_digest", "started")
+    _mem_probe("digest:start")
     try:
         _, recent_topics, _ = await get_db_state()
         skill_level = get_setting("skill_level", "intermediate")
@@ -2501,6 +2558,8 @@ async def run_morning_digest():
         if isinstance(relevant_articles, Exception):
             print(f"⚠️ RAG retrieval failed: {relevant_articles}")
             relevant_articles = []
+
+        _mem_probe("digest:after-news-fetch")
 
         if relevant_articles:
             context_blocks = [f"[{i+1}] Title: {a['title']}\nURL: {a['url']}\nSnippet: {a['content']}" for i, a in enumerate(relevant_articles)]
@@ -2585,6 +2644,8 @@ async def run_morning_digest():
                 )
                 await loop.run_in_executor(None, lambda: send_whatsapp_chunked(feedback_prompt))
                 await _log_job("run_morning_digest", "completed", f"concept: {concept}")
+                _mem_probe("digest:end")
+                _malloc_trim()
                 return {"status": "Digest approved and dispatched.", "concept": concept}
             except Exception as e:
                 await _log_job("run_morning_digest", "failed", f"Twilio error: {str(e)}")
@@ -4185,7 +4246,11 @@ async def upload_pdf(file: UploadFile = File(...)):
         return JSONResponse({"reply": "⚠️ Only PDF files are supported here."})
     try:
         file_bytes = await file.read()
+        _mem_probe(f"pdf:before {file.filename} ({len(file_bytes)//1024}KB)")
         text = extract_pdf_text(file_bytes)
+        del file_bytes  # drop the raw bytes before trimming so the heap can be reclaimed
+        _mem_probe(f"pdf:after {file.filename}")
+        _malloc_trim()
     except Exception as e:
         print(f"❌ upload-pdf extraction error for {file.filename}: {e}")
         return JSONResponse({"reply": f"⚠️ Couldn't read that PDF: {e}"})
@@ -5151,6 +5216,8 @@ async def privachat_http_proxy(path: str, request: Request):
             content=body,
             headers=forward_headers,
         )
+    if len(upstream.content) > 512 * 1024:
+        _mem_probe(f"proxy:{path} body={len(upstream.content)//1024}KB")
     excluded = {"content-encoding", "content-length", "transfer-encoding", "connection"}
     response_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in excluded}
     return Response(

@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .env
+.env.save
 agent_memory.db
 local_bridge.log
 local_bridge.error.log
