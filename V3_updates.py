@@ -5283,6 +5283,11 @@ function appendTerminalLine(text, cls) {
 }
 
 async function pollTerminalHistory() {
+  // Don't poll while the tab is in the background — an open-but-hidden tab would
+  // otherwise hit /local-queue/history every few seconds forever, keeping the free
+  // Render instance awake 24/7 (the whole point of SCHEDULER_MODE=external is to let
+  // it sleep). visibilitychange below fires an immediate catch-up poll on return.
+  if (document.hidden) return;
   try {
     // While any row is still open (pending/executing), keep re-fetching from
     // just before it — otherwise its completion update is never seen once
@@ -5327,6 +5332,8 @@ async function pollTerminalHistory() {
 }
 pollTerminalHistory();
 setInterval(pollTerminalHistory, 4000);
+// Catch up immediately when the tab comes back to the foreground.
+document.addEventListener('visibilitychange', () => { if (!document.hidden) pollTerminalHistory(); });
 
 async function sendTerminalCommand() {
   const text = terminalInput.value.trim();
