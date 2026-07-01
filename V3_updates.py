@@ -5236,8 +5236,14 @@ CHAT_UI_HTML = """<!DOCTYPE html>
       <button id="send-btn">SEND</button>
     </div>
   </div>
-  <div id="privachat-view" class="view">
-    <iframe id="privachat-frame" src="" title="PrivaChat"></iframe>
+  <div id="privachat-view" class="view" style="position:relative">
+    <button id="privachat-power-btn" onclick="togglePrivachat()" title="Turn PrivaChat on/off to save server time"
+      style="position:absolute;top:10px;right:14px;z-index:10;padding:6px 10px;border:0;border-radius:8px;background:#dc2626;color:#fff;font-size:12px;cursor:pointer;opacity:.9">🔌 Turn Off</button>
+    <div id="privachat-off-msg" style="display:none;position:absolute;inset:0;z-index:9;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:#0b1120;color:#e5e7eb;text-align:center;padding:20px">
+      <div>🔌 PrivaChat is off to save server time.<br><span style="color:#9ca3af;font-size:13px">It won't wake the engine while off.</span></div>
+      <button onclick="setPrivachat(true)" style="padding:9px 16px;border:0;border-radius:8px;background:#2563eb;color:#fff;cursor:pointer">🔗 Reconnect</button>
+    </div>
+    <iframe id="privachat-frame" src="" title="PrivaChat" allow="notifications"></iframe>
   </div>
   <div id="terminal-view" class="view">
     <div id="terminal-log"></div>
@@ -5582,7 +5588,47 @@ function updatePrivachatBadge() {
   badge.classList.toggle('visible', privachatUnread > 0);
 }
 
+// ---- PrivaChat connect/disconnect: the iframe holds a WebSocket + polling that wakes
+// the engine on every call. To save Render hours we tear it down (about:blank) whenever
+// you leave the tab / hide the app / press Turn Off, and reconnect on return.
+let privachatManualOff = false;
+function privachatSrc() {
+  let src = '/privachat/';
+  const saved = localStorage.getItem('jarvis_privachat_session');
+  if (saved) {
+    try {
+      const { room, alias } = JSON.parse(saved);
+      if (room && alias) src = `/privachat/chat?room=${encodeURIComponent(room)}&alias=${encodeURIComponent(alias)}`;
+    } catch (e) {}
+  }
+  return src;
+}
+function setPrivachat(on) {
+  const frame = document.getElementById('privachat-frame');
+  const offMsg = document.getElementById('privachat-off-msg');
+  const btn = document.getElementById('privachat-power-btn');
+  if (on) {
+    privachatManualOff = false;
+    if (frame.dataset.loaded !== 'true') { frame.src = privachatSrc(); frame.dataset.loaded = 'true'; }
+    frame.style.display = '';
+    if (offMsg) offMsg.style.display = 'none';
+    if (btn) btn.textContent = '🔌 Turn Off';
+  } else {
+    frame.src = 'about:blank';   // kills the WebSocket + polling inside the iframe
+    delete frame.dataset.loaded;
+    frame.style.display = 'none';
+    if (offMsg) offMsg.style.display = 'flex';
+    if (btn) btn.textContent = '🔗 Reconnect';
+  }
+}
+function togglePrivachat() {
+  const on = document.getElementById('privachat-frame').dataset.loaded === 'true';
+  if (on) { privachatManualOff = true; setPrivachat(false); }
+  else { setPrivachat(true); }
+}
+
 function switchView(view) {
+  const prev = currentView;
   currentView = view;
   document.getElementById('tab-jarvis').classList.toggle('active', view === 'jarvis');
   document.getElementById('tab-privachat').classList.toggle('active', view === 'privachat');
@@ -5590,25 +5636,14 @@ function switchView(view) {
   document.getElementById('jarvis-view').classList.toggle('active', view === 'jarvis');
   document.getElementById('privachat-view').classList.toggle('active', view === 'privachat');
   document.getElementById('terminal-view').classList.toggle('active', view === 'terminal');
+  // Leaving privachat → disconnect it so it stops waking the engine.
+  if (prev === 'privachat' && view !== 'privachat') setPrivachat(false);
   if (view === 'terminal') {
     document.getElementById('terminal-input').focus();
+    pollTerminalHistory();            // catch up now that the Terminal is visible
   }
   if (view === 'privachat') {
-    const frame = document.getElementById('privachat-frame');
-    if (!frame.dataset.loaded) {
-      let src = '/privachat/';
-      const saved = localStorage.getItem('jarvis_privachat_session');
-      if (saved) {
-        try {
-          const { room, alias } = JSON.parse(saved);
-          if (room && alias) {
-            src = `/privachat/chat?room=${encodeURIComponent(room)}&alias=${encodeURIComponent(alias)}`;
-          }
-        } catch (e) {}
-      }
-      frame.src = src;
-      frame.dataset.loaded = 'true';
-    }
+    if (!privachatManualOff) setPrivachat(true);   // reconnect on return
     privachatUnread = 0;
     updatePrivachatBadge();
   }
@@ -5646,11 +5681,11 @@ function appendTerminalLine(text, cls) {
 }
 
 async function pollTerminalHistory() {
-  // Don't poll while the tab is in the background — an open-but-hidden tab would
-  // otherwise hit /local-queue/history every few seconds forever, keeping the free
-  // Render instance awake 24/7 (the whole point of SCHEDULER_MODE=external is to let
-  // it sleep). visibilitychange below fires an immediate catch-up poll on return.
-  if (document.hidden) return;
+  // Only poll while the Terminal view is actually visible — a hidden tab OR sitting on
+  // the JARVIS/PrivaChat view would otherwise hit /local-queue/history every few seconds
+  // forever, keeping the free Render instance awake (defeats SCHEDULER_MODE=external).
+  // switchView('terminal') and visibilitychange fire an immediate catch-up poll.
+  if (document.hidden || currentView !== 'terminal') return;
   try {
     // While any row is still open (pending/executing), keep re-fetching from
     // just before it — otherwise its completion update is never seen once
@@ -5693,10 +5728,17 @@ async function pollTerminalHistory() {
     console.error('Terminal history poll failed', err);
   }
 }
-pollTerminalHistory();
 setInterval(pollTerminalHistory, 4000);
-// Catch up immediately when the tab comes back to the foreground.
-document.addEventListener('visibilitychange', () => { if (!document.hidden) pollTerminalHistory(); });
+// When the whole app is backgrounded, disconnect privachat so it stops waking the engine.
+// When it returns, resume the terminal feed / reconnect privachat as appropriate.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (currentView === 'privachat') setPrivachat(false);
+  } else {
+    if (currentView === 'terminal') pollTerminalHistory();
+    if (currentView === 'privachat' && !privachatManualOff) setPrivachat(true);
+  }
+});
 
 // ---- Claude Code mode: enter the secret once via a popup, then every task you type
 // is auto-prefixed with `claude code: <secret> ` so you never paste the secret again.
