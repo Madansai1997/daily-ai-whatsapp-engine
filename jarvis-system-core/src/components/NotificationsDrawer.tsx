@@ -75,6 +75,7 @@ export default function NotificationsDrawer({ onClose }: NotificationsDrawerProp
     // Poll while the drawer is open so notifications created by background jobs
     // (inbox-check, job-scout, etc.) show up live instead of only on reopen.
     const poll = setInterval(() => {
+      if (document.hidden) return;
       loadNotifications();
       loadLogs();
     }, 4000);

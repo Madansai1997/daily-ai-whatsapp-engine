@@ -116,7 +116,7 @@ export default function SystemTerminal() {
     };
 
     poll();
-    const interval = setInterval(poll, 4000);
+    const interval = setInterval(() => { if (!document.hidden) poll(); }, 4000);
     return () => {
       cancelled = true;
       clearInterval(interval);

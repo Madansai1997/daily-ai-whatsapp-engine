@@ -54,7 +54,7 @@ export default function CoreInterface({ onNavigate, onOpenNotifications }: CoreI
       }
     };
     ping();
-    const timer = setInterval(ping, 15000);
+    const timer = setInterval(() => { if (!document.hidden) ping(); }, 15000);
     return () => {
       cancelled = true;
       clearInterval(timer);
@@ -114,7 +114,7 @@ export default function CoreInterface({ onNavigate, onOpenNotifications }: CoreI
       }
     };
     load();
-    const timer = setInterval(load, 20000);
+    const timer = setInterval(() => { if (!document.hidden) load(); }, 20000);
     return () => {
       cancelled = true;
       clearInterval(timer);
@@ -135,7 +135,7 @@ export default function CoreInterface({ onNavigate, onOpenNotifications }: CoreI
       }
     };
     load();
-    const timer = setInterval(load, 20000);
+    const timer = setInterval(() => { if (!document.hidden) load(); }, 20000);
     return () => {
       cancelled = true;
       clearInterval(timer);

@@ -53,7 +53,7 @@ export default function Header({
       }
     };
     load();
-    const timer = setInterval(load, 30000);
+    const timer = setInterval(() => { if (!document.hidden) load(); }, 30000);
     return () => {
       cancelled = true;
       clearInterval(timer);
