@@ -11,6 +11,7 @@ import SearchOverlay from "./components/SearchOverlay";
 import SettingsDrawer from "./components/SettingsDrawer";
 import NotificationsDrawer from "./components/NotificationsDrawer";
 import { AnimatePresence, motion } from "motion/react";
+import { LayoutGrid, Bot, Lock, Terminal as TerminalIcon, Briefcase } from "lucide-react";
 
 export default function App() {
   const [activeScreen, setActiveScreen] = useState<ScreenId>(ScreenId.Core);
@@ -91,7 +92,7 @@ export default function App() {
       />
 
       {/* Dynamic Main Stage Grid Area */}
-      <main className="flex-1 w-full max-w-[1440px] mx-auto px-6 sm:px-8 pt-24 pb-8 relative z-10 cyber-grid flex flex-col justify-start">
+      <main className="flex-1 w-full max-w-[1440px] mx-auto px-6 sm:px-8 pt-24 pb-24 md:pb-8 relative z-10 cyber-grid flex flex-col justify-start">
         <AnimatePresence mode="wait" custom={direction}>
           <motion.div
             key={activeScreen === ScreenId.AtsAnalysis ? ScreenId.Jobs : activeScreen}
@@ -121,6 +122,55 @@ export default function App() {
           </motion.div>
         </AnimatePresence>
       </main>
+
+      {/* Mobile Bottom Navigation Bar */}
+      <nav className="fixed bottom-0 left-0 w-full md:hidden bg-[#0f131f]/90 backdrop-blur-md border-t border-white/10 z-40 flex justify-around items-center h-16 pb-safe">
+        <button
+          onClick={() => handleNavigate(ScreenId.Core)}
+          className={`flex flex-col items-center justify-center flex-1 h-full cursor-pointer transition-colors ${
+            activeScreen === ScreenId.Core ? "text-[#8aebff] nav-active-glow" : "text-[#bbc9cd]"
+          }`}
+        >
+          <LayoutGrid className="w-5.5 h-5.5" />
+          <span className="text-[10px] font-mono mt-1 font-bold">CORE</span>
+        </button>
+        <button
+          onClick={() => handleNavigate(ScreenId.Assistant)}
+          className={`flex flex-col items-center justify-center flex-1 h-full cursor-pointer transition-colors ${
+            activeScreen === ScreenId.Assistant ? "text-[#8aebff] nav-active-glow" : "text-[#bbc9cd]"
+          }`}
+        >
+          <Bot className="w-5.5 h-5.5" />
+          <span className="text-[10px] font-mono mt-1 font-bold">JARVIS</span>
+        </button>
+        <button
+          onClick={() => handleNavigate(ScreenId.Chat)}
+          className={`flex flex-col items-center justify-center flex-1 h-full cursor-pointer transition-colors ${
+            activeScreen === ScreenId.Chat ? "text-[#8aebff] nav-active-glow" : "text-[#bbc9cd]"
+          }`}
+        >
+          <Lock className="w-5.5 h-5.5" />
+          <span className="text-[10px] font-mono mt-1 font-bold">CHAT</span>
+        </button>
+        <button
+          onClick={() => handleNavigate(ScreenId.Terminal)}
+          className={`flex flex-col items-center justify-center flex-1 h-full cursor-pointer transition-colors ${
+            activeScreen === ScreenId.Terminal ? "text-[#8aebff] nav-active-glow" : "text-[#bbc9cd]"
+          }`}
+        >
+          <TerminalIcon className="w-5.5 h-5.5" />
+          <span className="text-[10px] font-mono mt-1 font-bold">TERM</span>
+        </button>
+        <button
+          onClick={() => handleNavigate(ScreenId.Jobs)}
+          className={`flex flex-col items-center justify-center flex-1 h-full cursor-pointer transition-colors ${
+            activeScreen === ScreenId.Jobs || activeScreen === ScreenId.AtsAnalysis ? "text-[#8aebff] nav-active-glow" : "text-[#bbc9cd]"
+          }`}
+        >
+          <Briefcase className="w-5.5 h-5.5" />
+          <span className="text-[10px] font-mono mt-1 font-bold">JOBS</span>
+        </button>
+      </nav>
 
       {/* Unified Footer details */}
       <Footer />
