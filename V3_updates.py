@@ -30,7 +30,7 @@ from bs4 import BeautifulSoup
 import httpx
 import websockets as ws_lib
 from fastapi import FastAPI, Response, Form, Request, WebSocket, WebSocketDisconnect, UploadFile, File
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 from twilio.rest import Client
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from contextlib import asynccontextmanager
@@ -6373,8 +6373,13 @@ terminalPdfInput.addEventListener('change', async () => {
 </html>"""
 
 
-@app.get("/chat", response_class=HTMLResponse)
+@app.get("/chat")
 async def chat_ui():
+    # The React console UI is now the primary interface. Redirect the legacy
+    # /chat page to /console/ so there is a single UI. (CHAT_UI_HTML is kept as
+    # a fallback below in case the console dist isn't built.)
+    if os.path.isdir(_CONSOLE_DIST):
+        return RedirectResponse(url="/console/", status_code=307)
     return HTMLResponse(content=CHAT_UI_HTML)
 
 
