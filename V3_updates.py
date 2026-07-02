@@ -6639,8 +6639,10 @@ async def api_notifications(limit: int = 50):
             (limit,),
         ) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
-        async with db.execute("SELECT COUNT(*) FROM notifications WHERE read = 0") as cur:
-            unread = (await cur.fetchone())[0]
+        # row_factory is Row here, so fetchone() is name-keyed — alias the count
+        # instead of indexing [0] (which raises KeyError: 0 on a Row).
+        async with db.execute("SELECT COUNT(*) AS n FROM notifications WHERE read = 0") as cur:
+            unread = (await cur.fetchone())["n"]
     return JSONResponse({"notifications": rows, "unread": unread})
 
 
