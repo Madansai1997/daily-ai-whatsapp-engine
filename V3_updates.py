@@ -6748,6 +6748,18 @@ async def api_notifications_clear():
     return JSONResponse({"ok": True})
 
 
+@app.post("/api/notifications/delete")
+async def api_notifications_delete(request: Request):
+    body = await request.json()
+    nid = body.get("id")
+    if not nid:
+        return JSONResponse({"ok": False, "error": "id required"}, status_code=400)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM notifications WHERE id = ?", (nid,))
+        await db.commit()
+    return JSONResponse({"ok": True})
+
+
 # ── Web Push subscription endpoints ──────────────────────────────────────────
 @app.get("/api/push/vapid-public-key")
 async def api_vapid_public_key():

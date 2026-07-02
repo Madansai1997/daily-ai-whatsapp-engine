@@ -85,15 +85,30 @@ export default function NotificationsDrawer({ onClose }: NotificationsDrawerProp
     };
   }, []);
 
-  const handleClearLogs = async () => {
-    if (!confirm("Are you sure you want to clear all system logs?")) return;
+  // Clear ALL notifications (system logs are never touched — they're a permanent record).
+  const handleClearNotifications = async () => {
+    if (notifications.length === 0) return;
+    if (!confirm("Clear all notifications?")) return;
     try {
-      const res = await fetch("/api/job-logs/clear", { method: "POST" });
-      if (res.ok) {
-        setLogs([]);
-      }
+      const res = await fetch("/api/notifications/clear", { method: "POST" });
+      if (res.ok) setNotifications([]);
     } catch (err) {
-      console.error("Failed to clear logs:", err);
+      console.error("Failed to clear notifications:", err);
+    }
+  };
+
+  // Delete a single notification.
+  const handleDeleteNotification = async (id: number) => {
+    setNotifications((prev) => prev.filter((n) => n.id !== id)); // optimistic
+    try {
+      await fetch("/api/notifications/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+    } catch (err) {
+      console.error("Failed to delete notification:", err);
+      loadNotifications(); // revert on failure
     }
   };
 
@@ -181,18 +196,18 @@ export default function NotificationsDrawer({ onClose }: NotificationsDrawerProp
             </h3>
           </div>
           <div className="flex items-center gap-2">
-            <button 
-              onClick={loadLogs} 
+            <button
+              onClick={() => { loadLogs(); loadNotifications(); }}
               className="p-1.5 hover:bg-white/5 rounded transition-colors text-[#bbc9cd] hover:text-white"
-              title="Refresh logs"
+              title="Refresh"
             >
               <RefreshCw className="w-4 h-4" />
             </button>
-            <button 
-              onClick={handleClearLogs} 
-              disabled={logs.length === 0}
+            <button
+              onClick={handleClearNotifications}
+              disabled={notifications.length === 0}
               className="p-1.5 hover:bg-[#ffb4ab]/10 rounded transition-colors text-[#bbc9cd] hover:text-[#ffb4ab] disabled:opacity-50"
-              title="Clear logs"
+              title="Clear all notifications"
             >
               <Trash2 className="w-4 h-4" />
             </button>
@@ -221,7 +236,7 @@ export default function NotificationsDrawer({ onClose }: NotificationsDrawerProp
                 {notifications.map((n) => (
                   <div
                     key={n.id}
-                    className={`p-3 rounded-lg border flex gap-3 ${
+                    className={`group p-3 rounded-lg border flex gap-3 ${
                       n.read ? "bg-[#1b1f2c]/20 border-white/5" : "bg-[#8aebff]/5 border-[#8aebff]/20"
                     }`}
                   >
@@ -237,6 +252,13 @@ export default function NotificationsDrawer({ onClose }: NotificationsDrawerProp
                         {n.body?.trim() ? n.body : "(no content)"}
                       </p>
                     </div>
+                    <button
+                      onClick={() => handleDeleteNotification(n.id)}
+                      className="shrink-0 self-start p-1 rounded text-[#859397] hover:text-[#ffb4ab] hover:bg-[#ffb4ab]/10 transition-colors opacity-60 group-hover:opacity-100 cursor-pointer"
+                      title="Delete this notification"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
                   </div>
                 ))}
               </div>
