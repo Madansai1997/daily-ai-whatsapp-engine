@@ -678,6 +678,79 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# ── PIN lock for the JARVIS console ──────────────────────────────────────────
+# Fail-open: if JARVIS_PIN isn't set, the gate is disabled (current behavior), so
+# this deploys without ever locking Madan out. Set JARVIS_PIN + SESSION_SECRET on
+# Render to activate. Token is stateless (HMAC), short-lived, and the frontend
+# holds it in memory only — so a refresh always re-prompts ("lock every visit").
+import hmac as _hmac
+import hashlib as _hashlib
+
+JARVIS_PIN = os.environ.get("JARVIS_PIN", "").strip()
+SESSION_SECRET = os.environ.get("SESSION_SECRET", "").strip() or f"insecure-dev-secret-{JARVIS_PIN}"
+AUTH_REQUIRED = bool(JARVIS_PIN)
+_TOKEN_TTL = 12 * 3600  # seconds
+# Endpoints carrying personal data/actions — gated when a PIN is configured.
+_PROTECTED_PREFIXES = (
+    "/api/", "/chat-message", "/chat-history", "/applications",
+    "/resume", "/ats", "/export", "/web-terminal",
+)
+_login_guard = {"fails": 0, "locked_until": 0.0}
+
+
+def _make_token() -> str:
+    exp = str(int(time.time()) + _TOKEN_TTL)
+    sig = _hmac.new(SESSION_SECRET.encode(), exp.encode(), _hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{exp}.{sig}".encode()).decode()
+
+
+def _verify_token(token: str) -> bool:
+    try:
+        raw = base64.urlsafe_b64decode(token.encode()).decode()
+        exp, sig = raw.rsplit(".", 1)
+        expected = _hmac.new(SESSION_SECRET.encode(), exp.encode(), _hashlib.sha256).hexdigest()
+        return _hmac.compare_digest(sig, expected) and int(exp) > time.time()
+    except Exception:
+        return False
+
+
+@app.middleware("http")
+async def _auth_gate(request: Request, call_next):
+    if AUTH_REQUIRED:
+        path = request.url.path
+        if any(path.startswith(p) for p in _PROTECTED_PREFIXES):
+            if not _verify_token(request.headers.get("X-Jarvis-Token", "")):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return await call_next(request)
+
+
+@app.get("/auth/status")
+async def auth_status():
+    return JSONResponse({"required": AUTH_REQUIRED})
+
+
+@app.post("/auth/login")
+async def auth_login(request: Request):
+    if not AUTH_REQUIRED:
+        return JSONResponse({"ok": True, "token": ""})
+    if time.time() < _login_guard["locked_until"]:
+        return JSONResponse(
+            {"ok": False, "error": "Too many attempts — wait a minute."}, status_code=429)
+    try:
+        pin = str((await request.json()).get("pin", ""))
+    except Exception:
+        pin = ""
+    await asyncio.sleep(0.4)  # throttle brute force
+    if pin and _hmac.compare_digest(pin, JARVIS_PIN):
+        _login_guard["fails"] = 0
+        return JSONResponse({"ok": True, "token": _make_token()})
+    _login_guard["fails"] += 1
+    if _login_guard["fails"] >= 5:
+        _login_guard["locked_until"] = time.time() + 60
+        _login_guard["fails"] = 0
+    return JSONResponse({"ok": False, "error": "Incorrect PIN."}, status_code=401)
+
+
 # New React (Vite) console UI — served as pre-built static files under /console.
 # Guarded so a fresh clone without a build doesn't crash startup; run `npm run build`
 # in jarvis-system-core/ to (re)generate dist. The old /chat UI stays untouched.

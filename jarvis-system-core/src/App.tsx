@@ -10,6 +10,8 @@ import SystemTerminal from "./components/SystemTerminal";
 import SearchOverlay from "./components/SearchOverlay";
 import SettingsDrawer from "./components/SettingsDrawer";
 import NotificationsDrawer from "./components/NotificationsDrawer";
+import LockScreen from "./components/LockScreen";
+import { authStatus, setUnauthHandler } from "./lib/auth";
 import { AnimatePresence, motion } from "motion/react";
 import { LayoutGrid, Bot, Lock, Terminal as TerminalIcon, Briefcase } from "lucide-react";
 
@@ -20,6 +22,14 @@ export default function App() {
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
+
+  // Auth gate: "checking" until we know if a PIN is required; then locked/unlocked.
+  const [authState, setAuthState] = useState<"checking" | "locked" | "open">("checking");
+
+  useEffect(() => {
+    setUnauthHandler(() => setAuthState("locked"));
+    authStatus().then(({ required }) => setAuthState(required ? "locked" : "open"));
+  }, []);
 
   // Keyboard shortcut Ctrl+K or Cmd+K to trigger search palette
   useEffect(() => {
@@ -73,6 +83,14 @@ export default function App() {
       return { x: dir === "forward" ? -60 : 60, opacity: 0 };
     }
   };
+
+  // Auth gate — nothing renders until unlocked (or the PIN lock is off).
+  if (authState === "checking") {
+    return <div className="fixed inset-0 bg-[#0a0e1a]" />;
+  }
+  if (authState === "locked") {
+    return <LockScreen onUnlock={() => setAuthState("open")} />;
+  }
 
   return (
     <div className="relative min-h-screen bg-[#0a0e1a] text-[#dfe2f3] bg-hud-cinematic selection:bg-[#22d3ee]/20 selection:text-[#8aebff] flex flex-col justify-between overflow-x-hidden">
