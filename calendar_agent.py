@@ -55,9 +55,32 @@ def init_calendar_tables():
         status TEXT DEFAULT 'pending_send',
         created_at TEXT
     )''')
+    # Local log of events we actually created — the only place event history lives
+    # locally (the Google API is the source of truth, but we don't want a live API
+    # call just to learn timing/duration habits). Written on every successful create.
+    cursor.execute('''CREATE TABLE IF NOT EXISTS calendar_events_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        summary TEXT,
+        start_dt TEXT,
+        end_dt TEXT,
+        has_attendees INTEGER DEFAULT 0,
+        created_at TEXT
+    )''')
     conn.commit()
     conn.close()
     print("✅ Calendar tables ready.")
+
+
+async def log_created_event(summary: str, start_dt: str, end_dt: str, has_attendees: bool = False):
+    """Record a created event locally so pattern_learning can mine timing/duration habits.
+    Read-only for pattern_learning; this is the sole writer. Never raises to the caller."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO calendar_events_log (summary, start_dt, end_dt, has_attendees, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (summary, start_dt, end_dt, 1 if has_attendees else 0, datetime.now(timezone.utc).isoformat()),
+        )
+        await db.commit()
 
 
 def _get_calendar_service():
@@ -136,6 +159,10 @@ async def create_event(summary: str, start_dt: str, end_dt: str, description: st
         body = _event_body(summary, start_dt, end_dt, description, attendees)
         created = service.events().insert(calendarId="primary", body=body, sendUpdates="all").execute()
         print(f"✅ Calendar event created: {summary} | ID: {created.get('id')}")
+        try:
+            await log_created_event(summary, start_dt, end_dt, bool(attendees))
+        except Exception as e:
+            print(f"⚠️ [calendar_agent] event log failed (non-fatal): {e}")
         return _simplify_event(created)
     except Exception as e:
         print(f"⚠️ [calendar_agent] create_event failed: {e}")

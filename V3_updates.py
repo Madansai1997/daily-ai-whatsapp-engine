@@ -85,6 +85,11 @@ from pattern_learning import (
     init_pattern_tables,
     record_email_edit,
     refresh_email_tone_pattern,
+    refresh_reminder_timing_pattern,
+    refresh_calendar_prefs_pattern,
+    refresh_reply_style_pattern,
+    refresh_all_patterns,
+    get_pattern_context,
 )
 from pdf_import import extract_pdf_text
 try:
@@ -2799,7 +2804,21 @@ async def cron_weekly(token: str = ""):
     if (deny := _cron_guard(token)) is not None:
         return deny
     _run_bg(send_weekly_report())
+    # Fold pattern-learning upkeep into the weekly tick — keeps reply_style (which has no
+    # per-message trigger) and every other category current without a separate cron job.
+    _run_bg(refresh_all_patterns(call_llm))
     return JSONResponse({"status": "weekly report triggered"}, status_code=202)
+
+
+@app.post("/cron/learn-patterns")
+async def cron_learn_patterns(token: str = ""):
+    """Recompute all learned-pattern categories from current history. Independently callable
+    (e.g. an on-demand refresh); also runs inside /cron/weekly. Each category self-guards on
+    its minimum sample count, so this is safe to call anytime."""
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    _run_bg(refresh_all_patterns(call_llm))
+    return JSONResponse({"status": "pattern learning refresh triggered"}, status_code=202)
 
 
 @app.post("/cron/reminders-due")
@@ -3811,6 +3830,7 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
             )
             if created:
                 await confirm_pending_event(pending_event["id"])
+                _run_bg(refresh_calendar_prefs_pattern(call_llm))
                 msg = (
                     f"✅ *Event created and invite sent!*\n\n"
                     f"*Title:* {pending_event['summary']}\n"
@@ -4349,12 +4369,30 @@ You are not limited to any domain. Explain whatever the user asks."""
         now_str = dt.datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
         recent_history = await get_recent_chat_history(limit=6)
         history_str = "\n".join(f"{m['role']}: {m['content']}" for m in recent_history) or "(none)"
+        # Learned scheduling habits — only used to fill in defaults the user leaves out
+        # (a reminder time, an event duration/time). Optional: empty until real history
+        # exists to learn from, and must NEVER override anything the user states explicitly.
+        try:
+            reminder_timing_note = await get_pattern_context("reminder_timing")
+            calendar_prefs_note = await get_pattern_context("calendar_prefs")
+        except Exception:
+            reminder_timing_note = calendar_prefs_note = ""
+        hint_parts = []
+        if reminder_timing_note:
+            hint_parts.append(f"Habitual reminder times: {reminder_timing_note}")
+        if calendar_prefs_note:
+            hint_parts.append(f"Calendar scheduling habits (typical duration/times): {calendar_prefs_note}")
+        timing_hint = (
+            "\n\nLearned defaults — use ONLY to fill in a time/duration the user does NOT specify; "
+            "NEVER override a value they do give:\n" + "\n".join(hint_parts)
+            if hint_parts else ""
+        )
         t_intent = time.time()
         intent_raw = await call_llm(
             MEMORY_INTENT_PROMPT,
             f"Current datetime: {now_str}\n\nRecent conversation (use this to resolve references like "
             f"\"the same email\"/\"that person\"/\"send it again\" into concrete values):\n{history_str}\n\n"
-            f"Latest message: {user_message}",
+            f"Latest message: {user_message}{timing_hint}",
             max_tokens=500,
         )
         print(f"⏱️ [process_message] intent classification took {time.time() - t_intent:.2f}s")
@@ -4409,6 +4447,9 @@ You are not limited to any domain. Explain whatever the user asks."""
                 app_scheduler, memory_reminder, send_whatsapp,
                 register=(SCHEDULER_MODE != "external"),
             )
+            if success:
+                # Re-learn timing habits in the background — never delays the confirmation.
+                _run_bg(refresh_reminder_timing_pattern(call_llm))
         await log_chat_message("assistant", msg)
         return msg
 
@@ -4520,6 +4561,8 @@ You are not limited to any domain. Explain whatever the user asks."""
                 created = await create_event(summary, start_dt, end_dt, description)
                 if created:
                     msg = f"✅ *Event created:* {summary}\n*When:* {start_dt} to {end_dt}"
+                    # Re-learn scheduling habits in the background — never delays the reply.
+                    _run_bg(refresh_calendar_prefs_pattern(call_llm))
                 else:
                     msg = "❌ Failed to create the event. Check Render logs — Calendar credentials may need refreshing."
 
@@ -4580,6 +4623,18 @@ You are not limited to any domain. Explain whatever the user asks."""
 
         context_str = "\n".join([f"- {c['content']}" for c in relevant_context])
         facts_str = "\n".join([f"- {f}" for f in user_facts])
+
+        # Cross-cutting learned reply style — how Madan actually communicates. Shapes every
+        # JARVIS reply so it mirrors his register. Empty until there's enough history.
+        try:
+            reply_style_note = await get_pattern_context("reply_style")
+        except Exception:
+            reply_style_note = ""
+        reply_style_block = (
+            f"\n\nLEARNED REPLY STYLE — mirror how Madan himself writes (from his real messages): "
+            f"{reply_style_note}\n"
+            if reply_style_note else ""
+        )
 
         if CONNECTED_GMAIL_ADDRESS:
             gmail_fact_line = (
@@ -4695,12 +4750,14 @@ You are not limited to any domain. Explain whatever the user asks."""
 
                 f"Facts about Madan:\n{facts_str}\n\n"
                 f"Relevant context:\n{context_str}"
+                f"{reply_style_block}"
             )
         else:
             system_prompt = (
                 f"You are the user's Curriculum Coach and AI Architect.\n"
                 f"Facts about user:\n{facts_str}\n\nContext:\n{context_str}\n\n"
                 f"RULES: 2-4 sentences max. Use asterisks (*) for bold. End with one open-ended learning question."
+                f"{reply_style_block}"
             )
         system_msg = {"role": "system", "content": system_prompt}
         t_reply = time.time()

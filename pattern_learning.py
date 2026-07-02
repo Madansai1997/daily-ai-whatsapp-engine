@@ -29,6 +29,37 @@ EMAIL_TONE_ANALYSIS_PROMPT = (
     "show a consistent pattern yet, say so plainly instead of inventing one. Plain text only."
 )
 
+REMINDER_TIMING_ANALYSIS_PROMPT = (
+    "You analyze a user's reminder history to learn their habitual timing preferences, so an "
+    "assistant can fill in a sensible default time when the user asks for a reminder WITHOUT "
+    "stating one. You'll get a list of past reminders, each as 'kind | time | text'. Write a "
+    "short note (2-4 sentences) describing consistent patterns: favored times of day, common "
+    "exact times (e.g. 9am, 6pm), morning vs evening lean, any weekday habits, and whether "
+    "certain kinds of task cluster at certain times. If there is no consistent pattern yet, "
+    "say so plainly. Do NOT invent precise times the data doesn't support. Plain text only."
+)
+
+CALENDAR_PREFS_ANALYSIS_PROMPT = (
+    "You analyze a user's created calendar events to learn their scheduling habits, so an "
+    "assistant can pick sensible defaults (duration, time of day) when the user asks to "
+    "schedule something WITHOUT giving full details. You'll get a list of events as "
+    "'start -> end | attendees:yes/no | title'. Write a short note (2-4 sentences) on "
+    "consistent patterns: typical event duration, favored meeting hours, morning vs "
+    "afternoon lean, and whether meetings-with-others cluster at particular times. If "
+    "there is no consistent pattern yet, say so plainly. Do NOT invent specifics the data "
+    "doesn't support. Plain text only."
+)
+
+REPLY_STYLE_ANALYSIS_PROMPT = (
+    "You analyze how a user (Madan) writes his own messages to his assistant, so the "
+    "assistant can mirror his register and answer the way he'd want. You'll get a sample of "
+    "his recent messages. Write a short note (2-4 sentences) describing HIS communication "
+    "style: message length, formality, capitalization/punctuation habits, directness, emoji "
+    "use, and how terse vs detailed he tends to be. Frame it as guidance for the assistant "
+    "(e.g. 'He writes short, lowercase, blunt messages — match that: be terse and skip "
+    "pleasantries'). If there's no consistent style yet, say so plainly. Plain text only."
+)
+
 
 def init_pattern_tables():
     """Synchronous, mirrors init_db_tables() in V3_updates.py — called once at import/startup time."""
@@ -104,6 +135,160 @@ async def refresh_email_tone_pattern(call_llm_fn) -> None:
             (note.strip(), count, datetime.now(timezone.utc).isoformat()),
         )
         await db.commit()
+
+
+async def _recent_reminders(limit: int = 40) -> list:
+    """Newest reminders first. Reads the reminders table directly — it lives in the same DB,
+    and this module only ever reads it, never writes, so no coupling to reminders.py."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT text, kind, run_at, hour, minute, day_of_week FROM reminders "
+            "ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+def _fmt_reminder(r: dict) -> str:
+    kind = r.get("kind")
+    text = (r.get("text") or "").strip()
+    if kind == "once":
+        return f"once | {r.get('run_at')} | {text}"
+    if kind == "daily":
+        return f"daily | {r.get('hour'):02d}:{r.get('minute'):02d} | {text}"
+    if kind == "weekly":
+        return f"weekly {r.get('day_of_week')} | {r.get('hour'):02d}:{r.get('minute'):02d} | {text}"
+    return f"{kind} | {text}"
+
+
+async def refresh_reminder_timing_pattern(call_llm_fn) -> None:
+    """Re-derives the reminder_timing note from recent reminder history. Same shape as
+    refresh_email_tone_pattern: no-ops below MIN_SAMPLES_TO_ANALYZE, recomputes from scratch,
+    caps output. Fire-and-forget from the reminder-set path — never block the confirmation."""
+    rows = await _recent_reminders()
+    if len(rows) < MIN_SAMPLES_TO_ANALYZE:
+        return
+
+    listing = "\n".join(_fmt_reminder(r) for r in rows)
+    try:
+        note = await call_llm_fn(REMINDER_TIMING_ANALYSIS_PROMPT, listing, max_tokens=200)
+    except Exception as e:
+        print(f"⚠️ [pattern_learning] reminder timing analysis failed: {e}")
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO learned_patterns (category, note, sample_count, updated_at)
+               VALUES ('reminder_timing', ?, ?, ?)
+               ON CONFLICT(category) DO UPDATE SET note=excluded.note,
+               sample_count=excluded.sample_count, updated_at=excluded.updated_at""",
+            (note.strip(), len(rows), datetime.now(timezone.utc).isoformat()),
+        )
+        await db.commit()
+
+
+async def _recent_calendar_events(limit: int = 40) -> list:
+    """Newest created events first, read from calendar_agent's local log table. Read-only."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        try:
+            cur = await db.execute(
+                "SELECT summary, start_dt, end_dt, has_attendees FROM calendar_events_log "
+                "ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
+        except Exception:
+            return []  # table not created yet (calendar agent never initialized)
+        return [dict(r) for r in await cur.fetchall()]
+
+
+def _fmt_calendar_event(r: dict) -> str:
+    att = "yes" if r.get("has_attendees") else "no"
+    return f"{r.get('start_dt')} -> {r.get('end_dt')} | attendees:{att} | {(r.get('summary') or '').strip()}"
+
+
+async def refresh_calendar_prefs_pattern(call_llm_fn) -> None:
+    """Re-derives the calendar_prefs note from recent created-event history. Same shape as the
+    other refreshers: no-ops below MIN_SAMPLES_TO_ANALYZE, recomputes from scratch, capped."""
+    rows = await _recent_calendar_events()
+    if len(rows) < MIN_SAMPLES_TO_ANALYZE:
+        return
+
+    listing = "\n".join(_fmt_calendar_event(r) for r in rows)
+    try:
+        note = await call_llm_fn(CALENDAR_PREFS_ANALYSIS_PROMPT, listing, max_tokens=200)
+    except Exception as e:
+        print(f"⚠️ [pattern_learning] calendar prefs analysis failed: {e}")
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO learned_patterns (category, note, sample_count, updated_at)
+               VALUES ('calendar_prefs', ?, ?, ?)
+               ON CONFLICT(category) DO UPDATE SET note=excluded.note,
+               sample_count=excluded.sample_count, updated_at=excluded.updated_at""",
+            (note.strip(), len(rows), datetime.now(timezone.utc).isoformat()),
+        )
+        await db.commit()
+
+
+async def _recent_user_messages(limit: int = 40) -> list:
+    """Newest first: only the user's own messages (role='user') from chat_history — the signal
+    for how Madan writes. Assistant turns are excluded so we learn his voice, not our own."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        try:
+            cur = await db.execute(
+                "SELECT content FROM chat_history WHERE role = 'user' ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+        except Exception:
+            return []
+        return [r["content"] for r in await cur.fetchall() if (r["content"] or "").strip()]
+
+
+async def refresh_reply_style_pattern(call_llm_fn) -> None:
+    """Re-derives the reply_style note from how Madan writes his own messages. This is the
+    cross-cutting one — its note feeds every JARVIS-generated reply, not a single agent.
+    Needs a slightly larger sample than the others; short bursts aren't a style."""
+    msgs = await _recent_user_messages()
+    if len(msgs) < 5:
+        return
+
+    sample = "\n".join(f"- {m}" for m in msgs)
+    try:
+        note = await call_llm_fn(REPLY_STYLE_ANALYSIS_PROMPT, sample, max_tokens=200)
+    except Exception as e:
+        print(f"⚠️ [pattern_learning] reply style analysis failed: {e}")
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO learned_patterns (category, note, sample_count, updated_at)
+               VALUES ('reply_style', ?, ?, ?)
+               ON CONFLICT(category) DO UPDATE SET note=excluded.note,
+               sample_count=excluded.sample_count, updated_at=excluded.updated_at""",
+            (note.strip(), len(msgs), datetime.now(timezone.utc).isoformat()),
+        )
+        await db.commit()
+
+
+async def refresh_all_patterns(call_llm_fn) -> None:
+    """Recompute every category from whatever history exists — for periodic upkeep (the weekly
+    cron). Each refresher self-guards on its own minimum sample count, so this is safe to call
+    anytime; categories with too little data simply stay empty. One failing category never
+    blocks the others."""
+    for fn in (
+        refresh_email_tone_pattern,
+        refresh_reminder_timing_pattern,
+        refresh_calendar_prefs_pattern,
+        refresh_reply_style_pattern,
+    ):
+        try:
+            await fn(call_llm_fn)
+        except Exception as e:
+            print(f"⚠️ [pattern_learning] {fn.__name__} failed in refresh_all: {e}")
 
 
 async def get_pattern_context(category: str) -> str:
