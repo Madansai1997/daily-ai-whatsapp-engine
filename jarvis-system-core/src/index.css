@@ -58,7 +58,7 @@ body {
   color: #dfe2f3;
   font-family: var(--font-sans);
   overflow-x: hidden;
-  cursor: crosshair;
+  cursor: default;
 }
 
 .scanline {

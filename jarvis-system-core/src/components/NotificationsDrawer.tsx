@@ -117,6 +117,18 @@ export default function NotificationsDrawer({ onClose }: NotificationsDrawerProp
     }
   };
 
+  // Infer a human-readable type + color from the notification body so each entry
+  // is identifiable at a glance (categories aren't set at the send site).
+  const notifType = (body: string): { label: string; cls: string } => {
+    const b = (body || "").toLowerCase();
+    if (body.includes("📥") || b.includes("inbox") || b.includes("email")) return { label: "Email", cls: "text-[#5eead4] border-[#5eead4]/30 bg-[#5eead4]/10" };
+    if (body.includes("🔎") || b.includes("job") || b.includes("listing")) return { label: "Jobs", cls: "text-[#7dd3fc] border-[#7dd3fc]/30 bg-[#7dd3fc]/10" };
+    if (body.includes("📅") || b.includes("calendar") || b.includes("event")) return { label: "Calendar", cls: "text-[#c4b5fd] border-[#c4b5fd]/30 bg-[#c4b5fd]/10" };
+    if (body.includes("⏰") || b.includes("reminder")) return { label: "Reminder", cls: "text-[#ffd6a3] border-[#ffd6a3]/30 bg-[#ffd6a3]/10" };
+    if (b.includes("digest") || b.includes("briefing") || b.includes("weekly")) return { label: "Digest", cls: "text-[#8aebff] border-[#8aebff]/30 bg-[#8aebff]/10" };
+    return { label: "Alert", cls: "text-[#bbc9cd] border-white/15 bg-white/5" };
+  };
+
   // Helper formatting for log status colors
   const getStatusColor = (status: string) => {
     const s = status.toLowerCase();
@@ -204,9 +216,16 @@ export default function NotificationsDrawer({ onClose }: NotificationsDrawerProp
                     }`}
                   >
                     {!n.read && <span className="w-2 h-2 mt-1.5 rounded-full bg-[#8aebff] shrink-0 shadow-[0_0_6px_rgba(138,235,255,0.6)]"></span>}
-                    <div className={`flex-1 ${n.read ? "" : "-ml-0"}`}>
-                      <p className="text-[12px] text-[#dfe2f3] leading-relaxed whitespace-pre-wrap break-words">{n.body}</p>
-                      <div className="text-[9px] text-[#859397] font-mono mt-1">{n.created_at}</div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className={`text-[9px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded border font-mono ${notifType(n.body).cls}`}>
+                          {notifType(n.body).label}
+                        </span>
+                        <span className="text-[9px] text-[#859397] font-mono">{n.created_at}</span>
+                      </div>
+                      <p className="text-[12px] text-[#dfe2f3] leading-relaxed whitespace-pre-wrap break-words">
+                        {n.body?.trim() ? n.body : "(no content)"}
+                      </p>
                     </div>
                   </div>
                 ))}

@@ -43,6 +43,7 @@ from rag_engine import retrieve_relevant_context, search_user_facts
 from email_triage import (
     init_email_tables,
     check_inbox_and_notify,
+    summarize_inbox,
     get_active_draft,
     activate_next_draft,
     delete_draft,
@@ -193,7 +194,7 @@ MEMORY_INTENT_PROMPT = (
     "(Asia/Kolkata) for resolving relative dates. Respond with STRICT JSON only, no markdown, no commentary, "
     "matching exactly this shape:\n"
     '{"intent": "SAVE_FACT" or "RECALL_FACT" or "LIST_FACTS" or "SET_REMINDER" or "LIST_REMINDERS" or '
-    '"COMPOSE_EMAIL" or "CALENDAR_ACTION" or "JOB_SEARCH" or "APPLICATION_ACTION" or "OTHER", '
+    '"COMPOSE_EMAIL" or "READ_INBOX" or "CALENDAR_ACTION" or "JOB_SEARCH" or "APPLICATION_ACTION" or "OTHER", '
     '"content": "string" or null, '
     '"reminder": {"text": "string", "kind": "once" or "daily" or "weekly", "run_at": "ISO 8601 datetime" or null, '
     '"hour": 0-23 or null, "minute": 0-59 or null, "day_of_week": "mon"/"tue"/"wed"/"thu"/"fri"/"sat"/"sun" or null} '
@@ -255,6 +256,10 @@ MEMORY_INTENT_PROMPT = (
     "it to false if they want it sent right away (e.g. \"send an email to...\", \"send it now\"). If no recipient "
     'email address is given anywhere in the request, set email.to to an empty string. content = null, reminder = '
     "null.\n"
+    "Use READ_INBOX when the user wants to read, check, see, or get a summary of their EXISTING email inbox / "
+    'unread mail — any phrasing like "check my email inbox", "check my email", "any new emails", "what\'s in my '
+    'inbox", "read my inbox", "do I have any unread mail", "summarize my emails". This is for viewing incoming '
+    "mail, NOT for writing one (that's COMPOSE_EMAIL). content = null, email = null, reminder = null.\n"
     "Use CALENDAR_ACTION when the user wants to view, check availability for, create, or cancel a calendar event. "
     "Resolve relative dates/times (e.g. \"tomorrow at 3pm\") against the given current date/time into full ISO "
     "8601 calendar.start_dt/end_dt — default to a 1-hour duration if no end time is stated. calendar.action="
@@ -846,6 +851,9 @@ def _send_push(body: str):
 def _store_notification(body: str, category: str = "general"):
     """Persist an outbound alert to the in-app JARVIS notification inbox, then push it
     to any subscribed browsers/devices (fire-and-forget, non-blocking)."""
+    if not body or not body.strip():
+        return  # never store a blank notification
+    body = body.strip()
     try:
         conn = _get_db_conn()
         conn.execute("INSERT INTO notifications (body, category) VALUES (?, ?)", (body, category))
@@ -4705,6 +4713,17 @@ You are not limited to any domain. Explain whatever the user asks."""
         return msg
 
     # =========================================================================
+    # READ INBOX — interactive, read-only snapshot of recent/unread mail.
+    # Routed by the LLM classifier (READ_INBOX); returns a JARVIS briefing inline
+    # instead of the old "I can't read your inbox here" fallback.
+    # =========================================================================
+    if memory_intent == "READ_INBOX":
+        await log_chat_message("user", user_message)
+        reply = await summarize_inbox(call_llm)
+        await log_chat_message("assistant", reply)
+        return reply
+
+    # =========================================================================
     # EMAIL COMPOSE — draft a brand-new outbound email via natural language
     # Routed entirely by the LLM intent classification above (COMPOSE_EMAIL) —
     # no hardcoded trigger phrases, so any natural phrasing reaches this real
@@ -6701,6 +6720,11 @@ _AGENT_MODULES = [
     "job_scout_agent", "application_tracker", "resume_ats_agent",
     "calendar_agent", "weather_agent", "pattern_learning",
 ]
+# Human-readable names for the Core HUD "AGENTS" tooltip.
+_AGENT_NAMES = [
+    "Job Scout", "Application Tracker", "Resume ATS",
+    "Calendar", "Weather", "Pattern Learning",
+]
 MEM_LIMIT_MB = float(os.environ.get("MEM_LIMIT_MB", "512"))  # Render free tier
 
 
@@ -6767,6 +6791,7 @@ async def api_system_metrics():
             "ats_pending": ats_pending,
         },
         "agents": len(_AGENT_MODULES),
+        "agent_names": _AGENT_NAMES,
         "patterns_learned": patterns,
         "db": _db_status(),
         "scheduler_mode": SCHEDULER_MODE,
@@ -6777,7 +6802,13 @@ async def api_system_metrics():
 async def api_run_job(request: Request):
     body = await request.json()
     job_name = body.get("job_name")
-    
+
+    # Log every manual trigger immediately so it always shows in System Logs —
+    # several of these jobs don't self-log otherwise.
+    _KNOWN_JOBS = {"morning-digest", "job-scout", "learn-patterns", "reminders-due", "inbox-check", "weekly-report"}
+    if job_name in _KNOWN_JOBS:
+        await _log_job(job_name, "triggered", "manual run from console")
+
     if job_name == "morning-digest":
         _run_bg(run_morning_digest())
         return JSONResponse({"ok": True, "message": "Morning digest started in background."})
@@ -6789,6 +6820,7 @@ async def api_run_job(request: Request):
         return JSONResponse({"ok": True, "message": "Pattern learning started in background."})
     elif job_name == "reminders-due":
         fired = await _fire_due_reminders_and_automations()
+        await _log_job("reminders-due", "completed", f"fired {fired} due reminder(s)")
         return JSONResponse({"ok": True, "message": f"Reminders check complete. Fired {fired} due reminders."})
     elif job_name == "inbox-check":
         _run_bg(check_inbox_and_notify(call_llm, send_whatsapp_chunked))
@@ -6796,7 +6828,7 @@ async def api_run_job(request: Request):
     elif job_name == "weekly-report":
         _run_bg(send_weekly_report())
         return JSONResponse({"ok": True, "message": "Weekly report send started in background."})
-    
+
     return JSONResponse({"ok": False, "error": f"Unknown job: {job_name}"}, status_code=400)
 
 @app.get("/api/search")

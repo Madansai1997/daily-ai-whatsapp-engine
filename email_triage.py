@@ -106,6 +106,87 @@ def _extract_header(headers, name):
     return ""
 
 
+def _short_sender(raw: str) -> str:
+    """'Jane Doe <jane@x.com>' -> 'Jane Doe'; falls back to the address."""
+    raw = (raw or "").strip()
+    if "<" in raw:
+        name = raw.split("<", 1)[0].strip().strip('"')
+        if name:
+            return name
+        return raw.split("<", 1)[1].rstrip(">").strip()
+    return raw or "unknown sender"
+
+
+INBOX_SUMMARY_PROMPT = (
+    "You are JARVIS briefing Madan on his email inbox out loud — composed, sharp, a little dry wit, never "
+    "robotic. You're given a list of recent emails (sender, subject, snippet). Give a 2-4 sentence briefing: "
+    "how many there are, who/what actually matters, anything time-sensitive. Synthesize — don't just repeat "
+    "every subject line. Plain text only, no markdown, no bullet lists."
+)
+
+
+async def summarize_inbox(call_llm_fn=None, max_results: int = 8) -> str:
+    """Read-only inbox snapshot for an interactive 'check my inbox' request. Lists recent
+    unread mail (falls back to most-recent inbox) with a short JARVIS briefing. Does NOT
+    triage, draft, or mark anything — that's check_inbox_and_notify's job."""
+    try:
+        service = _get_gmail_service()
+    except Exception as e:
+        return f"⚠️ I can't reach your Gmail right now — {e}"
+
+    try:
+        resp = service.users().messages().list(
+            userId="me", labelIds=["UNREAD", "INBOX"], maxResults=max_results).execute()
+        msgs = resp.get("messages", [])
+        label = "unread"
+        if not msgs:
+            resp = service.users().messages().list(
+                userId="me", labelIds=["INBOX"], maxResults=max_results).execute()
+            msgs = resp.get("messages", [])
+            label = "recent"
+    except Exception as e:
+        return f"⚠️ Couldn't list your inbox: {e}"
+
+    if not msgs:
+        return "📥 Your inbox is clear — nothing unread."
+
+    items = []
+    for m in msgs[:max_results]:
+        try:
+            full = service.users().messages().get(
+                userId="me", id=m["id"], format="metadata",
+                metadataHeaders=["From", "Subject"]).execute()
+            headers = full.get("payload", {}).get("headers", [])
+            items.append({
+                "from": _short_sender(_extract_header(headers, "From")),
+                "subject": _extract_header(headers, "Subject") or "(no subject)",
+                "snippet": full.get("snippet", ""),
+            })
+        except Exception:
+            continue
+
+    if not items:
+        return "📥 I found messages but couldn't read their details just now — try again in a moment."
+
+    facts = f"{len(items)} {label} emails:\n" + "\n".join(
+        f"- From {it['from']} | {it['subject']} | {it['snippet'][:160]}" for it in items
+    )
+
+    briefing = None
+    if call_llm_fn:
+        try:
+            briefing = await call_llm_fn(INBOX_SUMMARY_PROMPT, facts, max_tokens=250)
+        except Exception as e:
+            print(f"⚠️ [email_triage] inbox briefing failed: {e}")
+
+    lines = [f"📥 *Inbox* — {len(items)} {label}"]
+    for it in items:
+        lines.append(f"• *{it['from']}* — {it['subject']}")
+    plain = "\n".join(lines)
+
+    return f"{briefing.strip()}\n\n{plain}" if briefing else plain
+
+
 async def _is_processed(email_id: str) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT 1 FROM processed_emails WHERE email_id = ?", (email_id,))

@@ -28,6 +28,7 @@ interface SystemMetrics {
   errors_24h: number;
   backlog: { total: number; reminders: number; automations: number; queue: number; ats_pending: number };
   agents: number;
+  agent_names?: string[];
   patterns_learned: number;
   db: string;
   scheduler_mode: string;
@@ -205,7 +206,14 @@ export default function CoreInterface({ onNavigate, onOpenNotifications }: CoreI
             </span>
           </div>
           <div className="w-[1px] h-10 bg-[#3c494c]"></div>
-          <div className="text-right">
+          <div
+            className="text-right cursor-help"
+            title={
+              metrics?.agent_names?.length
+                ? "Active agents:\n• " + metrics.agent_names.join("\n• ")
+                : "Active agent modules"
+            }
+          >
             <span className="text-[10px] font-mono text-[#859397] block tracking-wider">AGENTS</span>
             <span className="text-xl md:text-2xl font-bold text-[#dfe2f3] font-mono">
               {metrics?.agents ?? "—"}
@@ -319,7 +327,14 @@ export default function CoreInterface({ onNavigate, onOpenNotifications }: CoreI
 
             <div className="space-y-4 font-mono text-xs">
               {/* MEMORY — real RSS vs the 512MB Render cap */}
-              <div className="space-y-1">
+              <div
+                className="space-y-1 cursor-help"
+                title={
+                  metrics
+                    ? `Engine memory: ${Math.round(metrics.memory.rss_mb)} MB of ${Math.round(metrics.memory.limit_mb)} MB (${metrics.memory.pct}%) — status ${metrics.memory.status}`
+                    : "Engine memory usage"
+                }
+              >
                 <div className="flex justify-between">
                   <span className="text-[#bbc9cd]">MEMORY</span>
                   <span className={`font-bold ${metrics && metrics.memory.status !== "ok" ? "text-[#ffb4ab]" : "text-[#8aebff]"}`}>
@@ -335,7 +350,14 @@ export default function CoreInterface({ onNavigate, onOpenNotifications }: CoreI
               </div>
 
               {/* BACKLOG — pending reminders + automations + queue + unviewed ATS */}
-              <div className="space-y-1">
+              <div
+                className="space-y-1 cursor-help"
+                title={
+                  metrics
+                    ? `Backlog breakdown:\n• ${metrics.backlog.reminders} reminder(s)\n• ${metrics.backlog.automations} automation(s)\n• ${metrics.backlog.queue} queued command(s)\n• ${metrics.backlog.ats_pending} unviewed ATS`
+                    : "Pending work"
+                }
+              >
                 <div className="flex justify-between">
                   <span className="text-[#bbc9cd]">BACKLOG</span>
                   <span className="text-[#ffd6a3] font-bold">
@@ -351,7 +373,10 @@ export default function CoreInterface({ onNavigate, onOpenNotifications }: CoreI
               </div>
 
               {/* ERRORS — job failures in the last 24h */}
-              <div className="space-y-1">
+              <div
+                className="space-y-1 cursor-help"
+                title={metrics ? `${metrics.errors_24h} job failure(s) in the last 24 hours` : "Recent job failures"}
+              >
                 <div className="flex justify-between">
                   <span className="text-[#bbc9cd]">ERRORS (24H)</span>
                   <span className={`font-bold ${metrics && metrics.errors_24h > 0 ? "text-[#ffb4ab]" : "text-[#5eead4]"}`}>
