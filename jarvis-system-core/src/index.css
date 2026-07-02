@@ -1,0 +1,177 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --color-surface-dim: #0f131f;
+  --color-surface-bright: #353946;
+  --color-surface-container-lowest: #0a0e1a;
+  --color-surface-container-low: #171b28;
+  --color-surface-container: #1b1f2c;
+  --color-surface-container-high: #262a37;
+  --color-surface-container-highest: #313442;
+  --color-on-surface: #dfe2f3;
+  --color-on-surface-variant: #bbc9cd;
+  --color-inverse-surface: #dfe2f3;
+  --color-inverse-on-surface: #2c303d;
+  --color-outline: #859397;
+  --color-outline-variant: #3c494c;
+  --color-surface-tint: #2fd9f4;
+  --color-primary: #8aebff;
+  --color-on-primary: #00363e;
+  --color-primary-container: #22d3ee;
+  --color-on-primary-container: #005763;
+  --color-inverse-primary: #006877;
+  --color-secondary: #c1c6d9;
+  --color-on-secondary: #2a303f;
+  --color-secondary-container: #434959;
+  --color-on-secondary-container: #b2b8cb;
+  --color-tertiary: #ffd6a3;
+  --color-on-tertiary: #462b00;
+  --color-tertiary-container: #ffb13b;
+  --color-on-tertiary-container: #6e4600;
+  --color-error: #ffb4ab;
+  --color-on-error: #690005;
+  --color-error-container: #93000a;
+  --color-on-error-container: #ffdad6;
+  --color-primary-fixed: #a2eeff;
+  --color-primary-fixed-dim: #2fd9f4;
+  --color-on-primary-fixed: #001f25;
+  --color-on-primary-fixed-variant: #004e5a;
+  --color-secondary-fixed: #dde2f6;
+  --color-secondary-fixed-dim: #c1c6d9;
+  --color-on-secondary-fixed: #151b2a;
+  --color-on-secondary-fixed-variant: #414756;
+  --color-tertiary-fixed: #ffddb5;
+  --color-tertiary-fixed-dim: #ffb957;
+  --color-on-tertiary-fixed: #2a1800;
+  --color-on-tertiary-fixed-variant: #643f00;
+  --color-background: #0f131f;
+  --color-on-background: #dfe2f3;
+  --color-surface-variant: #313442;
+
+  --font-sans: "Inter", "system-ui", "-apple-system", sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+}
+
+body {
+  background-color: #0a0e1a;
+  color: #dfe2f3;
+  font-family: var(--font-sans);
+  overflow-x: hidden;
+  cursor: crosshair;
+}
+
+.scanline {
+  width: 100%;
+  height: 2px;
+  z-index: 50;
+  background: rgba(34, 211, 238, 0.05);
+  position: fixed;
+  top: 0;
+  animation: scanline 12s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes scanline {
+  0% { top: 0; }
+  100% { top: 100%; }
+}
+
+.hud-glow {
+  box-shadow: 0 0 15px rgba(34, 211, 238, 0.25);
+}
+
+.glass-panel {
+  background: rgba(17, 23, 37, 0.6);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-column {
+  background: rgba(17, 23, 37, 0.6);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: all 0.3s ease;
+}
+
+.glass-card:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(138, 235, 255, 0.3);
+}
+
+.ats-chip {
+  background: rgba(138, 235, 255, 0.1);
+  border: 1px solid rgba(138, 235, 255, 0.2);
+}
+
+.cyber-grid {
+  background-size: 60px 60px;
+  background-image: 
+    linear-gradient(to right, rgba(34, 211, 238, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(34, 211, 238, 0.05) 1px, transparent 1px);
+}
+
+.nav-active-glow {
+  text-shadow: 0 0 10px rgba(138, 235, 255, 0.6);
+}
+
+.bg-hud-cinematic {
+  background-image: url('https://lh3.googleusercontent.com/aida/AP1WRLsOf9AFhsS-xT5jjTyKAQw6IW1QdgmgJLsLwqc27kqxX4d4FYoiQiKBw0JwoDefziOXhorSljddIoif_e3zd54mIRJ_3-04dVX9Bc8OeRINhMLdgWNg4Scs3V2BXuNuAW_CyC1euhZQHxwlhKRsuQBjQJWkA-Xy_g68YmLjEF9k11EKrpcgBMIxIihPfSBKNcRcyvzGnZzvL2zhc_FwBK6OOQYri3H8NUaPw1VUCKnN6Ftx-PDB14yNzC2o');
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #8aebff;
+  border-radius: 2px;
+}
+
+.hologram-bubble {
+  background: rgba(34, 211, 238, 0.05);
+  border: 1px solid rgba(138, 235, 255, 0.2);
+  box-shadow: 0 0 20px rgba(34, 211, 238, 0.05);
+}
+
+.user-bubble {
+  background: rgba(138, 235, 255, 0.08);
+  border: 1px solid rgba(138, 235, 255, 0.3);
+}
+
+.terminal-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+.terminal-scroll::-webkit-scrollbar-track {
+  background: rgba(34, 211, 238, 0.05);
+}
+.terminal-scroll::-webkit-scrollbar-thumb {
+  background: rgba(34, 211, 238, 0.2);
+}
+
+.glow-cyan {
+  filter: drop-shadow(0 0 4px #22d3ee);
+}
+
+.glow-cyan-border {
+  box-shadow: 0 0 15px rgba(34, 211, 238, 0.1);
+}
+
+.glass-navy {
+  background: rgba(10, 14, 26, 0.7);
+  backdrop-filter: blur(12px);
+}
+
+.hairline-cyan {
+  border: 1px solid rgba(34, 211, 238, 0.15);
+}

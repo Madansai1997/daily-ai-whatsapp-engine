@@ -654,6 +654,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# New React (Vite) console UI — served as pre-built static files under /console.
+# Guarded so a fresh clone without a build doesn't crash startup; run `npm run build`
+# in jarvis-system-core/ to (re)generate dist. The old /chat UI stays untouched.
+_CONSOLE_DIST = os.path.join(BASE_DIR, "jarvis-system-core", "dist")
+if os.path.isdir(_CONSOLE_DIST):
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/console", StaticFiles(directory=_CONSOLE_DIST, html=True), name="console")
+    print("✅ Console UI mounted at /console")
+else:
+    print("ℹ️ Console UI dist not found — /console disabled until jarvis-system-core is built.")
+
 
 APP_START_TIME = time.time()
 

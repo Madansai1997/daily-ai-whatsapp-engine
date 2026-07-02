@@ -1,0 +1,9 @@
+node_modules/
+build/
+# dist/ is intentionally committed — FastAPI serves the pre-built /console UI on Render
+# (no Node build step in production). Rebuild with `npm run build` and commit the result.
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example

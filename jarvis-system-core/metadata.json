@@ -1,0 +1,6 @@
+{
+  "name": "JARVIS System Core",
+  "description": "An interactive cyber HUD system featuring the J.A.R.V.I.S. Core Interface, Secure Chat, Jobs Board, System Terminal, and ATS Analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
