@@ -4,6 +4,7 @@ import Header from "./components/Header";
 import Footer from "./components/Footer";
 import CoreInterface from "./components/CoreInterface";
 import SecureChat from "./components/SecureChat";
+import PrivaChat from "./components/PrivaChat";
 import JobsBoard from "./components/JobsBoard";
 import SystemTerminal from "./components/SystemTerminal";
 import { AnimatePresence, motion } from "motion/react";
@@ -27,7 +28,7 @@ export default function App() {
     }
 
     // Nav order index to determine forward vs backward push
-    const screenOrder = [ScreenId.Core, ScreenId.Chat, ScreenId.Terminal, ScreenId.Jobs];
+    const screenOrder = [ScreenId.Core, ScreenId.Assistant, ScreenId.Chat, ScreenId.Terminal, ScreenId.Jobs];
     const fromIndex = screenOrder.indexOf(from);
     const toIndex = screenOrder.indexOf(to);
 
@@ -80,8 +81,11 @@ export default function App() {
             {activeScreen === ScreenId.Core && (
               <CoreInterface onNavigate={handleNavigate} />
             )}
-            {activeScreen === ScreenId.Chat && (
+            {activeScreen === ScreenId.Assistant && (
               <SecureChat />
+            )}
+            {activeScreen === ScreenId.Chat && (
+              <PrivaChat />
             )}
             {(activeScreen === ScreenId.Jobs || activeScreen === ScreenId.AtsAnalysis) && (
               <JobsBoard activeScreen={activeScreen} onNavigate={handleNavigate} />

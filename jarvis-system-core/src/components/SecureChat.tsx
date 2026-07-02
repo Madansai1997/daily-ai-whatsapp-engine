@@ -251,7 +251,7 @@ export default function SecureChat() {
         <div className="px-6 py-4 border-b border-[#8aebff]/10 bg-[#1b1f2c]/30 flex justify-between items-center">
           <div>
             <h2 className="text-lg font-bold text-[#dfe2f3] flex items-center gap-3 tracking-wide">
-              {isPrivaChatMode ? "PrivaChat" : "Secure Session"}
+              JARVIS Assistant
               <span className="px-2 py-0.5 bg-[#8aebff]/10 rounded text-[9px] font-mono text-[#8aebff] border border-[#8aebff]/20 tracking-widest font-semibold">
                 #8821-X
               </span>
@@ -262,22 +262,11 @@ export default function SecureChat() {
             </p>
           </div>
 
-          <div className="flex items-center gap-4 bg-[#8aebff]/5 rounded-full px-4 py-1.5 border border-[#8aebff]/20">
+          <div className="flex items-center gap-2 bg-[#8aebff]/5 rounded-full px-4 py-1.5 border border-[#8aebff]/20">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#34d399] animate-pulse"></span>
             <span className="text-[10px] font-mono text-[#8aebff] tracking-widest uppercase font-semibold">
-              PrivaChat Mode
+              Online
             </span>
-            <div
-              className={`w-10 h-5 rounded-full relative cursor-pointer transition-colors duration-200 ${
-                isPrivaChatMode ? "bg-[#8aebff]/30" : "bg-[#3c494c]/50"
-              }`}
-              onClick={() => setIsPrivaChatMode(!isPrivaChatMode)}
-            >
-              <div
-                className={`absolute top-0.5 w-4 h-4 rounded-full transition-transform duration-200 bg-[#8aebff] shadow-[0_0_8px_rgba(138,235,255,0.6)] ${
-                  isPrivaChatMode ? "right-0.5" : "left-0.5 translate-x-0"
-                }`}
-              ></div>
-            </div>
           </div>
         </div>
 

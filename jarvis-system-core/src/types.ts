@@ -4,6 +4,7 @@
 
 export enum ScreenId {
   Core = "core",
+  Assistant = "assistant",
   Chat = "chat",
   Jobs = "jobs",
   Terminal = "terminal",
