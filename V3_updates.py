@@ -91,6 +91,34 @@ from pattern_learning import (
     refresh_all_patterns,
     get_pattern_context,
 )
+from job_scout_agent import (
+    init_job_scout_tables,
+    run_job_scout_digest,
+    run_on_demand_search,
+    get_last_shown as get_scout_last_shown,
+    get_profile as get_job_profile,
+    save_profile as save_job_profile,
+)
+from application_tracker import (
+    init_application_tracker_tables,
+    add_application,
+    list_applications,
+    get_application,
+    update_status as update_application_status,
+    update_status_by_id as update_application_status_by_id,
+    delete_application,
+    format_applications,
+    VALID_STATUSES as APPLICATION_STATUSES,
+)
+from resume_ats_agent import (
+    init_resume_ats_tables,
+    analyze as run_ats_analysis,
+    get_analysis as get_ats_analysis,
+    mark_viewed as mark_ats_viewed,
+    count_unviewed as count_ats_unviewed,
+    save_resume_template,
+    get_resume_template,
+)
 from pdf_import import extract_pdf_text
 try:
     from weather_agent import get_weather, get_weather_brief
@@ -149,12 +177,20 @@ FREE_MODELS = [
     "llama-3.1-8b-instant",         # Llama 3.1 8B — smallest/fastest backup
 ]
 
+# Gemini (Google AI Studio) as a LAST-RESORT fallback — only when every Groq model above
+# fails (e.g. Groq-wide rate limit). AI Studio exposes an OpenAI-compatible endpoint, so the
+# same AsyncOpenAI client works. Free to obtain a key at https://aistudio.google.com. This is
+# a no-op until GEMINI_API_KEY is set — the chain then simply stays Groq-only.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
 MEMORY_INTENT_PROMPT = (
     "Classify the user's message into exactly one intent. The message is preceded by the current date/time "
     "(Asia/Kolkata) for resolving relative dates. Respond with STRICT JSON only, no markdown, no commentary, "
     "matching exactly this shape:\n"
     '{"intent": "SAVE_FACT" or "RECALL_FACT" or "LIST_FACTS" or "SET_REMINDER" or "LIST_REMINDERS" or '
-    '"COMPOSE_EMAIL" or "CALENDAR_ACTION" or "OTHER", '
+    '"COMPOSE_EMAIL" or "CALENDAR_ACTION" or "JOB_SEARCH" or "APPLICATION_ACTION" or "OTHER", '
     '"content": "string" or null, '
     '"reminder": {"text": "string", "kind": "once" or "daily" or "weekly", "run_at": "ISO 8601 datetime" or null, '
     '"hour": 0-23 or null, "minute": 0-59 or null, "day_of_week": "mon"/"tue"/"wed"/"thu"/"fri"/"sat"/"sun" or null} '
@@ -163,7 +199,11 @@ MEMORY_INTENT_PROMPT = (
     '"body": "full professional email body text", "save_as_draft": true or false} or null, '
     '"calendar": {"action": "list" or "check" or "create" or "delete", "summary": "string" or null, '
     '"start_dt": "ISO 8601 datetime" or null, "end_dt": "ISO 8601 datetime" or null, '
-    '"description": "string" or null, "attendees": ["email", ...] or null} or null}\n'
+    '"description": "string" or null, "attendees": ["email", ...] or null} or null, '
+    '"job": {"role": "string" or null, "location": "string" or null, "remote": true or false or null, '
+    '"keywords": ["string", ...] or null, "save_profile": true or false} or null, '
+    '"application": {"action": "list" or "update", "status_filter": "string" or null, '
+    '"company": "string" or null, "new_status": "interested"/"applied"/"interviewing"/"offer"/"accepted"/"rejected" or null} or null}\n'
     "You are given the recent conversation alongside the latest message. If the latest message references "
     'something from it instead of stating it directly (e.g. "send the same email again", "remind me about that '
     'at the same time", "email her the same thing") — resolve the reference using the recent conversation and '
@@ -224,6 +264,22 @@ MEMORY_INTENT_PROMPT = (
     "title/keyword identifies which event to remove. This is NOT for confirming/cancelling an event already shown "
     "to the user in this conversation — those are separate explicit commands and should be OTHER. content = null, "
     "reminder = null, email = null.\n"
+    "Use APPLICATION_ACTION when the user wants to see or update their tracked job APPLICATIONS (not search "
+    'for new jobs). application.action="list" to view their pipeline (e.g. "show my applications", "what jobs '
+    'have I applied to", "my job pipeline"); fill application.status_filter only if they ask for a specific stage '
+    '(e.g. "which ones am I interviewing for"). application.action="update" to change a status (e.g. "mark '
+    'Cognizant as interviewing", "I got rejected from Infosys", "got an offer from BP") — fill application.company '
+    "with the company/role identifier and application.new_status with the target stage. This is NOT the TRACK <n> "
+    "command (that is an explicit command handled separately). content = null, reminder = null, email = null, "
+    "calendar = null, job = null.\n"
+    "Use JOB_SEARCH when the user wants to find, search, or be shown job openings/vacancies right now "
+    '(e.g. "find me jobs", "any data analyst roles", "search remote jobs in Mumbai", "show me openings today"). '
+    "Fill job.role with the role/title if stated (else null → their saved profile is used), job.location with a "
+    "city/region, or set job.remote=true if they specifically want remote, job.keywords with any specific skills "
+    "mentioned. Set job.save_profile=true ONLY if they explicitly ask to change/update their standing job "
+    'preferences (e.g. "update my job search to...", "from now on look for..."), otherwise false. This is NOT for '
+    "adding a job to a tracker (that is a separate TRACK command → OTHER). content = null, reminder = null, "
+    "email = null, calendar = null.\n"
     "Use OTHER for everything else — general conversation, questions, commands. This explicitly includes general "
     'knowledge/curiosity questions phrased like "tell me about X", "what is X", "explain X", "how does X work" — '
     "these are OTHER even when X sounds like a topic, unless the message is clearly asking to save/recall a "
@@ -244,32 +300,68 @@ def get_llm_client() -> AsyncOpenAI:
 
 anthropic_client = get_llm_client()  # kept same name so all call sites work unchanged
 
-async def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 1000) -> str:
-    """Call LLM with automatic fallback through FREE_MODELS on rate limit or error.
+
+def get_gemini_client() -> AsyncOpenAI | None:
+    """Google AI Studio's OpenAI-compatible client, or None if no key is configured."""
+    if not GEMINI_API_KEY:
+        return None
+    return AsyncOpenAI(base_url=GEMINI_BASE_URL, api_key=GEMINI_API_KEY)
+
+
+gemini_client = get_gemini_client()
+if gemini_client is not None:
+    print(f"✅ Gemini fallback enabled ({GEMINI_MODEL}).")
+
+
+def _model_chain() -> list:
+    """(client, model) pairs to try in order: all Groq free models first, then Gemini as a
+    last resort (only if a key is set). Keeps Groq as the fast primary and Gemini as the
+    rate-limit safety net."""
+    chain = [(anthropic_client, m) for m in FREE_MODELS]
+    if gemini_client is not None:
+        chain.append((gemini_client, GEMINI_MODEL))
+    return chain
+
+
+async def _complete_with_fallback(messages: list, max_tokens: int) -> str:
+    """Run a chat completion across the model chain, returning the first non-empty answer.
 
     GPT-OSS models on Groq spend tokens on hidden reasoning before the visible answer —
     with a tight max_tokens budget this can consume the whole budget and return empty
     content (finish_reason="length", zero actual answer). reasoning_effort="low" fixes
-    this, but only gpt-oss models accept that parameter — other free-tier fallbacks
-    (Llama, etc.) hard-error on it, so it's only added when the model name matches.
+    this, but only gpt-oss models accept that parameter — other models (Llama, Gemini)
+    hard-error on it, so it's only added when the model name matches.
     """
-    for model in FREE_MODELS:
+    last_err = None
+    for client, model in _model_chain():
         try:
             extra_body = {"reasoning_effort": "low"} if "gpt-oss" in model else {}
-            response = await anthropic_client.chat.completions.create(
+            response = await client.chat.completions.create(
                 model=model,
                 max_tokens=max_tokens,
                 extra_body=extra_body,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ]
+                messages=messages,
             )
-            return response.choices[0].message.content
+            content = response.choices[0].message.content
+            if content and content.strip():
+                return content
+            print(f"⚠️ Model {model} returned empty content. Trying next...")
         except Exception as e:
+            last_err = e
             print(f"⚠️ Model {model} failed: {e}. Trying next...")
             continue
-    raise Exception("All free models failed")
+    raise Exception(f"All models failed (last error: {last_err})")
+
+
+async def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 1000) -> str:
+    """Call LLM with automatic fallback through the Groq free models, then Gemini."""
+    return await _complete_with_fallback(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_tokens,
+    )
 
 
 def init_db_tables():
@@ -440,6 +532,9 @@ init_reminder_tables()
 init_calendar_tables()
 init_automation_tables()
 init_pattern_tables()
+init_job_scout_tables()
+init_application_tracker_tables()
+init_resume_ats_tables()
 
 
 # ==========================================
@@ -2810,6 +2905,16 @@ async def cron_weekly(token: str = ""):
     return JSONResponse({"status": "weekly report triggered"}, status_code=202)
 
 
+@app.post("/cron/job-scout")
+async def cron_job_scout(token: str = ""):
+    """Daily job digest: Adzuna (+ Remotive) → dedup → rank → WhatsApp top matches.
+    Fire once/day from cron-job.org (respects source rate limits + instance-hours)."""
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    _run_bg(run_job_scout_digest(call_llm, send_whatsapp_chunked))
+    return JSONResponse({"status": "job scout digest triggered"}, status_code=202)
+
+
 @app.post("/cron/learn-patterns")
 async def cron_learn_patterns(token: str = ""):
     """Recompute all learned-pattern categories from current history. Independently callable
@@ -3728,6 +3833,23 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
         return None
 
     # =========================================================================
+    # JOB SCOUT → TRACKER handoff — explicit "TRACK <n>" reply on a job digest.
+    # Resolves n against the last shown search/digest and files it in the tracker.
+    # =========================================================================
+    if user_message_clean.startswith("track"):
+        m = re.search(r"track\s*#?\s*(\d+)", user_message_clean)
+        if m:
+            await log_chat_message("user", user_message)
+            n = int(m.group(1))
+            job = await get_scout_last_shown(n)
+            if not job:
+                msg = f"🤷 No job #{n} to track — run a job search first, then reply TRACK <n>."
+            else:
+                _ok, msg = await add_application(job, status="applied")
+            await log_chat_message("assistant", msg)
+            return msg
+
+    # =========================================================================
     # EMAIL TRIAGE — edit the active draft reply
     # Usage: "edit: <new reply text>"
     # =========================================================================
@@ -4402,6 +4524,8 @@ You are not limited to any domain. Explain whatever the user asks."""
         memory_reminder = intent_parsed.get("reminder")
         memory_email = intent_parsed.get("email")
         memory_calendar = intent_parsed.get("calendar")
+        memory_job = intent_parsed.get("job")
+        memory_application = intent_parsed.get("application")
     except Exception as e:
         print(f"⚠️ Memory intent classification failed: {e}")
         memory_intent = "OTHER"
@@ -4409,6 +4533,8 @@ You are not limited to any domain. Explain whatever the user asks."""
         memory_reminder = None
         memory_email = None
         memory_calendar = None
+        memory_job = None
+        memory_application = None
 
     if memory_intent == "SAVE_FACT" and memory_content:
         await log_chat_message("user", user_message)
@@ -4582,6 +4708,54 @@ You are not limited to any domain. Explain whatever the user asks."""
         else:
             msg = "⚠️ I didn't understand what calendar action you wanted."
 
+        await log_chat_message("assistant", msg)
+        return msg
+
+    # =========================================================================
+    # JOB SEARCH — on-demand live listings (JSearch if configured, else live Adzuna).
+    # Ephemeral: an ad-hoc query never mutates the standing job_profile unless the user
+    # explicitly asks (save_profile). Read-only on the ledger; results are tagged if
+    # already flagged by the daily cron, not silently dropped.
+    # =========================================================================
+    if memory_intent == "JOB_SEARCH":
+        await log_chat_message("user", user_message)
+        job = memory_job or {}
+        override = {
+            "role": job.get("role"),
+            "query_location": job.get("location"),
+            "remote_ok": job.get("remote"),
+            "keywords": job.get("keywords"),
+        }
+        override = {k: v for k, v in override.items() if v is not None}
+        if job.get("save_profile") and override:
+            prof = dict(await get_job_profile())
+            prof.update(override)
+            await save_job_profile(prof)
+        if source == "whatsapp":
+            try:
+                send_whatsapp("🔎 On it — pulling live listings…")
+            except Exception:
+                pass
+        msg = await run_on_demand_search(call_llm, override=override or None)
+        await log_chat_message("assistant", msg)
+        return msg
+
+    # =========================================================================
+    # APPLICATION TRACKER — view the pipeline or update an application's status.
+    # =========================================================================
+    if memory_intent == "APPLICATION_ACTION" and memory_application:
+        await log_chat_message("user", user_message)
+        action = memory_application.get("action")
+        if action == "update":
+            company = memory_application.get("company")
+            new_status = memory_application.get("new_status")
+            if not company or not new_status:
+                msg = "⚠️ Tell me which application and the new status — e.g. \"mark BP as interviewing\"."
+            else:
+                _ok, msg = await update_application_status(company, new_status)
+        else:  # list (default)
+            apps = await list_applications(memory_application.get("status_filter"))
+            msg = format_applications(apps)
         await log_chat_message("assistant", msg)
         return msg
 
@@ -4761,14 +4935,11 @@ You are not limited to any domain. Explain whatever the user asks."""
             )
         system_msg = {"role": "system", "content": system_prompt}
         t_reply = time.time()
-        response = await anthropic_client.chat.completions.create(
-            model=OPENROUTER_MODEL, max_tokens=800,
-            extra_body={"reasoning_effort": "low"},
-            messages=[system_msg] + chat_history + [{"role": "user", "content": user_message}]
-        )
+        ai_response = (await _complete_with_fallback(
+            [system_msg] + chat_history + [{"role": "user", "content": user_message}],
+            max_tokens=800,
+        )).strip()
         print(f"⏱️ [process_message] general-chat reply call took {time.time() - t_reply:.2f}s")
-
-        ai_response = response.choices[0].message.content.strip()
         await log_chat_message("assistant", ai_response)
 
         if "to *Advanced*" in ai_response:
@@ -4810,6 +4981,90 @@ async def chat_history_api(limit: int = 50):
             rows = await cursor.fetchall()
     messages = [{"role": r[0], "content": r[1], "timestamp": r[2]} for r in reversed(rows)]
     return JSONResponse({"messages": messages})
+
+
+# ── Application Tracker web UI (kanban board) — read + update + remove ──
+@app.get("/applications")
+async def applications_list_api():
+    apps = await list_applications()
+    return JSONResponse({"applications": apps, "statuses": APPLICATION_STATUSES})
+
+
+@app.post("/applications/update")
+async def applications_update_api(request: Request):
+    body = await request.json()
+    ok, result = await update_application_status_by_id(int(body.get("id")), body.get("status", ""))
+    return JSONResponse({"ok": ok, "result": result}, status_code=200 if ok else 400)
+
+
+@app.post("/applications/delete")
+async def applications_delete_api(request: Request):
+    body = await request.json()
+    await delete_application(int(body.get("id")))
+    return JSONResponse({"ok": True})
+
+
+# ── Resume ATS alignment (on-demand per application) ──
+@app.get("/resume/status")
+async def resume_status_api():
+    return JSONResponse({"has_resume": bool((await get_resume_template()).strip())})
+
+
+@app.get("/resume")
+async def resume_get_api():
+    return JSONResponse({"content": await get_resume_template()})
+
+
+@app.post("/resume/upload")
+async def resume_upload_api(request: Request):
+    body = await request.json()
+    content = (body.get("content") or "").strip()
+    if not content:
+        return JSONResponse({"ok": False, "error": "empty resume"}, status_code=400)
+    await save_resume_template(content)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/applications/{app_id}/ats")
+async def application_ats_api(app_id: int):
+    """Run (or refresh) the ATS resume analysis for one tracked application, on demand."""
+    app_row = await get_application(app_id)
+    if not app_row:
+        return JSONResponse({"error": "application not found"}, status_code=404)
+    job = {"key": app_row.get("job_key") or f"app:{app_id}", "title": app_row.get("title"),
+           "company": app_row.get("company"), "location": app_row.get("location"),
+           "description": app_row.get("description")}
+    result = await run_ats_analysis(job, call_llm)
+    if result.get("error"):
+        return JSONResponse({"error": result["error"]}, status_code=400)
+    return JSONResponse(result)
+
+
+@app.get("/ats/{job_ref}")
+async def ats_get_api(job_ref: str):
+    a = await get_ats_analysis(job_ref)
+    if not a:
+        return JSONResponse({"error": "no analysis"}, status_code=404)
+    await mark_ats_viewed(job_ref)
+    return JSONResponse(a)
+
+
+@app.get("/ats/{job_ref}/download")
+async def ats_download_api(job_ref: str):
+    a = await get_ats_analysis(job_ref)
+    if not a:
+        return JSONResponse({"error": "no analysis"}, status_code=404)
+    fname = "".join(c for c in (a.get("company") or "resume") if c.isalnum())[:24] or "resume"
+    return Response(
+        content=a.get("downloadable_txt_content") or "",
+        media_type="text/plain",
+        headers={"Content-Disposition": f'attachment; filename="ATS_{fname}.txt"'},
+    )
+
+
+@app.get("/ats/pending/count")
+async def ats_pending_count_api():
+    return JSONResponse({"count": await count_ats_unviewed()})
 
 
 @app.post("/chat-message")
@@ -5242,6 +5497,70 @@ CHAT_UI_HTML = """<!DOCTYPE html>
     transition: border-color 0.2s ease, box-shadow 0.2s ease;
   }
   #terminal-pdf-btn:hover { box-shadow: 0 0 10px rgba(0, 229, 255, 0.3); }
+
+  /* ── Applications (Jobs) kanban ── */
+  #jobs-view { flex-direction: column; padding: 0; }
+  #jobs-view.active { display: flex; }
+  #jobs-toolbar { display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px; border-bottom: 1px solid rgba(0,229,255,0.12); flex: 0 0 auto; }
+  #jobs-count { font-size: 13px; color: #9fb3c8; letter-spacing: .5px; }
+  #jobs-refresh { background: transparent; border: 1px solid rgba(0,229,255,0.3); color: #00e5ff;
+    border-radius: 8px; width: 30px; height: 30px; cursor: pointer; font-size: 15px; }
+  #jobs-refresh:hover { box-shadow: 0 0 10px rgba(0,229,255,0.3); }
+  #jobs-resume { background: transparent; border: 1px solid rgba(0,229,255,0.3); color: #00e5ff;
+    border-radius: 8px; height: 30px; padding: 0 10px; cursor: pointer; font-size: 12px; }
+  #jobs-resume:hover { box-shadow: 0 0 10px rgba(0,229,255,0.3); }
+  #jobs-board { flex: 1 1 auto; overflow-x: auto; overflow-y: hidden; display: flex; gap: 12px;
+    padding: 14px; align-items: flex-start; }
+  .kb-col { flex: 0 0 200px; background: rgba(15,23,42,0.6); border: 1px solid rgba(148,163,184,0.15);
+    border-radius: 12px; display: flex; flex-direction: column; max-height: 100%; }
+  .kb-col-head { padding: 9px 11px; font-size: 12px; font-weight: 600; letter-spacing: .3px;
+    border-bottom: 1px solid rgba(148,163,184,0.12); position: sticky; top: 0; }
+  .kb-col-body { padding: 8px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+  .kb-card { background: #0b1120; border: 1px solid rgba(148,163,184,0.18); border-radius: 9px;
+    padding: 9px 10px; font-size: 12px; color: #e5e7eb; }
+  .kb-card .kb-title { font-weight: 600; line-height: 1.25; }
+  .kb-card .kb-company { color: #9fb3c8; font-size: 11px; margin-top: 2px; }
+  .kb-card .kb-actions { display: flex; align-items: center; gap: 6px; margin-top: 7px; }
+  .kb-card select { flex: 1; background: #111827; color: #e5e7eb; border: 1px solid rgba(148,163,184,0.25);
+    border-radius: 6px; font-size: 11px; padding: 3px 4px; }
+  .kb-card a { color: #38bdf8; text-decoration: none; font-size: 11px; }
+  .kb-card .kb-del { background: transparent; border: 0; color: #ef4444; cursor: pointer; font-size: 13px; }
+  .kb-card .kb-ats { background: transparent; border: 0; cursor: pointer; font-size: 13px; }
+  .kb-empty { color: #64748b; font-size: 12px; padding: 24px 14px; text-align: center; }
+
+  /* ── ATS modal ── */
+  .ats-card { background: #0b1120; border: 1px solid rgba(0,229,255,0.25); border-radius: 14px;
+    width: 640px; max-width: 100%; max-height: 88vh; display: flex; flex-direction: column; overflow: hidden; }
+  .ats-head { display: flex; align-items: center; gap: 12px; padding: 14px 16px;
+    border-bottom: 1px solid rgba(148,163,184,0.15); }
+  .ats-title { font-size: 14px; font-weight: 700; color: #e5e7eb; }
+  .ats-sub { font-size: 12px; color: #9fb3c8; margin-top: 2px; }
+  .ats-scorebox { margin-left: auto; text-align: center; color: #00e5ff; }
+  .ats-scorebox span { font-size: 20px; font-weight: 800; }
+  .ats-scorebox small { display: block; font-size: 9px; color: #64748b; letter-spacing: .5px; }
+  .ats-x { background: transparent; border: 0; color: #94a3b8; font-size: 18px; cursor: pointer; }
+  .ats-tabbar { display: flex; border-bottom: 1px solid rgba(148,163,184,0.12); }
+  .ats-tabbtn { flex: 1; background: transparent; border: 0; color: #94a3b8; padding: 10px; cursor: pointer;
+    font-size: 12px; border-bottom: 2px solid transparent; }
+  .ats-tabbtn.active { color: #00e5ff; border-bottom-color: #00e5ff; }
+  .ats-body { padding: 14px 16px; overflow-y: auto; }
+  .kw-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .kw-table th { text-align: left; color: #9fb3c8; font-weight: 600; border-bottom: 1px solid rgba(148,163,184,0.2); padding: 6px 4px; }
+  .kw-table td { padding: 5px 4px; border-bottom: 1px solid rgba(148,163,184,0.08); color: #e5e7eb; }
+  .kw-yes { color: #22c55e; } .kw-no { color: #ef4444; }
+  .kw-note { font-size: 11px; color: #64748b; margin-top: 10px; line-height: 1.4; }
+  .delta { border: 1px solid rgba(148,163,184,0.15); border-radius: 9px; padding: 10px; margin-bottom: 10px; }
+  .delta-sec { font-size: 12px; font-weight: 600; color: #cbd5e1; margin-bottom: 6px; }
+  .delta-issue { font-weight: 400; color: #f59e0b; font-size: 11px; }
+  .delta-cur { font-size: 12px; color: #94a3b8; margin-bottom: 5px; }
+  .delta-opt { font-size: 12px; color: #d1fae5; }
+  .delta-cur b, .delta-opt b { display: inline-block; font-size: 10px; letter-spacing: .5px; margin-right: 5px;
+    text-transform: uppercase; opacity: .8; }
+  .ats-foot { padding: 12px 16px; border-top: 1px solid rgba(148,163,184,0.15); }
+  .ats-dl { width: 100%; background: #00e5ff; color: #001018; border: 0; border-radius: 9px; padding: 10px;
+    font-weight: 700; font-size: 13px; cursor: pointer; }
+  .ats-dl:hover { box-shadow: 0 0 14px rgba(0,229,255,0.4); }
 </style>
 </head>
 <body>
@@ -5260,6 +5579,7 @@ CHAT_UI_HTML = """<!DOCTYPE html>
           <span class="tab-badge" id="privachat-badge">0</span>
         </button>
         <button class="tab-btn" id="tab-terminal" onclick="switchView('terminal')">Terminal</button>
+        <button class="tab-btn" id="tab-jobs" onclick="switchView('jobs')">Jobs<span class="tab-badge" id="jobs-ats-badge" style="display:none">0</span></button>
       </div>
       <div class="status-ring"><div class="pulse-dot"></div></div>
     </div>
@@ -5311,6 +5631,54 @@ CHAT_UI_HTML = """<!DOCTYPE html>
       <button id="terminal-pdf-btn" title="Upload a PDF" onclick="document.getElementById('terminal-pdf-input').click()">📎</button>
       <button id="cc-approve-btn" title="Approve the proposed Claude Code change" onclick="ccApprove()" style="display:none">✅ Approve</button>
       <button id="cc-mode-btn" title="Claude Code mode (enter secret once)" onclick="toggleCcMode()">🔐</button>
+    </div>
+  </div>
+  <div id="jobs-view" class="view">
+    <div id="jobs-toolbar">
+      <span id="jobs-count">Applications</span>
+      <div style="display:flex;gap:8px">
+        <button id="jobs-resume" onclick="openResumeModal()" title="Set your master résumé (used for ATS analysis)">📄 Résumé</button>
+        <button id="jobs-refresh" onclick="loadApplications()" title="Refresh">⟳</button>
+      </div>
+    </div>
+    <div id="jobs-board"></div>
+  </div>
+</div>
+
+<div id="resume-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9998;align-items:center;justify-content:center;padding:16px">
+  <div class="ats-card" style="width:640px">
+    <div class="ats-head">
+      <div><div class="ats-title">📄 Master Résumé</div>
+        <div class="ats-sub">Plain text. Used as the source for every ATS analysis — never sent anywhere except the LLM you trigger.</div></div>
+      <button class="ats-x" onclick="closeResume()">✕</button>
+    </div>
+    <div class="ats-body">
+      <textarea id="resume-text" style="width:100%;height:46vh;background:#0b1120;color:#e5e7eb;border:1px solid rgba(148,163,184,0.25);border-radius:9px;padding:10px;font-size:12px;font-family:inherit;resize:vertical" placeholder="Paste your Data Analyst résumé as plain text…"></textarea>
+    </div>
+    <div class="ats-foot"><button class="ats-dl" onclick="saveResume()">💾 Save Résumé</button></div>
+  </div>
+</div>
+
+<div id="ats-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9998;align-items:center;justify-content:center;padding:16px">
+  <div class="ats-card">
+    <div class="ats-head">
+      <div>
+        <div class="ats-title">🎯 ATS Alignment Analysis</div>
+        <div id="ats-heading" class="ats-sub"></div>
+      </div>
+      <div class="ats-scorebox"><span id="ats-score">?/100</span><small>ATS match</small></div>
+      <button class="ats-x" onclick="closeAts()">✕</button>
+    </div>
+    <div class="ats-tabbar">
+      <button id="ats-tabbtn1" class="ats-tabbtn active" onclick="switchAtsTab(1)">Keyword Matrix</button>
+      <button id="ats-tabbtn2" class="ats-tabbtn" onclick="switchAtsTab(2)">STAR / XYZ Plan</button>
+    </div>
+    <div class="ats-body">
+      <div id="ats-tab1"></div>
+      <div id="ats-tab2" style="display:none"></div>
+    </div>
+    <div class="ats-foot">
+      <button id="ats-download" class="ats-dl">⬇ Download Optimized Text File</button>
     </div>
   </div>
 </div>
@@ -5635,6 +6003,7 @@ async function loadHistory() {
   appendBubble('⚡ JARVIS online. Good ' + greeting + ', Madan.\\nWhat do you need?', 'agent');
 }
 loadHistory();
+refreshAtsBadge();   // surface any unviewed ATS analyses on load
 
 let currentView = 'jarvis';
 let privachatUnread = 0;
@@ -5690,20 +6059,121 @@ function switchView(view) {
   document.getElementById('tab-jarvis').classList.toggle('active', view === 'jarvis');
   document.getElementById('tab-privachat').classList.toggle('active', view === 'privachat');
   document.getElementById('tab-terminal').classList.toggle('active', view === 'terminal');
+  document.getElementById('tab-jobs').classList.toggle('active', view === 'jobs');
   document.getElementById('jarvis-view').classList.toggle('active', view === 'jarvis');
   document.getElementById('privachat-view').classList.toggle('active', view === 'privachat');
   document.getElementById('terminal-view').classList.toggle('active', view === 'terminal');
+  document.getElementById('jobs-view').classList.toggle('active', view === 'jobs');
   // Leaving privachat → disconnect it so it stops waking the engine.
   if (prev === 'privachat' && view !== 'privachat') setPrivachat(false);
   if (view === 'terminal') {
     document.getElementById('terminal-input').focus();
     pollTerminalHistory();            // catch up now that the Terminal is visible
   }
+  if (view === 'jobs') { loadApplications(); refreshAtsBadge(); }
   if (view === 'privachat') {
     if (!privachatManualOff) setPrivachat(true);   // reconnect on return
     privachatUnread = 0;
     updatePrivachatBadge();
   }
+}
+
+// ── Applications (Jobs) kanban ──
+const JOB_STATUSES = ['interested','applied','interviewing','offer','accepted','rejected'];
+const JOB_EMOJI = {interested:'👀',applied:'📨',interviewing:'🗣️',offer:'🎉',accepted:'✅',rejected:'❌'};
+function jobEsc(s){ return (s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+async function loadApplications(){
+  const board=document.getElementById('jobs-board');
+  board.innerHTML='<div class="kb-empty">Loading…</div>';
+  try{
+    const res=await fetch('/applications');
+    const data=await res.json();
+    renderKanban(data.applications||[]);
+  }catch(e){ board.innerHTML='<div class="kb-empty">Failed to load.</div>'; }
+}
+function renderKanban(apps){
+  document.getElementById('jobs-count').textContent='Applications ('+apps.length+')';
+  const board=document.getElementById('jobs-board');
+  if(!apps.length){ board.innerHTML='<div class="kb-empty">No applications yet.<br>Reply TRACK &lt;n&gt; on a job search to add one.</div>'; return; }
+  const byStatus={}; JOB_STATUSES.forEach(s=>byStatus[s]=[]);
+  apps.forEach(a=>{ (byStatus[a.status]=byStatus[a.status]||[]).push(a); });
+  board.innerHTML=JOB_STATUSES.map(s=>{
+    const items=byStatus[s]||[];
+    return '<div class="kb-col"><div class="kb-col-head">'+JOB_EMOJI[s]+' '+s.charAt(0).toUpperCase()+s.slice(1)+' ('+items.length+')</div><div class="kb-col-body">'+items.map(cardHtml).join('')+'</div></div>';
+  }).join('');
+}
+function cardHtml(a){
+  const opts=JOB_STATUSES.map(s=>'<option value="'+s+'"'+(s===a.status?' selected':'')+'>'+s+'</option>').join('');
+  const link=a.url?'<a href="'+jobEsc(a.url)+'" target="_blank" rel="noopener">open ↗</a>':'';
+  return '<div class="kb-card"><div class="kb-title">'+jobEsc(a.title)+'</div><div class="kb-company">'+jobEsc(a.company||'')+(a.location?' · '+jobEsc(a.location):'')+'</div><div class="kb-actions"><select onchange="updateApp('+a.id+',this.value)">'+opts+'</select>'+link+'<button class="kb-ats" title="ATS resume analysis" onclick="runAts('+a.id+',this)">🎯</button><button class="kb-del" title="Remove" onclick="removeApp('+a.id+')">🗑</button></div></div>';
+}
+// ── ATS resume analysis ──
+async function runAts(id, btn){
+  const orig=btn?btn.textContent:''; if(btn){ btn.textContent='⏳'; btn.disabled=true; }
+  try{
+    const res=await fetch('/applications/'+id+'/ats',{method:'POST'});
+    const data=await res.json();
+    if(data.error){ alert('ATS: '+data.error); return; }
+    openAtsModal(data);
+    refreshAtsBadge();
+  }catch(e){ alert('ATS analysis failed.'); }
+  finally{ if(btn){ btn.textContent=orig||'🎯'; btn.disabled=false; } }
+}
+function openAtsModal(a){
+  document.getElementById('ats-modal').style.display='flex';
+  document.getElementById('ats-heading').textContent=(a.job_title||'')+' — '+(a.company||'')+(a.location?' ('+a.location+')':'');
+  document.getElementById('ats-score').textContent=(a.ats_score!=null?a.ats_score:'?')+'/100';
+  document.getElementById('ats-download').onclick=()=>{ window.open('/ats/'+encodeURIComponent(a.job_ref)+'/download','_blank'); };
+  // Tab 1: keyword matrix
+  const km=a.keyword_matrix||{}; const present=new Set(km.present||[]);
+  const rows=(km.required||[]).map(k=>{
+    const has=present.has(k);
+    return '<tr><td>'+jobEsc(k)+'</td><td class="'+(has?'kw-yes':'kw-no')+'">'+(has?'✓ present':'✗ missing')+'</td></tr>';
+  }).join('');
+  document.getElementById('ats-tab1').innerHTML='<table class="kw-table"><thead><tr><th>Required by JD</th><th>Status</th></tr></thead><tbody>'+(rows||'<tr><td colspan=2>—</td></tr>')+'</tbody></table><p class="kw-note">Missing keywords are an honest gap report — learn them or judge role fit; they are not inserted into your bullets.</p>';
+  // Tab 2: STAR/XYZ delta
+  const deltas=(a.star_xyz_breakdown||[]).map(b=>
+    '<div class="delta"><div class="delta-sec">'+jobEsc(b.section_name||'')+(b.issue?' <span class="delta-issue">'+jobEsc(b.issue)+'</span>':'')+'</div>'+
+    '<div class="delta-cur"><b>Current</b> '+jobEsc(b.current_text||'')+'</div>'+
+    '<div class="delta-opt"><b>Optimized</b> '+jobEsc(b.optimized_text||'')+'</div></div>'
+  ).join('');
+  document.getElementById('ats-tab2').innerHTML=deltas||'<p class="kw-note">No rewrite suggestions.</p>';
+  switchAtsTab(1);
+}
+function switchAtsTab(n){
+  document.getElementById('ats-tab1').style.display=n===1?'block':'none';
+  document.getElementById('ats-tab2').style.display=n===2?'block':'none';
+  document.getElementById('ats-tabbtn1').classList.toggle('active',n===1);
+  document.getElementById('ats-tabbtn2').classList.toggle('active',n===2);
+}
+function closeAts(){ document.getElementById('ats-modal').style.display='none'; }
+async function refreshAtsBadge(){
+  try{
+    const r=await fetch('/ats/pending/count'); const d=await r.json();
+    const b=document.getElementById('jobs-ats-badge');
+    if(d.count>0){ b.textContent=d.count; b.style.display='inline-block'; } else { b.style.display='none'; }
+  }catch(e){}
+}
+async function openResumeModal(){
+  document.getElementById('resume-modal').style.display='flex';
+  try{ const d=await (await fetch('/resume')).json(); document.getElementById('resume-text').value=d.content||''; }catch(e){}
+}
+function closeResume(){ document.getElementById('resume-modal').style.display='none'; }
+async function saveResume(){
+  const content=document.getElementById('resume-text').value.trim();
+  if(!content){ alert('Paste your résumé text first.'); return; }
+  const r=await fetch('/resume/upload',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content})});
+  const d=await r.json();
+  if(d.ok){ closeResume(); alert('✅ Résumé saved. ATS analysis is ready to use.'); } else { alert('Save failed.'); }
+}
+async function updateApp(id,status){
+  await fetch('/applications/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,status})});
+  loadApplications();
+}
+async function removeApp(id){
+  if(!confirm('Remove this application?')) return;
+  await fetch('/applications/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  loadApplications();
 }
 
 window.addEventListener('message', (event) => {
