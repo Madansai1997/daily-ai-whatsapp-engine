@@ -105,7 +105,7 @@ export default function App() {
             className="w-full flex-1 flex flex-col justify-start"
           >
             {activeScreen === ScreenId.Core && (
-              <CoreInterface onNavigate={handleNavigate} />
+              <CoreInterface onNavigate={handleNavigate} onOpenNotifications={() => setIsNotificationsOpen(true)} />
             )}
             {activeScreen === ScreenId.Assistant && (
               <SecureChat />

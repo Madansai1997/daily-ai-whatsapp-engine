@@ -1,23 +1,45 @@
 import React, { useState, useEffect } from "react";
-import { ScreenId, SystemLog } from "../types";
+import { ScreenId } from "../types";
 import { motion } from "motion/react";
 import { ZoomIn, RotateCw, ShieldCheck, MessageSquare, Terminal as TerminalIcon, FileText, Bolt } from "lucide-react";
 
 interface CoreInterfaceProps {
   onNavigate: (screen: ScreenId) => void;
+  onOpenNotifications?: () => void;
 }
 
 // Real system-status signal: null = probing/unknown, true = ONLINE, false = OFFLINE
 type OnlineStatus = boolean | null;
 
-export default function CoreInterface({ onNavigate }: CoreInterfaceProps) {
-  const [uptimeSec, setUptimeSec] = useState(513125); // ~142h 32m 05s
-  const [synapticLoad, setSynapticLoad] = useState(42);
+// A real job-log row from GET /api/job-logs
+interface JobLog {
+  id: number;
+  job_name: string;
+  status: string;
+  message: string;
+  created_at: string;
+}
 
+// Real system metrics from GET /api/system-metrics
+interface SystemMetrics {
+  memory: { rss_mb: number; limit_mb: number; pct: number; status: string };
+  uptime: string;
+  uptime_seconds: number;
+  errors_24h: number;
+  backlog: { total: number; reminders: number; automations: number; queue: number; ats_pending: number };
+  agents: number;
+  patterns_learned: number;
+  db: string;
+  scheduler_mode: string;
+}
+
+export default function CoreInterface({ onNavigate, onOpenNotifications }: CoreInterfaceProps) {
   // REAL signals from the backend (same-origin, absolute-from-root paths)
   const [online, setOnline] = useState<OnlineStatus>(null);
   const [trackedRoles, setTrackedRoles] = useState<number | null>(null);
   const [pendingAnalyses, setPendingAnalyses] = useState<number | null>(null);
+  const [logs, setLogs] = useState<JobLog[] | null>(null);
+  const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
 
   // SYSTEM ONLINE indicator: probe /ping on mount and every ~15s
   useEffect(() => {
@@ -76,41 +98,63 @@ export default function CoreInterface({ onNavigate }: CoreInterfaceProps) {
     };
   }, []);
 
-  // System Uptime counter
+  // SYSTEM LOGS: GET /api/job-logs -> [{ job_name, status, message, created_at }]
+  // Refresh on mount and every ~20s so the Core widget mirrors real activity.
   useEffect(() => {
-    const timer = setInterval(() => {
-      setUptimeSec((prev) => prev + 1);
-    }, 1000);
-    return () => clearInterval(timer);
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch("/api/job-logs?limit=8", { cache: "no-store" });
+        if (!res.ok) return;
+        const data: unknown = await res.json();
+        if (!cancelled && Array.isArray(data)) setLogs(data as JobLog[]);
+      } catch {
+        /* leave prior logs / neutral state */
+      }
+    };
+    load();
+    const timer = setInterval(load, 20000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, []);
 
-  // Soft fluctuations for synaptic load
+  // SYSTEM METRICS: GET /api/system-metrics -> real memory / backlog / errors / uptime
   useEffect(() => {
-    const interval = setInterval(() => {
-      setSynapticLoad((prev) => {
-        const delta = Math.floor(Math.random() * 5) - 2;
-        const next = prev + delta;
-        return next >= 35 && next <= 50 ? next : prev;
-      });
-    }, 3000);
-    return () => clearInterval(interval);
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch("/api/system-metrics", { cache: "no-store" });
+        if (!res.ok) return;
+        const data: unknown = await res.json();
+        if (!cancelled && data && typeof data === "object") setMetrics(data as SystemMetrics);
+      } catch {
+        /* leave prior metrics / neutral state */
+      }
+    };
+    load();
+    const timer = setInterval(load, 20000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, []);
 
-  const formatUptime = (totalSeconds: number) => {
-    const hrs = Math.floor(totalSeconds / 3600);
-    const mins = Math.floor((totalSeconds % 3600) / 60);
-    const secs = totalSeconds % 60;
-    return `${hrs.toString().padStart(3, "0")}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+  // Format a job-log row for the HUD list.
+  const logTime = (iso: string) => {
+    const d = new Date(iso.includes("T") ? iso : iso.replace(" ", "T"));
+    if (isNaN(d.getTime())) return "--:--";
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
   };
-
-  const initialLogs: SystemLog[] = [
-    { id: "1", time: "14:22", tag: "SEC_INIT", content: "Handshake protocol Alpha-9 verified.", colorClass: "text-[#8aebff]" },
-    { id: "2", time: "14:18", tag: "WARN_RES", content: "Memory leak detected in sector 4.", colorClass: "text-[#ffd6a3]" },
-    { id: "3", time: "14:15", tag: "SYS_UP", content: "Global cluster re-sync complete.", colorClass: "text-[#8aebff]" },
-    { id: "4", time: "13:58", tag: "DB_SYNC", content: "Archive backup scheduled.", colorClass: "text-[#bbc9cd]" },
-    { id: "5", time: "13:42", tag: "SYS_INIT", content: "Mainframe cluster connection verified.", colorClass: "text-[#8aebff]" },
-    { id: "6", time: "13:30", tag: "SEC_ENC", content: "AES-256 handshake established securely.", colorClass: "text-[#bbc9cd]" },
-  ];
+  const logTag = (jobName: string) => (jobName || "job").toUpperCase().slice(0, 12);
+  const logColor = (status: string) => {
+    const s = (status || "").toLowerCase();
+    if (s.includes("error") || s.includes("fail")) return "text-[#ffb4ab]";
+    if (s.includes("run") || s.includes("start") || s.includes("pending")) return "text-[#ffd6a3]";
+    if (s.includes("success") || s.includes("ok") || s.includes("done") || s.includes("complete")) return "text-[#5eead4]";
+    return "text-[#8aebff]";
+  };
 
   return (
     <motion.div
@@ -127,7 +171,7 @@ export default function CoreInterface({ onNavigate }: CoreInterfaceProps) {
             AUTHORIZATION GRANTED
           </span>
           <h2 className="text-4xl md:text-5xl font-extrabold tracking-tighter text-[#dfe2f3] leading-none mb-3">
-            Welcome back, User_01.
+            Welcome back, Madan.
           </h2>
           <p className="text-sm md:text-base text-[#bbc9cd] max-w-xl leading-relaxed">
             Neural link established. JARVIS core protocols are operating at 98.4% efficiency. All secondary sub-systems remain encrypted.
@@ -157,14 +201,14 @@ export default function CoreInterface({ onNavigate }: CoreInterfaceProps) {
           <div className="text-right">
             <span className="text-[10px] font-mono text-[#859397] block tracking-wider">UPTIME</span>
             <span className="text-xl md:text-2xl font-bold text-[#8aebff] font-mono glow-cyan">
-              {formatUptime(uptimeSec)}
+              {metrics?.uptime ?? "—"}
             </span>
           </div>
           <div className="w-[1px] h-10 bg-[#3c494c]"></div>
           <div className="text-right">
-            <span className="text-[10px] font-mono text-[#859397] block tracking-wider">LOCATION</span>
+            <span className="text-[10px] font-mono text-[#859397] block tracking-wider">AGENTS</span>
             <span className="text-xl md:text-2xl font-bold text-[#dfe2f3] font-mono">
-              NODE_ALPHA_7
+              {metrics?.agents ?? "—"}
             </span>
           </div>
         </div>
@@ -222,12 +266,16 @@ export default function CoreInterface({ onNavigate }: CoreInterfaceProps) {
                   <div className="w-12 h-1 bg-[#8aebff]/50"></div>
                 </div>
                 <p className="text-[10px] font-mono text-[#859397] uppercase tracking-widest">
-                  SYNAPTIC LOAD: {synapticLoad}%
+                  MEMORY LOAD: {metrics ? `${metrics.memory.pct}%` : "—"}
                 </p>
               </div>
               <div className="text-right font-mono">
-                <span className="text-xs text-[#8aebff] block tracking-wider">LATENCY: 0.2ms</span>
-                <span className="text-[10px] text-[#859397]">PACKET LOSS: 0.00%</span>
+                <span className="text-xs text-[#8aebff] block tracking-wider">
+                  DB: {metrics ? metrics.db.toUpperCase() : "—"}
+                </span>
+                <span className="text-[10px] text-[#859397]">
+                  PATTERNS LEARNED: {metrics?.patterns_learned ?? "—"}
+                </span>
               </div>
             </div>
           </div>
@@ -270,33 +318,51 @@ export default function CoreInterface({ onNavigate }: CoreInterfaceProps) {
             </div>
 
             <div className="space-y-4 font-mono text-xs">
+              {/* MEMORY — real RSS vs the 512MB Render cap */}
               <div className="space-y-1">
                 <div className="flex justify-between">
-                  <span className="text-[#bbc9cd]">CORE TEMP</span>
-                  <span className="text-[#8aebff] font-bold">38°C</span>
+                  <span className="text-[#bbc9cd]">MEMORY</span>
+                  <span className={`font-bold ${metrics && metrics.memory.status !== "ok" ? "text-[#ffb4ab]" : "text-[#8aebff]"}`}>
+                    {metrics ? `${Math.round(metrics.memory.rss_mb)} / ${Math.round(metrics.memory.limit_mb)} MB` : "—"}
+                  </span>
                 </div>
                 <div className="w-full bg-[#313442] h-1.5 rounded-full overflow-hidden">
-                  <div className="bg-[#8aebff] h-full w-[38%] shadow-[0_0_8px_rgba(138,235,255,0.4)]"></div>
+                  <div
+                    className={`h-full transition-all duration-500 ${metrics && metrics.memory.status !== "ok" ? "bg-[#ffb4ab]" : "bg-[#8aebff]"} shadow-[0_0_8px_rgba(138,235,255,0.4)]`}
+                    style={{ width: `${metrics ? metrics.memory.pct : 0}%` }}
+                  ></div>
                 </div>
               </div>
 
+              {/* BACKLOG — pending reminders + automations + queue + unviewed ATS */}
               <div className="space-y-1">
                 <div className="flex justify-between">
-                  <span className="text-[#bbc9cd]">POWER FLUX</span>
-                  <span className="text-[#ffd6a3] font-bold">1.21 GW</span>
+                  <span className="text-[#bbc9cd]">BACKLOG</span>
+                  <span className="text-[#ffd6a3] font-bold">
+                    {metrics ? `${metrics.backlog.total} item${metrics.backlog.total === 1 ? "" : "s"}` : "—"}
+                  </span>
                 </div>
                 <div className="w-full bg-[#313442] h-1.5 rounded-full overflow-hidden">
-                  <div className="bg-[#ffd6a3] h-full w-[72%] shadow-[0_0_8px_rgba(255,214,163,0.4)]"></div>
+                  <div
+                    className="bg-[#ffd6a3] h-full transition-all duration-500 shadow-[0_0_8px_rgba(255,214,163,0.4)]"
+                    style={{ width: `${metrics ? Math.min(100, metrics.backlog.total * 10) : 0}%` }}
+                  ></div>
                 </div>
               </div>
 
+              {/* ERRORS — job failures in the last 24h */}
               <div className="space-y-1">
                 <div className="flex justify-between">
-                  <span className="text-[#bbc9cd]">SIGNAL DECOY</span>
-                  <span className="text-[#8aebff] font-bold">99.9%</span>
+                  <span className="text-[#bbc9cd]">ERRORS (24H)</span>
+                  <span className={`font-bold ${metrics && metrics.errors_24h > 0 ? "text-[#ffb4ab]" : "text-[#5eead4]"}`}>
+                    {metrics ? metrics.errors_24h : "—"}
+                  </span>
                 </div>
                 <div className="w-full bg-[#313442] h-1.5 rounded-full overflow-hidden">
-                  <div className="bg-[#8aebff] h-full w-[99.9%] shadow-[0_0_8px_rgba(138,235,255,0.4)]"></div>
+                  <div
+                    className={`h-full transition-all duration-500 ${metrics && metrics.errors_24h > 0 ? "bg-[#ffb4ab]" : "bg-[#5eead4]"}`}
+                    style={{ width: `${metrics ? (metrics.errors_24h > 0 ? Math.min(100, metrics.errors_24h * 20) : 100) : 0}%` }}
+                  ></div>
                 </div>
               </div>
             </div>
@@ -308,20 +374,29 @@ export default function CoreInterface({ onNavigate }: CoreInterfaceProps) {
               <span className="text-[10px] font-semibold font-mono text-[#859397] tracking-widest uppercase">
                 SYSTEM LOGS
               </span>
-              <span className="text-[11px] font-mono text-[#8aebff] cursor-pointer hover:underline">
+              <span
+                onClick={() => onOpenNotifications?.()}
+                className="text-[11px] font-mono text-[#8aebff] cursor-pointer hover:underline"
+              >
                 View All
               </span>
             </div>
             <div className="space-y-3 font-mono text-[11px] flex-1 overflow-y-auto max-h-[170px] pr-1 custom-scrollbar">
-              {initialLogs.map((log) => (
-                <div key={log.id} className="flex gap-2 items-start leading-snug">
-                  <span className="text-[#859397] shrink-0">{log.time}</span>
-                  <span className={`${log.colorClass} font-semibold shrink-0`}>{log.tag}</span>
-                  <span className="text-[#bbc9cd] truncate" title={log.content}>
-                    {log.content}
-                  </span>
-                </div>
-              ))}
+              {logs === null ? (
+                <div className="text-[#859397] text-center py-6">Loading activity…</div>
+              ) : logs.length === 0 ? (
+                <div className="text-[#859397] text-center py-6">No system activity logged yet.</div>
+              ) : (
+                logs.map((log) => (
+                  <div key={log.id} className="flex gap-2 items-start leading-snug">
+                    <span className="text-[#859397] shrink-0">{logTime(log.created_at)}</span>
+                    <span className={`${logColor(log.status)} font-semibold shrink-0`}>{logTag(log.job_name)}</span>
+                    <span className="text-[#bbc9cd] truncate" title={log.message}>
+                      {log.message}
+                    </span>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </div>

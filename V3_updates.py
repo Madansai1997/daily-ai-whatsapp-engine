@@ -17,6 +17,7 @@ if SAFE_MODE:
 import db_compat as aiosqlite
 import asyncio
 import json
+import threading
 import random
 import requests
 import subprocess
@@ -121,13 +122,15 @@ from resume_ats_agent import (
 )
 from pdf_import import extract_pdf_text
 try:
-    from weather_agent import get_weather, get_weather_brief
+    from weather_agent import get_weather, get_weather_brief, get_weather_data
 except Exception as e:
     print(f"❌ weather_agent import failed: {e}")
     async def get_weather(call_llm_fn=None):
         return "⚠️ Weather agent not available."
     async def get_weather_brief():
         return "Weather unavailable"
+    async def get_weather_data():
+        return {}
 
 # Core Credentials
 TWILIO_SID = os.getenv("TWILIO_SID")
@@ -522,6 +525,22 @@ def init_db_tables():
         status TEXT DEFAULT 'active',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
+    # Every outbound alert JARVIS produces is persisted here (the in-app inbox).
+    # This is what used to go only to WhatsApp; now the web UI owns the history.
+    cursor.execute('''CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        body TEXT NOT NULL,
+        category TEXT DEFAULT 'general',
+        read INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+    # Browser Web Push subscriptions (one row per device/browser that opted in).
+    cursor.execute('''CREATE TABLE IF NOT EXISTS push_subscriptions (
+        endpoint TEXT PRIMARY KEY,
+        p256dh TEXT NOT NULL,
+        auth TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
     conn.commit()
     conn.close()
     print("✅ State Engine: All database tables verified and ready.")
@@ -753,12 +772,107 @@ def _split_message(text: str, limit: int = 1500) -> list[str]:
     return parts
 
 
+# ── Web Push (VAPID) ─────────────────────────────────────────────────────────
+VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY", "").strip()
+VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "").replace("\\n", "\n").strip()
+VAPID_SUB = os.environ.get("VAPID_SUB", "mailto:madansai97@gmail.com").strip()
+_PUSH_ENABLED = bool(VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY)
+
+try:
+    from pywebpush import webpush, WebPushException
+    from py_vapid import Vapid01
+    _VAPID_OBJ = Vapid01.from_pem(VAPID_PRIVATE_KEY.encode()) if _PUSH_ENABLED else None
+    if _PUSH_ENABLED:
+        print("✅ Web Push enabled (VAPID loaded).")
+    else:
+        print("ℹ️ Web Push disabled — VAPID keys not set.")
+except Exception as e:
+    print(f"⚠️ Web Push unavailable: {e}")
+    _PUSH_ENABLED = False
+    _VAPID_OBJ = None
+
+
+def _push_all_sync(body: str):
+    """Send a push to every stored subscription. Runs in a daemon thread so the
+    outbound HTTP to the push service never blocks the caller/event loop. Expired
+    subscriptions (404/410) are pruned."""
+    if not _PUSH_ENABLED:
+        return
+    try:
+        conn = _get_db_conn()
+        subs = conn.execute("SELECT endpoint, p256dh, auth FROM push_subscriptions").fetchall()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ push: failed to read subscriptions: {e}")
+        return
+
+    payload = json.dumps({"title": "JARVIS", "body": body[:400]})
+    dead = []
+    for s in subs:
+        sub_info = {"endpoint": s["endpoint"], "keys": {"p256dh": s["p256dh"], "auth": s["auth"]}}
+        try:
+            webpush(
+                subscription_info=sub_info,
+                data=payload,
+                vapid_private_key=_VAPID_OBJ,
+                vapid_claims={"sub": VAPID_SUB},
+                timeout=10,
+            )
+        except WebPushException as e:
+            code = getattr(e.response, "status_code", None)
+            if code in (404, 410):
+                dead.append(s["endpoint"])
+            else:
+                print(f"⚠️ push send failed ({code}): {e}")
+        except Exception as e:
+            print(f"⚠️ push send error: {e}")
+
+    if dead:
+        try:
+            conn = _get_db_conn()
+            conn.executemany("DELETE FROM push_subscriptions WHERE endpoint = ?", [(e,) for e in dead])
+            conn.commit()
+            conn.close()
+            print(f"🧹 push: pruned {len(dead)} expired subscription(s).")
+        except Exception as e:
+            print(f"⚠️ push: prune failed: {e}")
+
+
+def _send_push(body: str):
+    if _PUSH_ENABLED:
+        threading.Thread(target=_push_all_sync, args=(body,), daemon=True).start()
+
+
+def _store_notification(body: str, category: str = "general"):
+    """Persist an outbound alert to the in-app JARVIS notification inbox, then push it
+    to any subscribed browsers/devices (fire-and-forget, non-blocking)."""
+    try:
+        conn = _get_db_conn()
+        conn.execute("INSERT INTO notifications (body, category) VALUES (?, ?)", (body, category))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ _store_notification error: {e}")
+    _send_push(body)
+
+
+def whatsapp_enabled() -> bool:
+    """WhatsApp delivery kill-switch. Default ON until Web Push is verified; set the
+    'whatsapp_enabled' setting to '0' to route every alert to JARVIS (web) only."""
+    return str(get_setting("whatsapp_enabled", "1")).strip() in ("1", "true", "on", "yes")
+
+
 def send_whatsapp_chunked(body: str, to_number: str = None, from_number: str = None):
-    """Send a WhatsApp message, splitting into chunks if over 1500 chars."""
+    """Deliver an alert. It is ALWAYS stored in the JARVIS notification inbox (the web app
+    owns the history now); it is additionally sent to WhatsApp only while whatsapp_enabled
+    is on. This single choke point neutralizes every send path in one place."""
     import time
+    _store_notification(body)
     if SAFE_MODE:
-        # Single choke point for every send path — suppress real Twilio traffic in tests.
         print(f"🧪 SAFE_MODE: WhatsApp send suppressed ({len(body)} chars): {body[:80]!r}")
+        return
+    if not whatsapp_enabled():
+        print(f"📵 WhatsApp off — alert stored in JARVIS inbox only ({len(body)} chars).")
         return
     MAX_CHARS = 1500
     to_number = to_number or TO_WHATSAPP
@@ -6495,6 +6609,170 @@ async def api_job_logs_clear():
         await db.commit()
     return JSONResponse({"ok": True})
 
+
+# ── In-app notifications (the JARVIS inbox that replaces WhatsApp) ────────────
+@app.get("/api/notifications")
+async def api_notifications(limit: int = 50):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, body, category, read, created_at FROM notifications ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+        async with db.execute("SELECT COUNT(*) FROM notifications WHERE read = 0") as cur:
+            unread = (await cur.fetchone())[0]
+    return JSONResponse({"notifications": rows, "unread": unread})
+
+
+@app.get("/api/notifications/unread-count")
+async def api_notifications_unread():
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM notifications WHERE read = 0") as cur:
+            unread = (await cur.fetchone())[0]
+    return JSONResponse({"unread": unread})
+
+
+@app.post("/api/notifications/read")
+async def api_notifications_read(request: Request):
+    body = await request.json()
+    nid = body.get("id")
+    async with aiosqlite.connect(DB_PATH) as db:
+        if nid:
+            await db.execute("UPDATE notifications SET read = 1 WHERE id = ?", (nid,))
+        else:
+            await db.execute("UPDATE notifications SET read = 1 WHERE read = 0")
+        await db.commit()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/notifications/clear")
+async def api_notifications_clear():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM notifications")
+        await db.commit()
+    return JSONResponse({"ok": True})
+
+
+# ── Web Push subscription endpoints ──────────────────────────────────────────
+@app.get("/api/push/vapid-public-key")
+async def api_vapid_public_key():
+    return JSONResponse({"key": VAPID_PUBLIC_KEY, "enabled": _PUSH_ENABLED})
+
+
+@app.post("/api/push/subscribe")
+async def api_push_subscribe(request: Request):
+    sub = await request.json()
+    endpoint = sub.get("endpoint")
+    keys = sub.get("keys") or {}
+    p256dh, auth = keys.get("p256dh"), keys.get("auth")
+    if not (endpoint and p256dh and auth):
+        return JSONResponse({"ok": False, "error": "invalid subscription"}, status_code=400)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO push_subscriptions (endpoint, p256dh, auth) VALUES (?, ?, ?)",
+            (endpoint, p256dh, auth),
+        )
+        await db.commit()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/push/unsubscribe")
+async def api_push_unsubscribe(request: Request):
+    body = await request.json()
+    endpoint = body.get("endpoint")
+    if endpoint:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
+            await db.commit()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/push/test")
+async def api_push_test():
+    """Fire a test notification through the full store+push path."""
+    _store_notification("🔔 Test notification from JARVIS — Web Push is working.", category="test")
+    return JSONResponse({"ok": True, "push_enabled": _PUSH_ENABLED})
+
+
+# Real system metrics for the Core HUD — replaces the old decorative gauges.
+# Every number here is derived from live process/DB state (no fake telemetry).
+_AGENT_MODULES = [
+    "job_scout_agent", "application_tracker", "resume_ats_agent",
+    "calendar_agent", "weather_agent", "pattern_learning",
+]
+MEM_LIMIT_MB = float(os.environ.get("MEM_LIMIT_MB", "512"))  # Render free tier
+
+
+async def _count(db, sql: str, params: tuple = ()) -> int:
+    try:
+        async with db.execute(sql, params) as cur:
+            row = await cur.fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+    except Exception:
+        return 0
+
+
+# Weather is cached for 10 min so the every-20s metrics poll doesn't hammer Open-Meteo.
+_weather_cache = {"data": {}, "ts": 0.0}
+
+
+async def _get_weather_cached() -> dict:
+    now = time.time()
+    if _weather_cache["data"] and (now - _weather_cache["ts"]) < 600:
+        return _weather_cache["data"]
+    data = await get_weather_data()
+    if data:
+        _weather_cache["data"] = data
+        _weather_cache["ts"] = now
+    return _weather_cache["data"] or {}
+
+
+@app.get("/api/system-metrics")
+async def api_system_metrics():
+    rss = _rss_mb()
+    mem_pct = round(min(100.0, max(0.0, (rss / MEM_LIMIT_MB) * 100))) if rss > 0 else 0
+    threshold = float(get_setting("mem_alert_threshold_mb", str(DEFAULT_MEM_ALERT_MB)))
+
+    reminders = automations = queue = ats_pending = patterns = errors_24h = 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        reminders = await _count(db, "SELECT COUNT(*) FROM reminders WHERE status='active'")
+        automations = await _count(db, "SELECT COUNT(*) FROM scheduled_automations WHERE status='active'")
+        queue = await _count(db, "SELECT COUNT(*) FROM local_command_queue WHERE status='pending'")
+        ats_pending = await _count(db, "SELECT COUNT(*) FROM ats_analysis_cache WHERE viewed = 0")
+        patterns = await _count(db, "SELECT COUNT(*) FROM learned_patterns")
+        errors_24h = await _count(
+            db,
+            "SELECT COUNT(*) FROM job_logs WHERE (LOWER(status) LIKE '%error%' OR LOWER(status) LIKE '%fail%') "
+            "AND created_at >= datetime('now', '-1 day')",
+        )
+
+    backlog_total = reminders + automations + queue + ats_pending
+
+    return JSONResponse({
+        "memory": {
+            "rss_mb": round(rss, 1),
+            "limit_mb": MEM_LIMIT_MB,
+            "pct": mem_pct,
+            "status": "ok" if rss < threshold else "high",
+        },
+        "uptime": _uptime_str(),
+        "uptime_seconds": int(time.time() - APP_START_TIME),
+        "errors_24h": errors_24h,
+        "backlog": {
+            "total": backlog_total,
+            "reminders": reminders,
+            "automations": automations,
+            "queue": queue,
+            "ats_pending": ats_pending,
+        },
+        "agents": len(_AGENT_MODULES),
+        "patterns_learned": patterns,
+        "db": _db_status(),
+        "scheduler_mode": SCHEDULER_MODE,
+        "weather": await _get_weather_cached(),
+    })
+
 @app.post("/api/run-job")
 async def api_run_job(request: Request):
     body = await request.json()
@@ -6618,7 +6896,45 @@ async def api_search(q: str = ""):
                     })
         except Exception as e:
             print(f"Search job logs error: {e}")
-            
+
+        # 6. Search Matched Jobs (Job Scout results)
+        try:
+            async with db.execute(
+                "SELECT title, company, location, score, status FROM matched_jobs "
+                "WHERE title LIKE ? OR company LIKE ? OR location LIKE ? OR why LIKE ? "
+                "ORDER BY score DESC LIMIT 5",
+                (like_pat, like_pat, like_pat, like_pat)
+            ) as cur:
+                for r in await cur.fetchall():
+                    results.append({
+                        "category": "Matched Jobs",
+                        "title": f"{r['title']} at {r['company']}",
+                        "subtitle": f"{r['location']} — Match {r['score']}/100 — {r['status']}",
+                        "target": "jobs",
+                        "meta": {}
+                    })
+        except Exception as e:
+            print(f"Search matched jobs error: {e}")
+
+        # 7. Search ATS Analyses
+        try:
+            async with db.execute(
+                "SELECT job_ref, job_title, company, ats_score FROM ats_analysis_cache "
+                "WHERE job_title LIKE ? OR company LIKE ? OR job_ref LIKE ? "
+                "ORDER BY created_at DESC LIMIT 5",
+                (like_pat, like_pat, like_pat)
+            ) as cur:
+                for r in await cur.fetchall():
+                    results.append({
+                        "category": "ATS Analyses",
+                        "title": f"{r['job_title']} at {r['company']}",
+                        "subtitle": f"ATS Score {r['ats_score']}/100 — ref {r['job_ref']}",
+                        "target": "jobs",
+                        "meta": {"job_ref": r["job_ref"]}
+                    })
+        except Exception as e:
+            print(f"Search ATS analyses error: {e}")
+
     return JSONResponse({"results": results})
 
 

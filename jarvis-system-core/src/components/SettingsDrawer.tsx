@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { motion } from "motion/react";
-import { X, Save, Check, Loader2, Key, Info, HelpCircle } from "lucide-react";
+import { X, Save, Check, Loader2, Info, BellRing } from "lucide-react";
+import { enablePush, sendTestPush, pushPermission, pushSupported } from "../lib/push";
 
 interface SettingsDrawerProps {
   onClose: () => void;
@@ -11,6 +12,34 @@ export default function SettingsDrawer({ onClose }: SettingsDrawerProps) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saved">("idle");
+
+  const [pushPerm, setPushPerm] = useState<string>(pushPermission());
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushMsg, setPushMsg] = useState("");
+
+  const handleEnablePush = async () => {
+    setPushBusy(true);
+    setPushMsg("");
+    try {
+      const r = await enablePush();
+      setPushMsg(r.message);
+    } catch {
+      setPushMsg("Something went wrong enabling notifications.");
+    } finally {
+      setPushPerm(pushPermission());
+      setPushBusy(false);
+    }
+  };
+
+  const handleTestPush = async () => {
+    setPushMsg("");
+    try {
+      await sendTestPush();
+      setPushMsg("Test sent — you should see a notification shortly.");
+    } catch {
+      setPushMsg("Couldn't send the test.");
+    }
+  };
 
   // Load settings on mount
   useEffect(() => {
@@ -120,8 +149,25 @@ export default function SettingsDrawer({ onClose }: SettingsDrawerProps) {
               {/* WhatsApp Automation */}
               <div className="space-y-3">
                 <h4 className="text-xs font-bold tracking-widest text-[#8aebff] uppercase font-mono">
-                  2. Telegram / WhatsApp Automation
+                  2. Notification Delivery
                 </h4>
+                <div className="flex justify-between items-center bg-[#1b1f2c]/50 p-3 rounded border border-white/5">
+                  <div className="pr-3">
+                    <span className="font-mono text-xs font-bold block">Send alerts to WhatsApp</span>
+                    <span className="text-[11px] text-[#859397]">
+                      Off = every alert goes to the JARVIS inbox only (no Twilio). Alerts are always saved here regardless.
+                    </span>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                    <input
+                      type="checkbox"
+                      checked={settings.whatsapp_enabled !== "false" && settings.whatsapp_enabled !== "0"}
+                      onChange={(e) => handleChange("whatsapp_enabled", e.target.checked ? "true" : "false")}
+                      className="sr-only peer"
+                    />
+                    <div className="w-9 h-5 bg-[#3c494c] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[#5eead4]"></div>
+                  </label>
+                </div>
                 <div className="flex justify-between items-center bg-[#1b1f2c]/50 p-3 rounded border border-white/5">
                   <div>
                     <span className="font-mono text-xs font-bold block">WhatsApp Auto-Reply</span>
@@ -179,6 +225,49 @@ export default function SettingsDrawer({ onClose }: SettingsDrawerProps) {
                     />
                     <div className="w-9 h-5 bg-[#3c494c] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[#5eead4]"></div>
                   </label>
+                </div>
+              </div>
+
+              {/* Push Notifications */}
+              <div className="space-y-3">
+                <h4 className="text-xs font-bold tracking-widest text-[#8aebff] uppercase font-mono flex items-center gap-1.5">
+                  <BellRing className="w-3.5 h-3.5" /> 5. Push Notifications
+                </h4>
+                <div className="bg-[#1b1f2c]/50 p-3 rounded border border-white/5 space-y-3">
+                  <p className="text-[11px] text-[#859397] leading-relaxed">
+                    Get JARVIS alerts on this device even with the app closed — the WhatsApp replacement.
+                    Enable once per device/browser.
+                  </p>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-mono">
+                      Status:{" "}
+                      <span className={
+                        pushPerm === "granted" ? "text-[#5eead4]" :
+                        pushPerm === "denied" ? "text-[#ff6b6b]" : "text-[#ffd6a3]"
+                      }>
+                        {!pushSupported() ? "UNSUPPORTED" : pushPerm.toUpperCase()}
+                      </span>
+                    </span>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleEnablePush}
+                        disabled={pushBusy || !pushSupported()}
+                        className="flex items-center gap-1.5 bg-[#8aebff]/10 border border-[#8aebff]/30 text-[#8aebff] hover:bg-[#8aebff] hover:text-[#00363e] font-mono text-[11px] font-bold px-3 py-1.5 rounded cursor-pointer disabled:opacity-40 transition-all"
+                      >
+                        {pushBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <BellRing className="w-3.5 h-3.5" />}
+                        {pushPerm === "granted" ? "Re-enable" : "Enable"}
+                      </button>
+                      {pushPerm === "granted" && (
+                        <button
+                          onClick={handleTestPush}
+                          className="bg-white/5 border border-white/10 text-[#bbc9cd] hover:text-white font-mono text-[11px] px-3 py-1.5 rounded cursor-pointer transition-all"
+                        >
+                          Test
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {pushMsg && <p className="text-[10px] font-mono text-[#5eead4]">● {pushMsg}</p>}
                 </div>
               </div>
 

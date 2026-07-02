@@ -12,3 +12,4 @@ aiosqlite
 google-api-python-client
 google-auth
 pdfplumber
+pywebpush

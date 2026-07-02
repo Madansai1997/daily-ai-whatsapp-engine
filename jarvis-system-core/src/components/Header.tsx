@@ -10,34 +10,93 @@ interface HeaderProps {
   onOpenNotifications: () => void;
 }
 
-export default function Header({ 
-  activeScreen, 
+interface Weather {
+  location: string;
+  temp_c: number;
+  condition: string;
+  emoji: string;
+  windspeed: number;
+}
+
+export default function Header({
+  activeScreen,
   onNavigate,
   onOpenSearch,
   onOpenSettings,
   onOpenNotifications
 }: HeaderProps) {
-  const [temperature, setTemperature] = useState(38);
+  const [weather, setWeather] = useState<Weather | null>(null);
+  const [memPct, setMemPct] = useState<number | null>(null);
+  const [unread, setUnread] = useState(0);
 
-  // Fluctuating temperature to simulate live system telemetry
+  // Pull real weather (Hyderabad) + memory usage + unread notification count.
   useEffect(() => {
-    const interval = setInterval(() => {
-      const offset = Math.random() > 0.5 ? 1 : -1;
-      setTemperature((prev) => {
-        const next = prev + offset;
-        return next >= 36 && next <= 40 ? next : prev;
-      });
-    }, 6000);
-    return () => clearInterval(interval);
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const [mRes, nRes] = await Promise.all([
+          fetch("/api/system-metrics", { cache: "no-store" }),
+          fetch("/api/notifications/unread-count", { cache: "no-store" }),
+        ]);
+        if (cancelled) return;
+        if (mRes.ok) {
+          const data = await mRes.json();
+          if (data?.weather && typeof data.weather.temp_c === "number") setWeather(data.weather);
+          if (typeof data?.memory?.pct === "number") setMemPct(data.memory.pct);
+        }
+        if (nRes.ok) {
+          const nd = await nRes.json();
+          if (typeof nd?.unread === "number") setUnread(nd.unread);
+        }
+      } catch {
+        /* leave neutral */
+      }
+    };
+    load();
+    const timer = setInterval(load, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, []);
 
   return (
     <header className="fixed top-0 left-0 w-full z-50 bg-[#0f131f]/40 backdrop-blur-md border-b border-white/10 h-16">
       <div className="flex justify-between items-center w-full px-8 max-w-full mx-auto h-full">
         <div className="flex items-center gap-8">
-          <h1 className="text-2xl font-bold tracking-tighter text-[#8aebff] font-mono glow-cyan">
-            {temperature}°C
-          </h1>
+          {/* Real Hyderabad weather + live memory usage */}
+          <div className="flex items-center gap-4">
+            <div
+              className="flex items-center gap-1.5"
+              title={weather ? `${weather.condition} · ${weather.location} · wind ${weather.windspeed} km/h` : "Fetching weather…"}
+            >
+              <span className="text-xl leading-none">{weather?.emoji || "🌡️"}</span>
+              <div className="leading-tight">
+                <span className="block text-lg font-bold tracking-tight text-[#8aebff] font-mono glow-cyan">
+                  {weather ? `${weather.temp_c}°C` : "—"}
+                </span>
+                <span className="block text-[9px] font-mono text-[#859397] uppercase tracking-wider -mt-0.5">
+                  {weather ? weather.condition : "Hyderabad"}
+                </span>
+              </div>
+            </div>
+            <div className="hidden sm:block w-[1px] h-8 bg-[#3c494c]"></div>
+            <div
+              className="hidden sm:block leading-tight"
+              title="Engine memory usage (RSS vs 512MB cap)"
+            >
+              <span
+                className={`block text-lg font-bold tracking-tight font-mono ${
+                  memPct !== null && memPct >= 85 ? "text-[#ffb4ab]" : "text-[#dfe2f3]"
+                }`}
+              >
+                {memPct !== null ? `${memPct}%` : "—"}
+              </span>
+              <span className="block text-[9px] font-mono text-[#859397] uppercase tracking-wider -mt-0.5">
+                Memory
+              </span>
+            </div>
+          </div>
           <nav className="hidden md:flex items-center gap-8">
             <a
               href="#"
@@ -122,12 +181,17 @@ export default function Header({
             <span className="text-[13px] font-mono">Search protocols...</span>
           </button>
 
-          <button 
-            onClick={onOpenNotifications}
-            className="text-[#bbc9cd] hover:text-[#8aebff] transition-colors p-1 cursor-pointer" 
-            title="System Logs"
+          <button
+            onClick={() => { setUnread(0); onOpenNotifications(); }}
+            className="relative text-[#bbc9cd] hover:text-[#8aebff] transition-colors p-1 cursor-pointer"
+            title="Notifications"
           >
             <Bell className="w-5 h-5" />
+            {unread > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 flex items-center justify-center rounded-full bg-[#ffb4ab] text-[#0a0e1a] text-[9px] font-bold font-mono shadow-[0_0_8px_rgba(255,180,171,0.6)]">
+                {unread > 99 ? "99+" : unread}
+              </span>
+            )}
           </button>
           <button 
             onClick={onOpenSettings}
@@ -137,13 +201,12 @@ export default function Header({
             <Settings className="w-5 h-5" />
           </button>
 
-          {/* User profile picture */}
-          <div className="w-8 h-8 rounded-full border border-[#8aebff]/30 bg-[#1b1f2c] overflow-hidden">
-            <img
-              alt="User Profile"
-              className="w-full h-full object-cover"
-              src="https://lh3.googleusercontent.com/aida-public/AB6AXuDNBP3GhXQ5gqyG1y9bnWrvfGSbYpizT8JXGWFRxIGWx4ShIcBdZxDlREByTy_ihjQ3n__If2sSVlBBr-MrbwItikPOoojPkwvvuNtrrYRsueQf2GuwnCHY_eTNdATCmmPWKJiEW_OdNR7ZthmJyC6k9JTrTFZUffTuVXp3VWLxbgwROjjbt4ML1ohKOpFmxa-jNETDLiJj0fZdHKGyLvtkhi6uclYfCbJRR94BlpFt9f5LQRVpXv4Iu3hQ2c9JrY7MXfM9s-w9ljaT"
-            />
+          {/* User profile avatar — real initials, no external image */}
+          <div
+            title="Madan Sai Daram"
+            className="w-8 h-8 rounded-full border border-[#8aebff]/30 bg-[#1b1f2c] flex items-center justify-center text-[#8aebff] font-mono font-bold text-sm select-none glow-cyan"
+          >
+            M
           </div>
         </div>
       </div>

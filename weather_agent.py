@@ -135,6 +135,36 @@ async def get_weather(call_llm_fn=None) -> str:
         return "⚠️ Weather unavailable right now."
 
 
+async def get_weather_data() -> dict:
+    """Structured current weather for UI widgets (no LLM phrasing, no emoji walls).
+
+    Returns {location, temp_c, windspeed, weathercode, condition, emoji} or {} on failure.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(None, lambda: _fetch_weather_sync(False))
+        current = data["current_weather"]
+        code = current["weathercode"]
+        raw = WEATHER_CODES.get(code, "Unknown")
+        # Split the trailing emoji (if any) from the label, e.g. "Partly cloudy ⛅"
+        parts = raw.rsplit(" ", 1)
+        if len(parts) == 2 and not parts[1].isascii():
+            label, emoji = parts[0], parts[1]
+        else:
+            label, emoji = raw, ""
+        return {
+            "location": "Hyderabad",
+            "temp_c": round(current["temperature"]),
+            "windspeed": current["windspeed"],
+            "weathercode": code,
+            "condition": label,
+            "emoji": emoji,
+        }
+    except Exception as e:
+        print(f"⚠️ [weather_agent] get_weather_data failed: {e}")
+        return {}
+
+
 async def get_weather_brief() -> str:
     """Short one-liner for the daily briefing."""
     try:

@@ -14,8 +14,17 @@ interface LogEntry {
   created_at: string;
 }
 
+interface Notification {
+  id: number;
+  body: string;
+  category: string;
+  read: number;
+  created_at: string;
+}
+
 export default function NotificationsDrawer({ onClose }: NotificationsDrawerProps) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
   const [runningJob, setRunningJob] = useState<string | null>(null);
   const [jobFeedback, setJobFeedback] = useState<Record<string, string>>({});
@@ -35,8 +44,36 @@ export default function NotificationsDrawer({ onClose }: NotificationsDrawerProp
     }
   };
 
+  const loadNotifications = async () => {
+    try {
+      const res = await fetch("/api/notifications?limit=50");
+      if (res.ok) {
+        const data = await res.json();
+        setNotifications(data.notifications || []);
+      }
+    } catch (err) {
+      console.error("Failed to fetch notifications:", err);
+    }
+  };
+
+  // Mark everything read once the drawer is open (clears the Bell badge).
+  const markAllRead = async () => {
+    try {
+      await fetch("/api/notifications/read", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+    } catch {
+      /* non-fatal */
+    }
+  };
+
   useEffect(() => {
     loadLogs();
+    loadNotifications();
+    const t = setTimeout(markAllRead, 1200);
+    return () => clearTimeout(t);
   }, []);
 
   const handleClearLogs = async () => {
@@ -147,8 +184,41 @@ export default function NotificationsDrawer({ onClose }: NotificationsDrawerProp
           </div>
         </div>
 
-        {/* Content Tabs (Operations & Logs combined) */}
+        {/* Content Tabs (Notifications, Operations & Logs combined) */}
         <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-6">
+          {/* Notifications Section — the JARVIS inbox (alerts that used to hit WhatsApp) */}
+          <div className="space-y-3">
+            <h4 className="text-xs font-bold tracking-widest text-[#8aebff] uppercase font-mono border-b border-white/5 pb-1 flex justify-between items-center">
+              <span>Notifications</span>
+              {notifications.length > 0 && (
+                <span className="text-[10px] text-[#859397] lowercase font-normal">{notifications.length} total</span>
+              )}
+            </h4>
+            {notifications.length > 0 ? (
+              <div className="space-y-2 max-h-[280px] overflow-y-auto custom-scrollbar pr-1">
+                {notifications.map((n) => (
+                  <div
+                    key={n.id}
+                    className={`p-3 rounded-lg border flex gap-3 ${
+                      n.read ? "bg-[#1b1f2c]/20 border-white/5" : "bg-[#8aebff]/5 border-[#8aebff]/20"
+                    }`}
+                  >
+                    {!n.read && <span className="w-2 h-2 mt-1.5 rounded-full bg-[#8aebff] shrink-0 shadow-[0_0_6px_rgba(138,235,255,0.6)]"></span>}
+                    <div className={`flex-1 ${n.read ? "" : "-ml-0"}`}>
+                      <p className="text-[12px] text-[#dfe2f3] leading-relaxed whitespace-pre-wrap break-words">{n.body}</p>
+                      <div className="text-[9px] text-[#859397] font-mono mt-1">{n.created_at}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center py-8 text-center text-[#859397]">
+                <Bell className="w-7 h-7 text-[#8aebff]/30 mb-2" />
+                <p className="font-mono text-xs">No notifications yet.</p>
+              </div>
+            )}
+          </div>
+
           {/* Operations Section */}
           <div className="space-y-3">
             <h4 className="text-xs font-bold tracking-widest text-[#8aebff] uppercase font-mono border-b border-white/5 pb-1">
