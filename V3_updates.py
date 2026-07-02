@@ -6448,6 +6448,180 @@ async def privachat_ws_proxy(websocket: WebSocket, room_code: str, alias: str):
             pass
 
 
+# ── Search, Settings, and Job-Logs Console APIs ──────────────────────────────
+@app.get("/api/settings")
+async def api_get_settings():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT key, value FROM user_settings") as cursor:
+            rows = await cursor.fetchall()
+    settings = {r["key"]: r["value"] for r in rows}
+    # Inject read-only environment variables for reference
+    settings["_env_gemini_model"] = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+    settings["_env_has_gemini_key"] = "yes" if os.environ.get("GEMINI_API_KEY") else "no"
+    settings["_env_has_groq_key"] = "yes" if os.environ.get("GROQ_API_KEY") else "no"
+    settings["_env_safe_mode"] = "yes" if SAFE_MODE else "no"
+    return JSONResponse(settings)
+
+@app.post("/api/settings")
+async def api_save_settings(request: Request):
+    body = await request.json()
+    async with aiosqlite.connect(DB_PATH) as db:
+        for k, v in body.items():
+            if k.startswith("_"):  # Skip read-only env vars
+                continue
+            await db.execute(
+                "INSERT OR REPLACE INTO user_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+                (k, str(v))
+            )
+        await db.commit()
+    return JSONResponse({"ok": True})
+
+@app.get("/api/job-logs")
+async def api_job_logs(limit: int = 30):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, job_name, status, message, created_at FROM job_logs ORDER BY id DESC LIMIT ?",
+            (limit,)
+        ) as cur:
+            rows = await cur.fetchall()
+    return JSONResponse([dict(r) for r in rows])
+
+@app.post("/api/job-logs/clear")
+async def api_job_logs_clear():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM job_logs")
+        await db.commit()
+    return JSONResponse({"ok": True})
+
+@app.post("/api/run-job")
+async def api_run_job(request: Request):
+    body = await request.json()
+    job_name = body.get("job_name")
+    
+    if job_name == "morning-digest":
+        _run_bg(run_morning_digest())
+        return JSONResponse({"ok": True, "message": "Morning digest started in background."})
+    elif job_name == "job-scout":
+        _run_bg(run_job_scout_digest(call_llm, send_whatsapp_chunked))
+        return JSONResponse({"ok": True, "message": "Job scout digest started in background."})
+    elif job_name == "learn-patterns":
+        _run_bg(refresh_all_patterns(call_llm))
+        return JSONResponse({"ok": True, "message": "Pattern learning started in background."})
+    elif job_name == "reminders-due":
+        fired = await _fire_due_reminders_and_automations()
+        return JSONResponse({"ok": True, "message": f"Reminders check complete. Fired {fired} due reminders."})
+    elif job_name == "inbox-check":
+        _run_bg(check_inbox_and_notify(call_llm, send_whatsapp_chunked))
+        return JSONResponse({"ok": True, "message": "Inbox check started in background."})
+    elif job_name == "weekly-report":
+        _run_bg(send_weekly_report())
+        return JSONResponse({"ok": True, "message": "Weekly report send started in background."})
+    
+    return JSONResponse({"ok": False, "error": f"Unknown job: {job_name}"}, status_code=400)
+
+@app.get("/api/search")
+async def api_search(q: str = ""):
+    q = q.strip()
+    if not q:
+        return JSONResponse({"results": []})
+    
+    results = []
+    like_pat = f"%{q}%"
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        
+        # 1. Search Applications
+        try:
+            async with db.execute(
+                "SELECT id, title, company, location, status FROM applications WHERE title LIKE ? OR company LIKE ? OR location LIKE ? LIMIT 5",
+                (like_pat, like_pat, like_pat)
+            ) as cur:
+                for r in await cur.fetchall():
+                    results.append({
+                        "category": "Applications",
+                        "title": f"{r['title']} at {r['company']}",
+                        "subtitle": f"{r['location']} — Status: {r['status']}",
+                        "target": "jobs",
+                        "meta": {"id": r["id"]}
+                    })
+        except Exception as e:
+            print(f"Search applications error: {e}")
+            
+        # 2. Search Chat History
+        try:
+            async with db.execute(
+                "SELECT content, timestamp, role FROM chat_history WHERE content LIKE ? LIMIT 5",
+                (like_pat,)
+            ) as cur:
+                for r in await cur.fetchall():
+                    results.append({
+                        "category": "Chat History",
+                        "title": r["content"][:80] + ("..." if len(r["content"]) > 80 else ""),
+                        "subtitle": f"{r['role']} — {r['timestamp']}",
+                        "target": "assistant",
+                        "meta": {}
+                    })
+        except Exception as e:
+            print(f"Search chat history error: {e}")
+
+        # 3. Search Reminders
+        try:
+            async with db.execute(
+                "SELECT text, run_at, hour, minute, status FROM reminders WHERE text LIKE ? LIMIT 5",
+                (like_pat,)
+            ) as cur:
+                for r in await cur.fetchall():
+                    due_info = r["run_at"] if r["run_at"] else f"{r['hour']:02d}:{r['minute']:02d}" if r["hour"] is not None else "recurring"
+                    results.append({
+                        "category": "Reminders",
+                        "title": r["text"],
+                        "subtitle": f"Due: {due_info} — Status: {r['status']}",
+                        "target": "terminal",
+                        "meta": {}
+                    })
+        except Exception as e:
+            print(f"Search reminders error: {e}")
+
+        # 4. Search Knowledge Store
+        try:
+            async with db.execute(
+                "SELECT title, url FROM knowledge_store WHERE title LIKE ? OR content LIKE ? LIMIT 5",
+                (like_pat, like_pat)
+            ) as cur:
+                for r in await cur.fetchall():
+                    results.append({
+                        "category": "Knowledge Store",
+                        "title": r["title"] or r["url"],
+                        "subtitle": r["url"],
+                        "target": "core",
+                        "meta": {}
+                    })
+        except Exception as e:
+            print(f"Search knowledge store error: {e}")
+
+        # 5. Search Job Logs (System Activities)
+        try:
+            async with db.execute(
+                "SELECT job_name, status, message, created_at FROM job_logs WHERE job_name LIKE ? OR message LIKE ? LIMIT 5",
+                (like_pat, like_pat)
+            ) as cur:
+                for r in await cur.fetchall():
+                    results.append({
+                        "category": "System Logs",
+                        "title": f"{r['job_name']} ({r['status']})",
+                        "subtitle": f"{r['message']} — {r['created_at']}",
+                        "target": "core",
+                        "meta": {}
+                    })
+        except Exception as e:
+            print(f"Search job logs error: {e}")
+            
+    return JSONResponse({"results": results})
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { ScreenId } from "./types";
 import Header from "./components/Header";
 import Footer from "./components/Footer";
@@ -7,11 +7,30 @@ import SecureChat from "./components/SecureChat";
 import PrivaChat from "./components/PrivaChat";
 import JobsBoard from "./components/JobsBoard";
 import SystemTerminal from "./components/SystemTerminal";
+import SearchOverlay from "./components/SearchOverlay";
+import SettingsDrawer from "./components/SettingsDrawer";
+import NotificationsDrawer from "./components/NotificationsDrawer";
 import { AnimatePresence, motion } from "motion/react";
 
 export default function App() {
   const [activeScreen, setActiveScreen] = useState<ScreenId>(ScreenId.Core);
   const [prevScreen, setPrevScreen] = useState<ScreenId>(ScreenId.Core);
+
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
+
+  // Keyboard shortcut Ctrl+K or Cmd+K to trigger search palette
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setIsSearchOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   const handleNavigate = (targetScreen: ScreenId) => {
     setPrevScreen(activeScreen);
@@ -63,7 +82,13 @@ export default function App() {
       <div className="fixed inset-0 bg-[#0a0e1a]/45 pointer-events-none z-0"></div>
 
       {/* Unified HUD Header Navigation bar */}
-      <Header activeScreen={activeScreen} onNavigate={handleNavigate} />
+      <Header 
+        activeScreen={activeScreen} 
+        onNavigate={handleNavigate}
+        onOpenSearch={() => setIsSearchOpen(true)}
+        onOpenSettings={() => setIsSettingsOpen(true)}
+        onOpenNotifications={() => setIsNotificationsOpen(true)}
+      />
 
       {/* Dynamic Main Stage Grid Area */}
       <main className="flex-1 w-full max-w-[1440px] mx-auto px-6 sm:px-8 pt-24 pb-8 relative z-10 cyber-grid flex flex-col justify-start">
@@ -99,6 +124,34 @@ export default function App() {
 
       {/* Unified Footer details */}
       <Footer />
+
+      {/* Command Search Overlay */}
+      <AnimatePresence>
+        {isSearchOpen && (
+          <SearchOverlay 
+            onClose={() => setIsSearchOpen(false)} 
+            onNavigate={handleNavigate} 
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Settings Drawer */}
+      <AnimatePresence>
+        {isSettingsOpen && (
+          <SettingsDrawer 
+            onClose={() => setIsSettingsOpen(false)} 
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Notifications / Diagnostics Drawer */}
+      <AnimatePresence>
+        {isNotificationsOpen && (
+          <NotificationsDrawer 
+            onClose={() => setIsNotificationsOpen(false)} 
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }

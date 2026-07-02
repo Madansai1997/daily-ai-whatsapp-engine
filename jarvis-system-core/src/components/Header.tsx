@@ -5,9 +5,18 @@ import { Search, Bell, Settings } from "lucide-react";
 interface HeaderProps {
   activeScreen: ScreenId;
   onNavigate: (screen: ScreenId) => void;
+  onOpenSearch: () => void;
+  onOpenSettings: () => void;
+  onOpenNotifications: () => void;
 }
 
-export default function Header({ activeScreen, onNavigate }: HeaderProps) {
+export default function Header({ 
+  activeScreen, 
+  onNavigate,
+  onOpenSearch,
+  onOpenSettings,
+  onOpenNotifications
+}: HeaderProps) {
   const [temperature, setTemperature] = useState(38);
 
   // Fluctuating temperature to simulate live system telemetry
@@ -105,15 +114,26 @@ export default function Header({ activeScreen, onNavigate }: HeaderProps) {
 
         <div className="flex items-center gap-6">
           {/* Search bar simulation */}
-          <div className="hidden sm:flex items-center gap-2 bg-[#1b1f2c]/50 px-4 py-1.5 border border-white/10 rounded-full transition-all hover:border-[#8aebff]/50">
+          <button 
+            onClick={onOpenSearch}
+            className="hidden sm:flex items-center gap-2 bg-[#1b1f2c]/50 px-4 py-1.5 border border-white/10 rounded-full transition-all hover:border-[#8aebff]/50 hover:bg-[#1b1f2c]/80 text-[#859397] hover:text-white cursor-pointer"
+          >
             <Search className="w-4.5 h-4.5 text-[#8aebff]" />
-            <span className="text-[13px] font-mono text-[#859397]">Search protocols...</span>
-          </div>
+            <span className="text-[13px] font-mono">Search protocols...</span>
+          </button>
 
-          <button className="text-[#bbc9cd] hover:text-[#8aebff] transition-colors p-1" title="System Logs">
+          <button 
+            onClick={onOpenNotifications}
+            className="text-[#bbc9cd] hover:text-[#8aebff] transition-colors p-1 cursor-pointer" 
+            title="System Logs"
+          >
             <Bell className="w-5 h-5" />
           </button>
-          <button className="text-[#bbc9cd] hover:text-[#8aebff] transition-colors p-1" title="Core Controls">
+          <button 
+            onClick={onOpenSettings}
+            className="text-[#bbc9cd] hover:text-[#8aebff] transition-colors p-1 cursor-pointer" 
+            title="Core Controls"
+          >
             <Settings className="w-5 h-5" />
           </button>
 
