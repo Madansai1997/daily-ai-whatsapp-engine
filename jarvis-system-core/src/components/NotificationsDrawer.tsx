@@ -72,8 +72,16 @@ export default function NotificationsDrawer({ onClose }: NotificationsDrawerProp
   useEffect(() => {
     loadLogs();
     loadNotifications();
-    const t = setTimeout(markAllRead, 1200);
-    return () => clearTimeout(t);
+    // Poll while the drawer is open so notifications created by background jobs
+    // (inbox-check, job-scout, etc.) show up live instead of only on reopen.
+    const poll = setInterval(() => {
+      loadNotifications();
+      loadLogs();
+    }, 4000);
+    return () => {
+      clearInterval(poll);
+      markAllRead(); // clear the unread badge when the drawer closes
+    };
   }, []);
 
   const handleClearLogs = async () => {
@@ -100,8 +108,9 @@ export default function NotificationsDrawer({ onClose }: NotificationsDrawerProp
       const data = await res.json();
       if (res.ok) {
         setJobFeedback((prev) => ({ ...prev, [jobName]: data.message || "Execution started successfully." }));
-        // Refresh logs after a brief delay
-        setTimeout(loadLogs, 1500);
+        // Background jobs land a few seconds later — refresh logs + notifications a couple times.
+        setTimeout(() => { loadLogs(); loadNotifications(); }, 1500);
+        setTimeout(() => { loadLogs(); loadNotifications(); }, 5000);
       } else {
         setJobFeedback((prev) => ({ ...prev, [jobName]: data.error || "Execution failed." }));
       }
