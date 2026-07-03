@@ -7,6 +7,7 @@ import SecureChat from "./components/SecureChat";
 import PrivaChat from "./components/PrivaChat";
 import JobsBoard from "./components/JobsBoard";
 import Insights from "./components/Insights";
+import Bills from "./components/Bills";
 import SystemTerminal from "./components/SystemTerminal";
 import SearchOverlay from "./components/SearchOverlay";
 import SettingsDrawer from "./components/SettingsDrawer";
@@ -14,7 +15,7 @@ import NotificationsDrawer from "./components/NotificationsDrawer";
 import LockScreen from "./components/LockScreen";
 import { authStatus, setUnauthHandler } from "./lib/auth";
 import { AnimatePresence, motion } from "motion/react";
-import { LayoutGrid, Bot, Lock, Terminal as TerminalIcon, Briefcase, BarChart3 } from "lucide-react";
+import { LayoutGrid, Bot, Lock, Terminal as TerminalIcon, Briefcase, BarChart3, Wallet } from "lucide-react";
 
 export default function App() {
   const [activeScreen, setActiveScreen] = useState<ScreenId>(ScreenId.Core);
@@ -59,7 +60,7 @@ export default function App() {
     }
 
     // Nav order index to determine forward vs backward push
-    const screenOrder = [ScreenId.Core, ScreenId.Assistant, ScreenId.Chat, ScreenId.Terminal, ScreenId.Jobs, ScreenId.Insights];
+    const screenOrder = [ScreenId.Core, ScreenId.Assistant, ScreenId.Chat, ScreenId.Terminal, ScreenId.Jobs, ScreenId.Insights, ScreenId.Bills];
     const fromIndex = screenOrder.indexOf(from);
     const toIndex = screenOrder.indexOf(to);
 
@@ -141,6 +142,9 @@ export default function App() {
             {activeScreen === ScreenId.Insights && (
               <Insights />
             )}
+            {activeScreen === ScreenId.Bills && (
+              <Bills />
+            )}
           </motion.div>
         </AnimatePresence>
       </main>
@@ -200,6 +204,15 @@ export default function App() {
         >
           <BarChart3 className="w-5.5 h-5.5" />
           <span className="text-[10px] font-mono mt-1 font-bold">STATS</span>
+        </button>
+        <button
+          onClick={() => handleNavigate(ScreenId.Bills)}
+          className={`flex flex-col items-center justify-center flex-1 h-full cursor-pointer transition-colors ${
+            activeScreen === ScreenId.Bills ? "text-[#8aebff] nav-active-glow" : "text-[#bbc9cd]"
+          }`}
+        >
+          <Wallet className="w-5.5 h-5.5" />
+          <span className="text-[10px] font-mono mt-1 font-bold">BILLS</span>
         </button>
       </nav>
 

@@ -121,6 +121,18 @@ from application_email_tracker import (
     dismiss_pending as dismiss_application_pending,
     count_pending as count_application_pending,
 )
+from bill_watcher import (
+    init_bill_watcher_tables,
+    add_bill,
+    list_bills,
+    list_view as bills_view,
+    mark_paid as mark_bill_paid,
+    mark_paid_by_id as mark_bill_paid_by_id,
+    delete_bill,
+    delete_by_id as delete_bill_by_id,
+    format_bills,
+    check_bills_and_notify,
+)
 from resume_ats_agent import (
     init_resume_ats_tables,
     analyze as run_ats_analysis,
@@ -226,7 +238,7 @@ MEMORY_INTENT_PROMPT = (
     "(Asia/Kolkata) for resolving relative dates. Respond with STRICT JSON only, no markdown, no commentary, "
     "matching exactly this shape:\n"
     '{"intent": "SAVE_FACT" or "RECALL_FACT" or "LIST_FACTS" or "SET_REMINDER" or "LIST_REMINDERS" or '
-    '"COMPOSE_EMAIL" or "READ_INBOX" or "CALENDAR_ACTION" or "JOB_SEARCH" or "APPLICATION_ACTION" or "OTHER", '
+    '"COMPOSE_EMAIL" or "READ_INBOX" or "CALENDAR_ACTION" or "JOB_SEARCH" or "APPLICATION_ACTION" or "BILL_ACTION" or "OTHER", '
     '"content": "string" or null, '
     '"reminder": {"text": "string", "kind": "once" or "daily" or "weekly", "run_at": "ISO 8601 datetime" or null, '
     '"hour": 0-23 or null, "minute": 0-59 or null, "day_of_week": "mon"/"tue"/"wed"/"thu"/"fri"/"sat"/"sun" or null} '
@@ -240,7 +252,10 @@ MEMORY_INTENT_PROMPT = (
     '"keywords": ["string", ...] or null, "save_profile": true or false} or null, '
     '"application": {"action": "list" or "update" or "add", "status_filter": "string" or null, '
     '"company": "string" or null, "role": "string" or null, "location": "string" or null, "source": "string" or null, '
-    '"new_status": "interested"/"applied"/"interviewing"/"offer"/"accepted"/"rejected" or null} or null}\n'
+    '"new_status": "interested"/"applied"/"interviewing"/"offer"/"accepted"/"rejected" or null} or null, '
+    '"bill": {"action": "add" or "list" or "paid" or "delete", "name": "string" or null, '
+    '"amount": number or null, "recurrence": "monthly" or "once" or "yearly" or null, '
+    '"due_day": 1-31 or null, "due_date": "YYYY-MM-DD" or null} or null}\n'
     "You are given the recent conversation alongside the latest message. If the latest message references "
     'something from it instead of stating it directly (e.g. "send the same email again", "remind me about that '
     'at the same time", "email her the same thing") — resolve the reference using the recent conversation and '
@@ -319,6 +334,16 @@ MEMORY_INTENT_PROMPT = (
     'say they applied). This is NOT the TRACK <n> '
     "command (that is an explicit command handled separately). content = null, reminder = null, email = null, "
     "calendar = null, job = null.\n"
+    "Use BILL_ACTION when the user is dealing with BILLS, EMIs, subscriptions, rent, or recurring/one-off "
+    'payments & deadlines with money owed. bill.action="add" to track a new bill (e.g. "add electricity ₹1200 '
+    'due on the 5th every month", "track my rent 15000 on the 1st", "netflix 649 monthly on the 28th", "domain '
+    'renewal 1200 due 2026-08-15") — fill bill.name, bill.amount, bill.recurrence ("monthly" default, "once" for a '
+    "one-off deadline, \"yearly\" for annual), bill.due_day (1-31, for monthly) OR bill.due_date (YYYY-MM-DD, for "
+    'once/yearly). bill.action="list" to show tracked bills / what\'s due ("show my bills", "what bills are due", '
+    '"how much do I owe this month"). bill.action="paid" when they\'ve paid one ("mark rent paid", "paid netflix") '
+    "— fill bill.name. bill.action=\"delete\" to stop tracking one — fill bill.name. This is DISTINCT from "
+    "SET_REMINDER (a plain time-based nudge with no amount/recurring-bill semantics). content = null, reminder = "
+    "null, email = null, calendar = null, job = null, application = null.\n"
     "Use JOB_SEARCH when the user wants to find, search, or be shown job openings/vacancies right now "
     '(e.g. "find me jobs", "any data analyst roles", "search remote jobs in Mumbai", "show me openings today"). '
     "Fill job.role with the role/title if stated (else null → their saved profile is used), job.location with a "
@@ -656,6 +681,7 @@ init_pattern_tables()
 init_job_scout_tables()
 init_application_tracker_tables()
 init_application_email_tracker_tables()
+init_bill_watcher_tables()
 init_resume_ats_tables()
 
 
@@ -768,6 +794,8 @@ async def lifespan(app: FastAPI):
         # Application email → board sync, twice daily (morning catch-up + evening sweep).
         scheduler.add_job(scan_application_emails, "cron", hour=8, minute=30, args=[call_llm, _store_notification])
         scheduler.add_job(scan_application_emails, "cron", hour=21, minute=0, args=[call_llm, _store_notification])
+        # Daily bill/deadline check (morning) — warns about anything due within its notify window.
+        scheduler.add_job(check_bills_and_notify, "cron", hour=8, minute=0, args=[_store_notification])
         scheduler.start()
         restored = await register_all_active_reminders(scheduler, send_whatsapp_chunked)
         automations_restored = await register_all_active_automations(scheduler, dispatch_automation)
@@ -3280,6 +3308,16 @@ async def cron_scan_applications(token: str = ""):
     return JSONResponse({"status": "application email scan triggered"}, status_code=202)
 
 
+@app.post("/cron/bills")
+async def cron_bills(token: str = ""):
+    """Daily: warn about bills/deadlines due within their notify window (once per occurrence)."""
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    sent = await check_bills_and_notify(_store_notification)
+    await _log_job("bills-check", "completed", f"sent {sent} bill alert(s)")
+    return JSONResponse({"status": "bills checked", "alerts": sent}, status_code=202)
+
+
 @app.post("/cron/learn-patterns")
 async def cron_learn_patterns(token: str = ""):
     """Recompute all learned-pattern categories from current history. Independently callable
@@ -4891,6 +4929,7 @@ You are not limited to any domain. Explain whatever the user asks."""
         memory_calendar = intent_parsed.get("calendar")
         memory_job = intent_parsed.get("job")
         memory_application = intent_parsed.get("application")
+        memory_bill = intent_parsed.get("bill")
     except Exception as e:
         print(f"⚠️ Memory intent classification failed: {e}")
         memory_intent = "OTHER"
@@ -4900,6 +4939,7 @@ You are not limited to any domain. Explain whatever the user asks."""
         memory_calendar = None
         memory_job = None
         memory_application = None
+        memory_bill = None
 
     if memory_intent == "SAVE_FACT" and memory_content:
         await log_chat_message("user", user_message)
@@ -5150,6 +5190,31 @@ You are not limited to any domain. Explain whatever the user asks."""
         else:  # list (default)
             apps = await list_applications(memory_application.get("status_filter"))
             msg = format_applications(apps)
+        await log_chat_message("assistant", msg)
+        return msg
+
+    # =========================================================================
+    # BILL / DEADLINE WATCHER — add / list / mark paid / delete a tracked bill.
+    # =========================================================================
+    if memory_intent == "BILL_ACTION" and memory_bill:
+        await log_chat_message("user", user_message)
+        action = (memory_bill.get("action") or "list").lower()
+        if action == "add":
+            _ok, msg = await add_bill(
+                name=memory_bill.get("name"),
+                amount=memory_bill.get("amount") or 0,
+                recurrence=memory_bill.get("recurrence") or "monthly",
+                due_day=memory_bill.get("due_day"),
+                due_date=memory_bill.get("due_date"),
+            )
+        elif action == "paid":
+            name = (memory_bill.get("name") or "").strip()
+            msg = "⚠️ Which bill did you pay? e.g. \"mark rent paid\"." if not name else (await mark_bill_paid(name))[1]
+        elif action == "delete":
+            name = (memory_bill.get("name") or "").strip()
+            msg = "⚠️ Which bill should I stop tracking? e.g. \"delete netflix bill\"." if not name else (await delete_bill(name))[1]
+        else:  # list (default)
+            msg = format_bills(await list_bills())
         await log_chat_message("assistant", msg)
         return msg
 
@@ -7499,6 +7564,40 @@ async def api_dev_usage(request: Request):
     return JSONResponse({"ok": True})
 
 
+# ── Bills / deadlines (Bill Watcher UI) ──
+@app.get("/api/bills")
+async def api_bills_list():
+    return JSONResponse(await bills_view())
+
+
+@app.post("/api/bills")
+async def api_bills_add(request: Request):
+    body = await request.json()
+    ok, msg = await add_bill(
+        name=body.get("name"),
+        amount=body.get("amount") or 0,
+        recurrence=(body.get("recurrence") or "monthly"),
+        due_day=body.get("due_day"),
+        due_date=body.get("due_date"),
+        currency=body.get("currency"),
+        category=body.get("category"),
+        notify_days_before=body.get("notify_days_before") or 3,
+    )
+    return JSONResponse({"ok": ok, "result": msg}, status_code=200 if ok else 400)
+
+
+@app.post("/api/bills/{bill_id}/paid")
+async def api_bills_paid(bill_id: int):
+    ok, msg = await mark_bill_paid_by_id(bill_id)
+    return JSONResponse({"ok": ok, "result": msg}, status_code=200 if ok else 404)
+
+
+@app.post("/api/bills/{bill_id}/delete")
+async def api_bills_delete(bill_id: int):
+    await delete_bill_by_id(bill_id)
+    return JSONResponse({"ok": True})
+
+
 @app.post("/api/run-job")
 async def api_run_job(request: Request):
     body = await request.json()
@@ -7506,7 +7605,7 @@ async def api_run_job(request: Request):
 
     # Log every manual trigger immediately so it always shows in System Logs —
     # several of these jobs don't self-log otherwise.
-    _KNOWN_JOBS = {"morning-digest", "job-scout", "learn-patterns", "reminders-due", "inbox-check", "weekly-report", "scan-applications"}
+    _KNOWN_JOBS = {"morning-digest", "job-scout", "learn-patterns", "reminders-due", "inbox-check", "weekly-report", "scan-applications", "bills-check"}
     if job_name in _KNOWN_JOBS:
         await _log_job(job_name, "triggered", "manual run from console")
 
@@ -7538,6 +7637,10 @@ async def api_run_job(request: Request):
     elif job_name == "scan-applications":
         _run_bg_job("scan-applications", lambda: scan_application_emails(call_llm, _store_notification))
         return JSONResponse({"ok": True, "message": "Scanning your email to sync the board…"})
+    elif job_name == "bills-check":
+        sent = await check_bills_and_notify(_store_notification)
+        await _log_job("bills-check", "completed", f"sent {sent} bill alert(s)")
+        return JSONResponse({"ok": True, "message": f"Bill check complete. Sent {sent} alert(s)."})
 
     return JSONResponse({"ok": False, "error": f"Unknown job: {job_name}"}, status_code=400)
 
