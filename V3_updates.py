@@ -109,13 +109,24 @@ from application_tracker import (
     update_status as update_application_status,
     update_status_by_id as update_application_status_by_id,
     delete_application,
+    update_description as update_application_description,
     format_applications,
     VALID_STATUSES as APPLICATION_STATUSES,
+)
+from application_email_tracker import (
+    init_application_email_tracker_tables,
+    scan_and_sync as scan_application_emails,
+    list_pending as list_application_pending,
+    confirm_pending as confirm_application_pending,
+    dismiss_pending as dismiss_application_pending,
+    count_pending as count_application_pending,
 )
 from resume_ats_agent import (
     init_resume_ats_tables,
     analyze as run_ats_analysis,
     get_analysis as get_ats_analysis,
+    get_scores_map as get_ats_scores_map,
+    delete_analysis as delete_ats_analysis,
     mark_viewed as mark_ats_viewed,
     count_unviewed as count_ats_unviewed,
     save_resume_template,
@@ -227,8 +238,9 @@ MEMORY_INTENT_PROMPT = (
     '"description": "string" or null, "attendees": ["email", ...] or null} or null, '
     '"job": {"role": "string" or null, "location": "string" or null, "remote": true or false or null, '
     '"keywords": ["string", ...] or null, "save_profile": true or false} or null, '
-    '"application": {"action": "list" or "update", "status_filter": "string" or null, '
-    '"company": "string" or null, "new_status": "interested"/"applied"/"interviewing"/"offer"/"accepted"/"rejected" or null} or null}\n'
+    '"application": {"action": "list" or "update" or "add", "status_filter": "string" or null, '
+    '"company": "string" or null, "role": "string" or null, "location": "string" or null, "source": "string" or null, '
+    '"new_status": "interested"/"applied"/"interviewing"/"offer"/"accepted"/"rejected" or null} or null}\n'
     "You are given the recent conversation alongside the latest message. If the latest message references "
     'something from it instead of stating it directly (e.g. "send the same email again", "remind me about that '
     'at the same time", "email her the same thing") — resolve the reference using the recent conversation and '
@@ -298,7 +310,13 @@ MEMORY_INTENT_PROMPT = (
     'have I applied to", "my job pipeline"); fill application.status_filter only if they ask for a specific stage '
     '(e.g. "which ones am I interviewing for"). application.action="update" to change a status (e.g. "mark '
     'Cognizant as interviewing", "I got rejected from Infosys", "got an offer from BP") — fill application.company '
-    "with the company/role identifier and application.new_status with the target stage. This is NOT the TRACK <n> "
+    "with the company/role identifier and application.new_status with the target stage. "
+    'application.action="add" when the user says they APPLIED to a specific job somewhere and wants it tracked '
+    '(e.g. "applied to Data Analyst at Acme on Naukri", "I just applied for a Backend Engineer role at Infosys", '
+    '"add Product Manager at Google to my board as applied") — fill application.role with the job title, '
+    "application.company with the employer, application.location if stated, application.source with the portal/site "
+    '(e.g. "Naukri", "LinkedIn") if stated, and application.new_status with the stage (default "applied" if they just '
+    'say they applied). This is NOT the TRACK <n> '
     "command (that is an explicit command handled separately). content = null, reminder = null, email = null, "
     "calendar = null, job = null.\n"
     "Use JOB_SEARCH when the user wants to find, search, or be shown job openings/vacancies right now "
@@ -579,6 +597,7 @@ init_automation_tables()
 init_pattern_tables()
 init_job_scout_tables()
 init_application_tracker_tables()
+init_application_email_tracker_tables()
 init_resume_ats_tables()
 
 
@@ -688,6 +707,9 @@ async def lifespan(app: FastAPI):
             scheduler.add_job(send_checkin_reminder, "cron", hour=r["hour"], minute=0, kwargs={"reminder_number": r["number"]})
         scheduler.add_job(send_weekly_report, "cron", day_of_week="sun", hour=SCHEDULE_CONFIG["weekly_report_hour"], minute=0)
         scheduler.add_job(check_inbox_and_notify, "interval", hours=1, args=[call_llm, send_whatsapp_chunked])
+        # Application email → board sync, twice daily (morning catch-up + evening sweep).
+        scheduler.add_job(scan_application_emails, "cron", hour=8, minute=30, args=[call_llm, _store_notification])
+        scheduler.add_job(scan_application_emails, "cron", hour=21, minute=0, args=[call_llm, _store_notification])
         scheduler.start()
         restored = await register_all_active_reminders(scheduler, send_whatsapp_chunked)
         automations_restored = await register_all_active_automations(scheduler, dispatch_automation)
@@ -3142,6 +3164,18 @@ async def cron_job_scout(token: str = ""):
     return JSONResponse({"status": "job scout digest triggered"}, status_code=202)
 
 
+@app.post("/cron/scan-applications")
+async def cron_scan_applications(token: str = ""):
+    """Twice-daily (morning + evening): read Gmail and advance the Kanban board — application
+    confirmations, interview invites, offers, rejections. Confident matches move automatically
+    (with an undoable notification); ambiguous ones are parked for confirmation in Jobs."""
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    await _log_job("scan-applications", "triggered", "email → board sync")
+    _run_bg(scan_application_emails(call_llm, _store_notification))
+    return JSONResponse({"status": "application email scan triggered"}, status_code=202)
+
+
 @app.post("/cron/learn-patterns")
 async def cron_learn_patterns(token: str = ""):
     """Recompute all learned-pattern categories from current history. Independently callable
@@ -4991,6 +5025,24 @@ You are not limited to any domain. Explain whatever the user asks."""
                 msg = "⚠️ Tell me which application and the new status — e.g. \"mark BP as interviewing\"."
             else:
                 _ok, msg = await update_application_status(company, new_status)
+        elif action == "add":
+            # "applied to <role> at <company> on Naukri" → drop a card on the board (default Applied).
+            role = (memory_application.get("role") or "").strip()
+            company = (memory_application.get("company") or "").strip()
+            if not role and not company:
+                msg = "⚠️ Tell me the role and company — e.g. \"applied to Data Analyst at Acme on Naukri\"."
+            else:
+                location = (memory_application.get("location") or "").strip()
+                source = (memory_application.get("source") or "").strip() or "Manual"
+                status = (memory_application.get("new_status") or "applied").strip() or "applied"
+                slug = re.sub(r"[^a-z0-9]+", "-",
+                              f"{role} {company} {location}".lower()).strip("-")
+                job = {
+                    "key": f"manual:{slug}" if slug else f"manual:{int(time.time())}",
+                    "title": role or f"Role at {company}", "company": company,
+                    "location": location, "url": "", "source": source,
+                }
+                _ok, msg = await add_application(job, status=status)
         else:  # list (default)
             apps = await list_applications(memory_application.get("status_filter"))
             msg = format_applications(apps)
@@ -5225,6 +5277,13 @@ async def chat_history_api(limit: int = 50):
 @app.get("/applications")
 async def applications_list_api():
     apps = await list_applications()
+    # Stamp each card with its latest ATS match score (only analysed cards get one).
+    keys = [(a.get("job_key") or f"app:{a.get('id')}") for a in apps]
+    scores = await get_ats_scores_map(keys)
+    for a in apps:
+        s = scores.get(a.get("job_key") or f"app:{a.get('id')}")
+        a["ats_score"] = s["ats_score"] if s else None
+        a["ats_scored_at"] = s["created_at"] if s else None
     return JSONResponse({"applications": apps, "statuses": APPLICATION_STATUSES})
 
 
@@ -5238,7 +5297,64 @@ async def applications_update_api(request: Request):
 @app.post("/applications/delete")
 async def applications_delete_api(request: Request):
     body = await request.json()
-    await delete_application(int(body.get("id")))
+    app_id = int(body.get("id"))
+    # Drop the card's cached ATS analysis too, so it can't orphan and inflate the counts.
+    app_row = await get_application(app_id)
+    if app_row:
+        await delete_ats_analysis(app_row.get("job_key") or f"app:{app_id}")
+    await delete_application(app_id)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/applications/add-manual")
+async def applications_add_manual_api(request: Request):
+    """Manually track a job the user applied to elsewhere (LinkedIn, Naukri, a
+    company careers page…). Not from Job Scout — the user types the details in."""
+    body = await request.json()
+    title = (body.get("title") or "").strip()
+    if not title:
+        return JSONResponse({"ok": False, "error": "Job title is required."}, status_code=400)
+    company = (body.get("company") or "").strip()
+    location = (body.get("location") or "").strip()
+    url = (body.get("url") or "").strip()
+    # "source" = where they applied (portal/site); defaults to a generic manual tag.
+    source = (body.get("source") or "").strip() or "Manual"
+    status = (body.get("status") or "applied").strip() or "applied"
+    # Stable-ish key so an accidental double-submit dedups, but distinct roles stay distinct.
+    slug = re.sub(r"[^a-z0-9]+", "-", f"{title} {company} {location}".lower()).strip("-")
+    job = {
+        "key": f"manual:{slug}" if slug else f"manual:{int(time.time())}",
+        "title": title, "company": company, "location": location,
+        "url": url, "source": source,
+        "description": (body.get("description") or "").strip() or None,
+    }
+    ok, msg = await add_application(job, status=status)
+    return JSONResponse({"ok": ok, "result": msg}, status_code=200 if ok else 200)
+
+
+@app.post("/applications/scan")
+async def applications_scan_api():
+    """On-demand email→board scan that RETURNS its result (unlike the background cron path),
+    so the UI can show exactly what happened — moved / added / needs-confirmation / nothing."""
+    summary = await scan_application_emails(call_llm, _store_notification)
+    return JSONResponse(summary)
+
+
+@app.get("/applications/pending")
+async def applications_pending_api():
+    """Low-confidence / ambiguous email→board suggestions awaiting the user's confirmation."""
+    return JSONResponse({"pending": await list_application_pending()})
+
+
+@app.post("/applications/pending/{pending_id}/confirm")
+async def applications_pending_confirm_api(pending_id: int):
+    ok, msg = await confirm_application_pending(pending_id)
+    return JSONResponse({"ok": ok, "result": msg}, status_code=200)
+
+
+@app.post("/applications/pending/{pending_id}/dismiss")
+async def applications_pending_dismiss_api(pending_id: int):
+    await dismiss_application_pending(pending_id)
     return JSONResponse({"ok": True})
 
 
@@ -5312,14 +5428,38 @@ async def resume_upload_file_api(file: UploadFile = File(...)):
 
 
 @app.post("/applications/{app_id}/ats")
-async def application_ats_api(app_id: int):
-    """Run (or refresh) the ATS resume analysis for one tracked application, on demand."""
+async def application_ats_api(app_id: int, request: Request):
+    """Run (or refresh) the ATS resume analysis for one tracked application, on demand.
+    Cards added manually / from email / from a quick-apply arrive with no job description,
+    so ATS has nothing to score against. In that case we return needs_jd=True and the UI
+    prompts the user to paste the posting; the pasted JD is saved onto the card (once) and
+    used from then on."""
     app_row = await get_application(app_id)
     if not app_row:
         return JSONResponse({"error": "application not found"}, status_code=404)
+
+    # Optional pasted job description — persist it to the card, then analyse against it.
+    pasted_jd = ""
+    try:
+        body = await request.json()
+        pasted_jd = (body.get("job_description") or "").strip()
+    except Exception:
+        pasted_jd = ""
+    if pasted_jd:
+        await update_application_description(app_id, pasted_jd)
+
+    description = pasted_jd or (app_row.get("description") or "").strip()
+    if not description:
+        return JSONResponse({
+            "needs_jd": True,
+            "title": app_row.get("title"),
+            "company": app_row.get("company"),
+            "message": "This job has no description saved. Paste the job posting so I can score your résumé against it.",
+        })
+
     job = {"key": app_row.get("job_key") or f"app:{app_id}", "title": app_row.get("title"),
            "company": app_row.get("company"), "location": app_row.get("location"),
-           "description": app_row.get("description")}
+           "description": description}
     result = await run_ats_analysis(job, call_llm)
     if result.get("error"):
         return JSONResponse({"error": result["error"]}, status_code=400)
@@ -7069,7 +7209,7 @@ async def api_run_job(request: Request):
 
     # Log every manual trigger immediately so it always shows in System Logs —
     # several of these jobs don't self-log otherwise.
-    _KNOWN_JOBS = {"morning-digest", "job-scout", "learn-patterns", "reminders-due", "inbox-check", "weekly-report"}
+    _KNOWN_JOBS = {"morning-digest", "job-scout", "learn-patterns", "reminders-due", "inbox-check", "weekly-report", "scan-applications"}
     if job_name in _KNOWN_JOBS:
         await _log_job(job_name, "triggered", "manual run from console")
 
@@ -7092,6 +7232,9 @@ async def api_run_job(request: Request):
     elif job_name == "weekly-report":
         _run_bg(send_weekly_report())
         return JSONResponse({"ok": True, "message": "Weekly report send started in background."})
+    elif job_name == "scan-applications":
+        _run_bg(scan_application_emails(call_llm, _store_notification))
+        return JSONResponse({"ok": True, "message": "Scanning your email to sync the board…"})
 
     return JSONResponse({"ok": False, "error": f"Unknown job: {job_name}"}, status_code=400)
 

@@ -38,6 +38,7 @@ interface SearchResult {
 // Tier-2 action commands — run backend jobs straight from the palette.
 const actionCommands: SearchResult[] = [
   { category: "Action", title: "Run Job Scout now", subtitle: "Fetch & rank fresh job matches", action: "run-job", jobName: "job-scout" },
+  { category: "Action", title: "Scan emails → update board", subtitle: "Read Gmail and advance your job applications", action: "run-job", jobName: "scan-applications" },
   { category: "Action", title: "Check inbox now", subtitle: "Scan Gmail and notify on important mail", action: "run-job", jobName: "inbox-check" },
   { category: "Action", title: "Learn my patterns", subtitle: "Refresh calendar & reply-style preferences", action: "run-job", jobName: "learn-patterns" },
   { category: "Action", title: "Send morning digest", subtitle: "Compile and push today's briefing", action: "run-job", jobName: "morning-digest" },

@@ -158,6 +158,17 @@ async def delete_application(app_id: int) -> bool:
     return True
 
 
+async def update_description(app_id: int, description: str) -> bool:
+    """Attach/replace the job description on a card — used so manually/email-added jobs
+    (which arrive with no JD) can still be ATS-analysed once the user pastes the posting."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE applications SET description = ?, updated_at = ? WHERE id = ?",
+                         ((description or "").strip(), now, app_id))
+        await db.commit()
+    return True
+
+
 def format_applications(apps: list) -> str:
     if not apps:
         return "📭 *Your job tracker is empty.* Reply TRACK <n> on a job search to add one."

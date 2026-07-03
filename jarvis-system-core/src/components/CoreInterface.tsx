@@ -61,7 +61,8 @@ export default function CoreInterface({ onNavigate, onOpenNotifications }: CoreI
     };
   }, []);
 
-  // TRACKED ROLES: GET /applications -> { applications: [...] }
+  // TRACKED ROLES = jobs on the board; PENDING ANALYSES = of those, how many have no
+  // ATS score yet (roles still awaiting an ATS check). Both derived from one /applications call.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -69,27 +70,11 @@ export default function CoreInterface({ onNavigate, onOpenNotifications }: CoreI
         const res = await fetch("/applications", { method: "GET", cache: "no-store" });
         if (!res.ok) return;
         const data: unknown = await res.json();
-        const apps = (data as { applications?: unknown[] })?.applications;
-        if (!cancelled && Array.isArray(apps)) setTrackedRoles(apps.length);
-      } catch {
-        /* leave neutral placeholder */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // PENDING ANALYSES: GET /ats/pending/count -> { count }
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch("/ats/pending/count", { method: "GET", cache: "no-store" });
-        if (!res.ok) return;
-        const data: unknown = await res.json();
-        const count = (data as { count?: unknown })?.count;
-        if (!cancelled && typeof count === "number") setPendingAnalyses(count);
+        const apps = (data as { applications?: { ats_score?: number | null }[] })?.applications;
+        if (!cancelled && Array.isArray(apps)) {
+          setTrackedRoles(apps.length);
+          setPendingAnalyses(apps.filter((a) => typeof a?.ats_score !== "number").length);
+        }
       } catch {
         /* leave neutral placeholder */
       }

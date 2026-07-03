@@ -16,6 +16,8 @@ import {
   ClipboardCheck,
   Gauge,
   Sparkles,
+  Plus,
+  Mail,
 } from "lucide-react";
 
 interface JobsBoardProps {
@@ -35,6 +37,8 @@ interface Application {
   source?: string;
   description?: string;
   status: string;
+  ats_score?: number | null;
+  ats_scored_at?: string | null;
 }
 
 interface ApplicationsResponse {
@@ -102,6 +106,14 @@ const STATUS_CONFIG: Record<
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
+/* ATS score badge colour — green high, amber mid, red low. */
+const atsColor = (score: number) =>
+  score >= 75
+    ? { text: "#5eead4", border: "#5eead4", bg: "#5eead4" }
+    : score >= 50
+    ? { text: "#ffd6a3", border: "#ffd6a3", bg: "#ffd6a3" }
+    : { text: "#ffb4ab", border: "#ffb4ab", bg: "#ffb4ab" };
+
 export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) {
   const [applications, setApplications] = useState<Application[]>([]);
   const [statuses, setStatuses] = useState<string[]>([]);
@@ -130,6 +142,35 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
   const [applying, setApplying] = useState(false);
   const [applyResult, setApplyResult] = useState<any | null>(null);
   const [applyError, setApplyError] = useState("");
+
+  // Manually add a job applied elsewhere (LinkedIn / Naukri / careers page)
+  const [addOpen, setAddOpen] = useState(false);
+  const [addSaving, setAddSaving] = useState(false);
+  const [addError, setAddError] = useState("");
+  const emptyManual = {
+    title: "",
+    company: "",
+    location: "",
+    url: "",
+    source: "",
+    status: "applied",
+  };
+  const [manual, setManual] = useState({ ...emptyManual });
+
+  // Email → board sync: pending confirmations + on-demand scan
+  const [pending, setPending] = useState<any[]>([]);
+  const [pendingBusy, setPendingBusy] = useState<number | null>(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanOpen, setScanOpen] = useState(false);
+  const [scanResult, setScanResult] = useState<any | null>(null);
+
+  // Paste-a-JD flow for cards with no job description (Naukri quick-apply / email / chat adds)
+  const [jdOpen, setJdOpen] = useState(false);
+  const [jdForId, setJdForId] = useState<number | null>(null);
+  const [jdForTitle, setJdForTitle] = useState("");
+  const [jdText, setJdText] = useState("");
+  const [jdBusy, setJdBusy] = useState(false);
+  const [jdError, setJdError] = useState("");
 
   // Standalone résumé audit (job-agnostic)
   const [auditOpen, setAuditOpen] = useState(false);
@@ -161,9 +202,65 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
     }
   }, []);
 
+  const loadPending = useCallback(async () => {
+    try {
+      const res = await fetch("/applications/pending");
+      const data = await res.json();
+      setPending(Array.isArray(data?.pending) ? data.pending : []);
+    } catch {
+      setPending([]);
+    }
+  }, []);
+
   useEffect(() => {
     loadApplications();
-  }, [loadApplications]);
+    loadPending();
+  }, [loadApplications, loadPending]);
+
+  /* ---- Email → board sync ---- */
+
+  const scanNow = async () => {
+    setScanning(true);
+    setScanResult(null);
+    try {
+      // Synchronous scan — waits for the result so we can show exactly what happened.
+      const res = await fetch("/applications/scan", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      setScanResult(data);
+      setScanOpen(true);
+      await Promise.all([loadApplications(), loadPending()]);
+    } catch (e) {
+      setScanResult({ error: e instanceof Error ? e.message : String(e) });
+      setScanOpen(true);
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const confirmPending = async (id: number) => {
+    setPendingBusy(id);
+    try {
+      await fetch(`/applications/pending/${id}/confirm`, { method: "POST" });
+      await Promise.all([loadApplications(), loadPending()]);
+    } catch (e) {
+      alert(`Couldn't confirm: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setPendingBusy(null);
+    }
+  };
+
+  const dismissPending = async (id: number) => {
+    setPendingBusy(id);
+    try {
+      await fetch(`/applications/pending/${id}/dismiss`, { method: "POST" });
+      await loadPending();
+    } catch (e) {
+      alert(`Couldn't dismiss: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setPendingBusy(null);
+    }
+  };
 
   /* ---- Mutations ---- */
 
@@ -203,22 +300,56 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
 
   /* ---- ATS analysis ---- */
 
-  const runAts = async (id: number) => {
+  const runAts = async (id: number, jd?: string) => {
     setAtsLoadingId(id);
     try {
-      const res = await fetch(`/applications/${id}/ats`, { method: "POST" });
-      const data: AtsResult | AtsErrorResult = await res.json();
-      if (!res.ok || "error" in data) {
-        alert(("error" in data && data.error) || `ATS analysis failed (HTTP ${res.status})`);
+      const res = await fetch(`/applications/${id}/ats`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(jd ? { job_description: jd } : {}),
+      });
+      const data: any = await res.json();
+      // No job description on this card → ask the user to paste the posting.
+      if (data?.needs_jd) {
+        setJdForId(id);
+        setJdForTitle(
+          `${data.title || "this role"}${data.company ? ` — ${data.company}` : ""}`
+        );
+        setJdText("");
+        setJdError("");
+        setJdOpen(true);
         return;
       }
-      setAtsResult(data);
+      if (!res.ok || "error" in data) {
+        alert((("error" in data && data.error) as string) || `ATS analysis failed (HTTP ${res.status})`);
+        return;
+      }
+      setAtsResult(data as AtsResult);
       setActiveTab("keyword");
       onNavigate(ScreenId.AtsAnalysis);
+      loadApplications(); // refresh so the score badge shows on the card behind the modal
     } catch (e) {
       alert(`ATS analysis failed: ${e instanceof Error ? e.message : e}`);
     } finally {
       setAtsLoadingId(null);
+    }
+  };
+
+  const submitJd = async () => {
+    if (!jdText.trim()) {
+      setJdError("Paste the job description first.");
+      return;
+    }
+    if (jdForId == null) return;
+    setJdBusy(true);
+    setJdError("");
+    const id = jdForId;
+    const jd = jdText.trim();
+    try {
+      setJdOpen(false);
+      await runAts(id, jd); // saves the JD onto the card, then analyses against it
+    } finally {
+      setJdBusy(false);
     }
   };
 
@@ -275,6 +406,39 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
     } finally {
       setResumeUploading(false);
       if (resumeFileRef.current) resumeFileRef.current.value = "";
+    }
+  };
+
+  /* ---- Manually add a job applied elsewhere ---- */
+  const openAdd = () => {
+    setManual({ ...emptyManual });
+    setAddError("");
+    setAddOpen(true);
+  };
+
+  const saveManual = async () => {
+    if (!manual.title.trim()) {
+      setAddError("Job title is required.");
+      return;
+    }
+    setAddSaving(true);
+    setAddError("");
+    try {
+      const res = await fetch("/applications/add-manual", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(manual),
+      });
+      const data = await res.json();
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.result || data?.error || `HTTP ${res.status}`);
+      }
+      setAddOpen(false);
+      await loadApplications();
+    } catch (e) {
+      setAddError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAddSaving(false);
     }
   };
 
@@ -376,7 +540,18 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
     const cfg = STATUS_CONFIG[status] || {
       accentClass: "text-[#8aebff] border-[#8aebff]/20 bg-[#8aebff]/5",
     };
-    const cards = applications.filter((a) => a.status === status);
+    // Analysed cards rise to the top, highest ATS score first; un-analysed keep their
+    // existing (most-recently-updated) order at the bottom.
+    const cards = applications
+      .filter((a) => a.status === status)
+      .map((a, i) => ({ a, i }))
+      .sort((x, y) => {
+        const sx = typeof x.a.ats_score === "number" ? x.a.ats_score : -1;
+        const sy = typeof y.a.ats_score === "number" ? y.a.ats_score : -1;
+        if (sx !== sy) return sy - sx;
+        return x.i - y.i;
+      })
+      .map((w) => w.a);
     return {
       status,
       title: status.toUpperCase(),
@@ -417,6 +592,23 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
 
           <div className="flex items-center gap-3 font-mono">
             <button
+              onClick={scanNow}
+              disabled={scanning}
+              className="flex items-center gap-2 px-5 py-2 bg-white/5 border border-white/10 rounded-lg text-xs font-semibold hover:bg-white/10 hover:border-[#a3e635]/30 transition-all text-[#a3e635] cursor-pointer disabled:opacity-50"
+              title="Read your email now and update the board (application confirmations, interviews, offers, rejections)"
+            >
+              <Mail className={`w-4 h-4 ${scanning ? "animate-pulse" : ""}`} />
+              {scanning ? "SCANNING…" : "SCAN EMAILS"}
+            </button>
+            <button
+              onClick={openAdd}
+              className="flex items-center gap-2 px-5 py-2 bg-[#8aebff]/10 border border-[#8aebff]/30 rounded-lg text-xs font-semibold hover:bg-[#8aebff]/20 transition-all text-[#8aebff] cursor-pointer"
+              title="Track a job you applied to elsewhere (LinkedIn, Naukri, careers page…)"
+            >
+              <Plus className="w-4 h-4" />
+              ADD JOB
+            </button>
+            <button
               onClick={openResume}
               className="flex items-center gap-2 px-5 py-2 bg-white/5 border border-white/10 rounded-lg text-xs font-semibold hover:bg-white/10 hover:border-[#8aebff]/30 transition-all text-[#8aebff] cursor-pointer"
             >
@@ -447,6 +639,57 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
         <div className="font-mono text-xs text-[#ffb4ab] bg-[#ffb4ab]/5 border border-[#ffb4ab]/20 rounded-lg px-4 py-3">
           Failed to sync career node: {error}
         </div>
+      )}
+
+      {/* Needs-your-confirmation strip — low-confidence email→board suggestions */}
+      {pending.length > 0 && (
+        <section className="rounded-xl border border-[#ffd6a3]/25 bg-[#ffd6a3]/[0.04] p-4">
+          <h3 className="text-xs font-bold font-mono uppercase tracking-widest text-[#ffd6a3] flex items-center gap-2 mb-3">
+            <AlertCircle className="w-4 h-4" /> Needs your confirmation
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#ffd6a3]/10 border border-[#ffd6a3]/20">
+              {pad2(pending.length)}
+            </span>
+          </h3>
+          <p className="text-[11px] font-mono text-[#859397] mb-3">
+            JARVIS read an email it couldn't confidently match. Confirm to update the board, or dismiss.
+          </p>
+          <div className="space-y-2.5">
+            {pending.map((p) => (
+              <div
+                key={p.id}
+                className="flex flex-col sm:flex-row sm:items-center gap-3 p-3 rounded-lg bg-[#0a0e1a]/40 border border-white/5"
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-[#dfe2f3] font-semibold truncate">
+                    {p.kind === "add" ? "Add" : "Move"} <span className="text-[#8aebff]">{p.title}</span>
+                    {p.company ? <span className="text-[#859397] font-normal"> · {p.company}</span> : null}
+                    {" "}→ <span className="uppercase text-[#ffd6a3]">{p.to_status}</span>
+                  </p>
+                  {p.reason && (
+                    <p className="text-[11px] font-mono text-[#859397] truncate mt-0.5">{p.reason}</p>
+                  )}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() => confirmPending(p.id)}
+                    disabled={pendingBusy === p.id}
+                    className="px-3 py-1.5 rounded text-[11px] font-bold font-mono bg-[#a3e635]/10 border border-[#a3e635]/30 text-[#a3e635] hover:bg-[#a3e635] hover:text-[#0a0e1a] transition-all cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+                  >
+                    {pendingBusy === p.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                    CONFIRM
+                  </button>
+                  <button
+                    onClick={() => dismissPending(p.id)}
+                    disabled={pendingBusy === p.id}
+                    className="px-3 py-1.5 rounded text-[11px] font-bold font-mono bg-white/5 border border-white/10 text-[#859397] hover:text-[#ffb4ab] hover:border-[#ffb4ab]/30 transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    DISMISS
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
       )}
 
       {/* Kanban Board Layout */}
@@ -514,11 +757,26 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
                                 card.title
                               )}
                             </h3>
-                            {isAction ? (
-                              <ShieldCheck className="w-4 h-4 text-[#ffd6a3] group-hover:scale-110 transition-transform" />
-                            ) : (
-                              <ArrowUpRight className="w-4 h-4 text-[#8aebff]/40 group-hover:text-[#8aebff] group-hover:translate-x-0.5 transition-all" />
-                            )}
+                            <div className="flex items-center gap-2 shrink-0">
+                              {typeof card.ats_score === "number" && (() => {
+                                const c = atsColor(card.ats_score);
+                                return (
+                                  <span
+                                    title={`ATS match score${card.ats_scored_at ? ` — as of ${new Date(card.ats_scored_at).toLocaleDateString()}` : ""}`}
+                                    className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold font-mono border cursor-help"
+                                    style={{ color: c.text, borderColor: `${c.border}55`, backgroundColor: `${c.bg}1a` }}
+                                  >
+                                    <Gauge className="w-3 h-3" />
+                                    {card.ats_score}
+                                  </span>
+                                );
+                              })()}
+                              {isAction ? (
+                                <ShieldCheck className="w-4 h-4 text-[#ffd6a3] group-hover:scale-110 transition-transform" />
+                              ) : (
+                                <ArrowUpRight className="w-4 h-4 text-[#8aebff]/40 group-hover:text-[#8aebff] group-hover:translate-x-0.5 transition-all" />
+                              )}
+                            </div>
                           </div>
 
                           <p className="text-xs font-mono text-[#859397] mb-4">
@@ -911,6 +1169,307 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
                   )}
                 </button>
                 </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Manually add a job applied elsewhere */}
+      <AnimatePresence>
+        {addOpen && (
+          <div className="fixed inset-0 z-[120] flex items-start justify-center pt-[8vh] px-4 bg-[#0a0e1a]/80 backdrop-blur-md overflow-y-auto">
+            <div className="absolute inset-0" onClick={() => setAddOpen(false)} />
+            <motion.div
+              initial={{ opacity: 0, y: 24, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 12, scale: 0.98 }}
+              className="relative w-full max-w-lg mb-16 bg-[#0f131f] border border-[#3c494c] rounded-2xl shadow-2xl"
+            >
+              <div className="p-6 border-b border-white/10 flex justify-between items-start">
+                <div>
+                  <h3 className="text-lg font-bold font-mono tracking-wide text-[#8aebff] flex items-center gap-2">
+                    <Plus className="w-5 h-5" /> ADD A JOB
+                  </h3>
+                  <p className="text-[11px] font-mono text-[#859397] mt-1">
+                    Track a role you applied to elsewhere — LinkedIn, Naukri, a company careers page.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setAddOpen(false)}
+                  aria-label="Close add-job modal"
+                  className="w-9 h-9 rounded-full border border-white/10 flex items-center justify-center text-[#859397] hover:text-white hover:border-white/30 transition-all cursor-pointer"
+                >
+                  <X className="w-4.5 h-4.5" />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-4">
+                <div>
+                  <label className="text-[10px] font-mono uppercase tracking-widest text-[#859397] block mb-1.5">
+                    Job Title <span className="text-[#ffb4ab]">*</span>
+                  </label>
+                  <input
+                    value={manual.title}
+                    onChange={(e) => setManual((m) => ({ ...m, title: e.target.value }))}
+                    autoFocus
+                    placeholder="e.g. Senior Data Analyst"
+                    className="w-full bg-[#0a0e1a]/60 border border-white/10 rounded-lg px-3 py-2.5 font-mono text-sm text-[#dfe2f3] focus:outline-none focus:border-[#8aebff]/40"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] font-mono uppercase tracking-widest text-[#859397] block mb-1.5">
+                      Company
+                    </label>
+                    <input
+                      value={manual.company}
+                      onChange={(e) => setManual((m) => ({ ...m, company: e.target.value }))}
+                      placeholder="e.g. Acme Corp"
+                      className="w-full bg-[#0a0e1a]/60 border border-white/10 rounded-lg px-3 py-2.5 font-mono text-sm text-[#dfe2f3] focus:outline-none focus:border-[#8aebff]/40"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-mono uppercase tracking-widest text-[#859397] block mb-1.5">
+                      Location
+                    </label>
+                    <input
+                      value={manual.location}
+                      onChange={(e) => setManual((m) => ({ ...m, location: e.target.value }))}
+                      placeholder="e.g. Hyderabad / Remote"
+                      className="w-full bg-[#0a0e1a]/60 border border-white/10 rounded-lg px-3 py-2.5 font-mono text-sm text-[#dfe2f3] focus:outline-none focus:border-[#8aebff]/40"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-mono uppercase tracking-widest text-[#859397] block mb-1.5">
+                    Job URL
+                  </label>
+                  <input
+                    value={manual.url}
+                    onChange={(e) => setManual((m) => ({ ...m, url: e.target.value }))}
+                    placeholder="https://…"
+                    className="w-full bg-[#0a0e1a]/60 border border-white/10 rounded-lg px-3 py-2.5 font-mono text-sm text-[#dfe2f3] focus:outline-none focus:border-[#8aebff]/40"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] font-mono uppercase tracking-widest text-[#859397] block mb-1.5">
+                      Applied via
+                    </label>
+                    <input
+                      value={manual.source}
+                      onChange={(e) => setManual((m) => ({ ...m, source: e.target.value }))}
+                      placeholder="e.g. LinkedIn, Naukri"
+                      className="w-full bg-[#0a0e1a]/60 border border-white/10 rounded-lg px-3 py-2.5 font-mono text-sm text-[#dfe2f3] focus:outline-none focus:border-[#8aebff]/40"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-mono uppercase tracking-widest text-[#859397] block mb-1.5">
+                      Status
+                    </label>
+                    <div className="relative">
+                      <select
+                        value={manual.status}
+                        onChange={(e) => setManual((m) => ({ ...m, status: e.target.value }))}
+                        className="w-full appearance-none bg-[#0a0e1a]/60 border border-white/10 rounded-lg px-3 pr-8 py-2.5 font-mono text-sm text-[#dfe2f3] uppercase focus:outline-none focus:border-[#8aebff]/40 cursor-pointer"
+                      >
+                        {(statuses.length ? statuses : ["interested", "applied", "interviewing", "offer", "accepted", "rejected"]).map((s) => (
+                          <option key={s} value={s} className="bg-[#0a0e1a] text-[#dfe2f3]">
+                            {s.toUpperCase()}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown className="w-4 h-4 text-[#859397] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    </div>
+                  </div>
+                </div>
+
+                {addError && <p className="text-xs font-mono text-[#ffb4ab]">{addError}</p>}
+              </div>
+
+              <div className="p-6 pt-0 flex justify-end gap-3">
+                <button
+                  onClick={() => setAddOpen(false)}
+                  className="px-5 py-2.5 rounded-lg text-xs font-semibold font-mono text-[#bbc9cd] bg-white/5 border border-white/10 hover:bg-white/10 transition-all cursor-pointer"
+                >
+                  CANCEL
+                </button>
+                <button
+                  onClick={saveManual}
+                  disabled={addSaving}
+                  className="px-6 py-2.5 rounded-lg text-xs font-bold font-mono bg-[#8aebff] hover:bg-[#22d3ee] text-[#00363e] transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                >
+                  {addSaving ? (
+                    <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> ADDING…</>
+                  ) : (
+                    <><Plus className="w-3.5 h-3.5" /> ADD TO BOARD</>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Scan result popup */}
+      <AnimatePresence>
+        {scanOpen && scanResult && (
+          <div className="fixed inset-0 z-[140] flex items-center justify-center px-4 bg-[#0a0e1a]/80 backdrop-blur-md">
+            <div className="absolute inset-0" onClick={() => setScanOpen(false)} />
+            <motion.div
+              initial={{ opacity: 0, y: 20, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 10, scale: 0.96 }}
+              className="relative w-full max-w-md bg-[#0f131f] border border-[#3c494c] rounded-2xl shadow-2xl p-6 text-center"
+            >
+              <button
+                onClick={() => setScanOpen(false)}
+                aria-label="Close scan result"
+                className="absolute top-4 right-4 w-8 h-8 rounded-full border border-white/10 flex items-center justify-center text-[#859397] hover:text-white transition-all cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+
+              {(() => {
+                const r = scanResult || {};
+                const moved = r.moved || 0;
+                const added = r.added || 0;
+                const pend = r.pending || 0;
+                const scanned = r.scanned || 0;
+                const total = moved + added + pend;
+
+                if (r.error) {
+                  return (
+                    <>
+                      <AlertCircle className="w-12 h-12 text-[#ffb4ab] mx-auto mb-3" />
+                      <h3 className="text-lg font-bold font-mono text-[#ffb4ab]">Couldn't scan your email</h3>
+                      <p className="text-sm text-[#bbc9cd] mt-2">{String(r.error)}</p>
+                      <p className="text-[11px] font-mono text-[#859397] mt-3">
+                        Your Gmail connection may need re-authorising. Nothing on your board was changed.
+                      </p>
+                    </>
+                  );
+                }
+
+                if (total === 0) {
+                  return (
+                    <>
+                      <Mail className="w-12 h-12 text-[#8aebff] mx-auto mb-3" />
+                      <h3 className="text-lg font-bold font-mono text-[#dfe2f3]">No new job updates</h3>
+                      <p className="text-sm text-[#bbc9cd] mt-2">
+                        {scanned > 0
+                          ? `I read ${scanned} recent email${scanned === 1 ? "" : "s"} — none were about your job applications. Your board is up to date.`
+                          : "No new emails to scan since last time. Your board is up to date."}
+                      </p>
+                    </>
+                  );
+                }
+
+                return (
+                  <>
+                    <CheckCircle2 className="w-12 h-12 text-[#a3e635] mx-auto mb-3" />
+                    <h3 className="text-lg font-bold font-mono text-[#dfe2f3]">Board updated</h3>
+                    <p className="text-[11px] font-mono text-[#859397] mt-1">
+                      Read {scanned} recent email{scanned === 1 ? "" : "s"}.
+                    </p>
+                    <div className="mt-4 space-y-2 text-left">
+                      {moved > 0 && (
+                        <div className="flex items-center gap-2 text-sm text-[#dfe2f3]">
+                          <span className="text-[#a3e635]">📨</span> Moved <b>{moved}</b> application{moved === 1 ? "" : "s"} forward
+                        </div>
+                      )}
+                      {added > 0 && (
+                        <div className="flex items-center gap-2 text-sm text-[#dfe2f3]">
+                          <span className="text-[#8aebff]">➕</span> Added <b>{added}</b> new card{added === 1 ? "" : "s"} from your email
+                        </div>
+                      )}
+                      {pend > 0 && (
+                        <div className="flex items-center gap-2 text-sm text-[#dfe2f3]">
+                          <span className="text-[#ffd6a3]">🔎</span> <b>{pend}</b> need{pend === 1 ? "s" : ""} your confirmation below
+                        </div>
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
+
+              <button
+                onClick={() => setScanOpen(false)}
+                className="mt-6 w-full py-2.5 rounded-lg text-sm font-bold font-mono bg-[#8aebff] hover:bg-[#22d3ee] text-[#00363e] transition-all cursor-pointer"
+              >
+                GOT IT
+              </button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Paste-a-JD modal — for cards with no job description */}
+      <AnimatePresence>
+        {jdOpen && (
+          <div className="fixed inset-0 z-[135] flex items-start justify-center pt-[8vh] px-4 bg-[#0a0e1a]/80 backdrop-blur-md overflow-y-auto">
+            <div className="absolute inset-0" onClick={() => setJdOpen(false)} />
+            <motion.div
+              initial={{ opacity: 0, y: 20, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 10, scale: 0.98 }}
+              className="relative w-full max-w-lg mb-16 bg-[#0f131f] border border-[#3c494c] rounded-2xl shadow-2xl"
+            >
+              <div className="p-6 border-b border-white/10 flex justify-between items-start">
+                <div>
+                  <h3 className="text-lg font-bold font-mono tracking-wide text-[#8aebff] flex items-center gap-2">
+                    <ClipboardCheck className="w-5 h-5" /> PASTE THE JOB DESCRIPTION
+                  </h3>
+                  <p className="text-[11px] font-mono text-[#859397] mt-1">
+                    {jdForTitle} has no description saved — quick-apply / email / manual cards don't include one.
+                    Paste the posting and I'll score your résumé against it (saved to this card for next time).
+                  </p>
+                </div>
+                <button
+                  onClick={() => setJdOpen(false)}
+                  aria-label="Close paste-JD modal"
+                  className="w-9 h-9 rounded-full border border-white/10 flex items-center justify-center text-[#859397] hover:text-white hover:border-white/30 transition-all cursor-pointer"
+                >
+                  <X className="w-4.5 h-4.5" />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-4">
+                <textarea
+                  value={jdText}
+                  onChange={(e) => setJdText(e.target.value)}
+                  autoFocus
+                  placeholder="Paste the full job description here — responsibilities, requirements, skills…"
+                  className="w-full min-h-[240px] bg-[#0a0e1a]/60 border border-white/10 rounded-lg p-4 font-mono text-xs text-[#dfe2f3] leading-relaxed focus:outline-none focus:border-[#8aebff]/40 resize-y"
+                />
+                {jdError && <p className="text-xs font-mono text-[#ffb4ab]">{jdError}</p>}
+                <p className="text-[10px] font-mono text-[#859397]">
+                  No posting handy? Close this and use <span className="text-[#a3e635]">RÉSUMÉ AUDIT</span> for a general, job-agnostic check.
+                </p>
+              </div>
+
+              <div className="p-6 pt-0 flex justify-end gap-3">
+                <button
+                  onClick={() => setJdOpen(false)}
+                  className="px-5 py-2.5 rounded-lg text-xs font-semibold font-mono text-[#bbc9cd] bg-white/5 border border-white/10 hover:bg-white/10 transition-all cursor-pointer"
+                >
+                  CANCEL
+                </button>
+                <button
+                  onClick={submitJd}
+                  disabled={jdBusy}
+                  className="px-6 py-2.5 rounded-lg text-xs font-bold font-mono bg-[#8aebff] hover:bg-[#22d3ee] text-[#00363e] transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                >
+                  {jdBusy ? (
+                    <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> ANALYZING…</>
+                  ) : (
+                    <><Gauge className="w-3.5 h-3.5" /> SCORE MY RÉSUMÉ</>
+                  )}
+                </button>
               </div>
             </motion.div>
           </div>

@@ -181,6 +181,40 @@ def compile_txt(job: dict, analysis: dict) -> str:
     return _strip_markdown("\n".join(lines))
 
 
+def _resume_has_keyword(keyword: str, resume_lo: str) -> bool:
+    """Case-insensitive, word-boundary check for a keyword/phrase in the résumé text.
+    Word boundaries stop 'R' matching every word and 'SQL' matching inside 'NoSQL' loosely."""
+    k = (keyword or "").strip().lower()
+    if not k:
+        return False
+    try:
+        return re.search(r"(?<![a-z0-9])" + re.escape(k) + r"(?![a-z0-9])", resume_lo) is not None
+    except re.error:
+        return k in resume_lo
+
+
+def _reconcile_keyword_matrix(analysis: dict, resume: str) -> dict:
+    """The LLM's present/missing split is unreliable (and the UI matches it case-sensitively),
+    which caused skills that ARE in the résumé to show 'Missing'. Recompute deterministically:
+    a required keyword is PRESENT if the LLM flagged it present OR it literally appears in the
+    résumé. This keeps semantic matches while eliminating false 'Missing' on exact hits."""
+    km = analysis.get("keyword_matrix") or {}
+    required = [str(x) for x in (km.get("required") or [])]
+    if not required:
+        return analysis
+    llm_present = {str(x).strip().lower() for x in (km.get("present") or [])}
+    resume_lo = (resume or "").lower()
+    present, missing = [], []
+    for kw in required:
+        if kw.strip().lower() in llm_present or _resume_has_keyword(kw, resume_lo):
+            present.append(kw)
+        else:
+            missing.append(kw)
+    km["present"], km["missing"] = present, missing
+    analysis["keyword_matrix"] = km
+    return analysis
+
+
 async def analyze(job: dict, call_llm_fn, domain: str = DEFAULT_DOMAIN) -> dict:
     """Run the ATS analysis for one job against the master resume, cache it, and return the
     cache row (dict). `job` needs: job_key/id, title, company, location, description.
@@ -202,6 +236,7 @@ async def analyze(job: dict, call_llm_fn, domain: str = DEFAULT_DOMAIN) -> dict:
         print(f"⚠️ [resume_ats] analysis failed: {e}")
         return {"error": "Analysis failed — try again in a moment."}
 
+    analysis = _reconcile_keyword_matrix(analysis, resume)
     txt = compile_txt(job, analysis)
     now = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
@@ -236,9 +271,36 @@ async def get_analysis(job_ref: str) -> dict:
     return a
 
 
+async def get_scores_map(keys=None) -> dict:
+    """{job_ref: {"ats_score": int, "created_at": str}} for cached analyses. Pass the list of
+    job_refs you care about (e.g. the board's job_keys) — a parameterised WHERE ... IN (...)
+    lookup, which reads reliably under the Turso HTTP layer (the parameterless SELECT-all did
+    not reflect just-written rows inside the long-running server). Empty/None keys → {}."""
+    keys = [str(k) for k in (keys or []) if k]
+    if not keys:
+        return {}
+    placeholders = ",".join("?" for _ in keys)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            f"SELECT job_ref, ats_score, created_at FROM ats_analysis_cache WHERE job_ref IN ({placeholders})",
+            tuple(keys),
+        )
+        rows = await cur.fetchall()
+    return {r["job_ref"]: {"ats_score": r["ats_score"], "created_at": r["created_at"]} for r in rows}
+
+
 async def mark_viewed(job_ref: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE ats_analysis_cache SET viewed = 1 WHERE job_ref = ?", (str(job_ref),))
+        await db.commit()
+
+
+async def delete_analysis(job_ref: str):
+    """Drop a cached analysis — called when its application is removed, so deleting a card
+    doesn't leave an orphan analysis inflating the board's counts."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM ats_analysis_cache WHERE job_ref = ?", (str(job_ref),))
         await db.commit()
 
 
