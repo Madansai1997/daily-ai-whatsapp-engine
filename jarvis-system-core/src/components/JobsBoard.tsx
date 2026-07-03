@@ -13,6 +13,9 @@ import {
   Trash2,
   ChevronDown,
   Upload,
+  ClipboardCheck,
+  Gauge,
+  Sparkles,
 } from "lucide-react";
 
 interface JobsBoardProps {
@@ -117,6 +120,13 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
   const [resumeSaving, setResumeSaving] = useState(false);
   const [resumeUploading, setResumeUploading] = useState(false);
   const resumeFileRef = useRef<HTMLInputElement>(null);
+
+  // Standalone résumé audit (job-agnostic)
+  const [auditOpen, setAuditOpen] = useState(false);
+  const [audit, setAudit] = useState<any | null>(null);
+  const [auditFetching, setAuditFetching] = useState(false);
+  const [auditRunning, setAuditRunning] = useState(false);
+  const [auditError, setAuditError] = useState("");
 
   /* ---- Data loading ---- */
 
@@ -258,6 +268,37 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
     }
   };
 
+  /* ---- Résumé Audit (general, no JD) ---- */
+  const openAudit = async () => {
+    setAuditOpen(true);
+    setAuditError("");
+    setAuditFetching(true);
+    try {
+      const res = await fetch("/resume/audit");
+      const data = await res.json();
+      setAudit(data?.audit || null);
+    } catch {
+      setAudit(null);
+    } finally {
+      setAuditFetching(false);
+    }
+  };
+
+  const runAudit = async () => {
+    setAuditRunning(true);
+    setAuditError("");
+    try {
+      const res = await fetch("/resume/audit", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      setAudit(data.audit);
+    } catch (e) {
+      setAuditError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAuditRunning(false);
+    }
+  };
+
   const openInGoogleDoc = async (jobRef: string) => {
     setDocLoading(true);
     try {
@@ -330,6 +371,14 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
             >
               <FileText className="w-4 h-4" />
               RÉSUMÉ
+            </button>
+            <button
+              onClick={openAudit}
+              className="flex items-center gap-2 px-5 py-2 bg-[#a3e635]/10 border border-[#a3e635]/30 rounded-lg text-xs font-semibold hover:bg-[#a3e635]/20 transition-all text-[#a3e635] cursor-pointer"
+              title="General résumé health check — not tied to any job"
+            >
+              <ClipboardCheck className="w-4 h-4" />
+              RÉSUMÉ AUDIT
             </button>
             <button
               onClick={loadApplications}
@@ -805,6 +854,211 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
                 </button>
                 </div>
               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Résumé Audit modal (general, job-agnostic) */}
+      <AnimatePresence>
+        {auditOpen && (
+          <div className="fixed inset-0 z-[120] flex items-start justify-center pt-[6vh] px-4 bg-[#0a0e1a]/80 backdrop-blur-md overflow-y-auto">
+            <div className="absolute inset-0" onClick={() => setAuditOpen(false)} />
+            <motion.div
+              initial={{ opacity: 0, y: 24, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 12, scale: 0.98 }}
+              className="relative w-full max-w-3xl mb-16 bg-[#0f131f] border border-[#3c494c] rounded-2xl shadow-2xl flex flex-col"
+            >
+              {/* Header */}
+              <div className="p-6 border-b border-white/10 flex justify-between items-start">
+                <div>
+                  <h3 className="text-lg font-bold font-mono tracking-wide text-[#a3e635] flex items-center gap-2">
+                    <ClipboardCheck className="w-5 h-5" /> RÉSUMÉ AUDIT
+                  </h3>
+                  <p className="text-[11px] font-mono text-[#859397] mt-1">
+                    General health check — why your résumé is / isn't getting calls. Not tied to any job.
+                  </p>
+                </div>
+                <button onClick={() => setAuditOpen(false)} className="w-9 h-9 rounded-full border border-white/10 flex items-center justify-center text-[#859397] hover:text-white hover:border-white/30 transition-all cursor-pointer">
+                  <X className="w-4.5 h-4.5" />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-6">
+                {auditFetching ? (
+                  <div className="flex items-center justify-center py-16 font-mono text-xs text-[#859397]">
+                    <RefreshCw className="w-4 h-4 animate-spin mr-2" /> Loading…
+                  </div>
+                ) : !audit ? (
+                  <div className="flex flex-col items-center text-center py-10 gap-4">
+                    <Gauge className="w-12 h-12 text-[#a3e635]/40" />
+                    <p className="text-sm text-[#bbc9cd] max-w-md">
+                      Run a full audit of your saved master résumé. JARVIS reviews it like a senior recruiter +
+                      ATS specialist — structure, gaps, missing sections, impact, grammar, keywords, and the top
+                      changes to get more interview calls.
+                    </p>
+                    {auditError && <p className="text-xs font-mono text-[#ffb4ab]">{auditError}</p>}
+                    <button
+                      onClick={runAudit}
+                      disabled={auditRunning}
+                      className="px-6 py-2.5 rounded-lg text-sm font-bold bg-[#a3e635] hover:bg-[#bef264] text-[#0a0e1a] transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                    >
+                      {auditRunning ? <><RefreshCw className="w-4 h-4 animate-spin" /> AUDITING…</> : <><Sparkles className="w-4 h-4" /> RUN AUDIT</>}
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    {/* Scores */}
+                    <div className="grid grid-cols-2 gap-4">
+                      {[
+                        { label: "Overall Score", val: audit.overall_score },
+                        { label: "ATS Parse Score", val: audit.ats_parse_score },
+                      ].map((s) => {
+                        const v = Number(s.val) || 0;
+                        const c = v >= 80 ? "#5eead4" : v >= 60 ? "#ffd6a3" : "#ffb4ab";
+                        return (
+                          <div key={s.label} className="p-4 rounded-xl bg-[#1b1f2c]/50 border border-white/5 text-center">
+                            <div className="text-4xl font-bold font-mono" style={{ color: c }}>{v}<span className="text-lg text-[#859397]">/100</span></div>
+                            <div className="text-[10px] font-mono text-[#859397] uppercase tracking-widest mt-1">{s.label}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Verdict */}
+                    {audit.verdict && (
+                      <div className="p-4 rounded-xl bg-[#8aebff]/5 border border-[#8aebff]/20">
+                        <p className="text-sm text-[#dfe2f3] leading-relaxed">{audit.verdict}</p>
+                      </div>
+                    )}
+
+                    {/* Top priorities */}
+                    {Array.isArray(audit.top_priorities) && audit.top_priorities.length > 0 && (
+                      <div>
+                        <h4 className="text-xs font-bold font-mono uppercase tracking-widest text-[#a3e635] mb-2">🎯 Top priorities — do these first</h4>
+                        <ol className="space-y-1.5">
+                          {audit.top_priorities.map((p: string, i: number) => (
+                            <li key={i} className="flex gap-2 text-sm text-[#dfe2f3]">
+                              <span className="text-[#a3e635] font-bold font-mono">{i + 1}.</span>
+                              <span>{p}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    )}
+
+                    {/* Section checklist */}
+                    {Array.isArray(audit.sections) && audit.sections.length > 0 && (
+                      <div>
+                        <h4 className="text-xs font-bold font-mono uppercase tracking-widest text-[#859397] mb-2">Section check</h4>
+                        <div className="flex flex-wrap gap-2">
+                          {audit.sections.map((sec: any, i: number) => {
+                            const st = (sec.status || "").toLowerCase();
+                            const cls = st === "present" ? "text-[#5eead4] border-[#5eead4]/30 bg-[#5eead4]/10"
+                              : st === "missing" ? "text-[#ffb4ab] border-[#ffb4ab]/30 bg-[#ffb4ab]/10"
+                              : "text-[#ffd6a3] border-[#ffd6a3]/30 bg-[#ffd6a3]/10";
+                            return (
+                              <span key={i} title={sec.note} className={`text-[11px] font-mono px-2 py-1 rounded border ${cls}`}>
+                                {sec.name}: {sec.status}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Issues */}
+                    {Array.isArray(audit.issues) && audit.issues.length > 0 && (
+                      <div>
+                        <h4 className="text-xs font-bold font-mono uppercase tracking-widest text-[#859397] mb-2">Issues & fixes</h4>
+                        <div className="space-y-2">
+                          {audit.issues.map((it: any, i: number) => {
+                            const sev = (it.severity || "").toLowerCase();
+                            const c = sev === "high" ? "#ffb4ab" : sev === "medium" ? "#ffd6a3" : "#8aebff";
+                            return (
+                              <div key={i} className="p-3 rounded-lg bg-[#1b1f2c]/40 border border-white/5">
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className="text-[9px] font-bold font-mono uppercase px-1.5 py-0.5 rounded" style={{ color: c, backgroundColor: `${c}1a` }}>{it.severity}</span>
+                                  <span className="text-[10px] font-mono text-[#859397] uppercase">{it.category}</span>
+                                </div>
+                                <p className="text-[13px] text-[#dfe2f3]">{it.problem}</p>
+                                {it.fix && <p className="text-[12px] text-[#5eead4] mt-1">→ {it.fix}</p>}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Missing */}
+                    {Array.isArray(audit.missing) && audit.missing.length > 0 && (
+                      <div>
+                        <h4 className="text-xs font-bold font-mono uppercase tracking-widest text-[#ffb4ab] mb-2">Missing entirely</h4>
+                        <ul className="list-disc list-inside space-y-1 text-sm text-[#dfe2f3]">
+                          {audit.missing.map((m: string, i: number) => <li key={i}>{m}</li>)}
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* Quantification */}
+                    {audit.quantification && (
+                      <div className="p-3 rounded-lg bg-[#1b1f2c]/40 border border-white/5">
+                        <span className="text-xs font-bold font-mono uppercase tracking-widest text-[#859397]">Impact / quantification</span>
+                        <p className="text-[13px] text-[#dfe2f3] mt-1">
+                          {audit.quantification.bullets_with_metrics ?? "?"} of {audit.quantification.total_bullets ?? "?"} bullets have metrics. {audit.quantification.note}
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Grammar */}
+                    {Array.isArray(audit.grammar) && audit.grammar.length > 0 && (
+                      <div>
+                        <h4 className="text-xs font-bold font-mono uppercase tracking-widest text-[#859397] mb-2">Grammar & wording</h4>
+                        <div className="space-y-2">
+                          {audit.grammar.map((g: any, i: number) => (
+                            <div key={i} className="text-[12px] font-mono">
+                              <span className="text-[#ffb4ab] line-through">{g.original}</span>{" "}
+                              <span className="text-[#5eead4]">→ {g.suggestion}</span>
+                              {g.type && <span className="text-[9px] text-[#859397] ml-2">({g.type})</span>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Keywords to add */}
+                    {Array.isArray(audit.keywords_to_add) && audit.keywords_to_add.length > 0 && (
+                      <div>
+                        <h4 className="text-xs font-bold font-mono uppercase tracking-widest text-[#859397] mb-2">Keywords to consider adding (only if genuine)</h4>
+                        <div className="flex flex-wrap gap-1.5">
+                          {audit.keywords_to_add.map((k: string, i: number) => (
+                            <span key={i} className="text-[11px] font-mono px-2 py-0.5 rounded bg-[#8aebff]/10 border border-[#8aebff]/20 text-[#8aebff]">{k}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {auditError && <p className="text-xs font-mono text-[#ffb4ab]">{auditError}</p>}
+                  </>
+                )}
+              </div>
+
+              {/* Footer */}
+              {audit && !auditFetching && (
+                <div className="p-4 border-t border-white/5 flex items-center justify-between">
+                  <span className="text-[10px] font-mono text-[#859397]">
+                    {audit.created_at ? `Last run: ${new Date(audit.created_at).toLocaleString()}` : ""}
+                  </span>
+                  <button
+                    onClick={runAudit}
+                    disabled={auditRunning}
+                    className="px-5 py-2 rounded-lg text-xs font-bold bg-[#a3e635]/10 border border-[#a3e635]/30 text-[#a3e635] hover:bg-[#a3e635] hover:text-[#0a0e1a] transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {auditRunning ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> RE-AUDITING…</> : <><RefreshCw className="w-3.5 h-3.5" /> RE-RUN AUDIT</>}
+                  </button>
+                </div>
+              )}
             </motion.div>
           </div>
         )}

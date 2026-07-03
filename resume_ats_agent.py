@@ -93,6 +93,12 @@ def init_resume_ats_tables():
         viewed INTEGER DEFAULT 0,
         created_at TEXT
     )''')
+    # Standalone résumé health audit (NOT tied to any job) — single latest row.
+    cur.execute('''CREATE TABLE IF NOT EXISTS resume_audit (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        data TEXT,
+        created_at TEXT
+    )''')
     conn.commit()
     conn.close()
     print("✅ Resume ATS tables ready.")
@@ -230,3 +236,88 @@ async def count_unviewed() -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT COUNT(*) FROM ats_analysis_cache WHERE viewed = 0")
         return (await cur.fetchone())[0]
+
+
+# ============================================================================
+# STANDALONE RÉSUMÉ AUDIT — a general, job-agnostic health check. No JD.
+# Acts like a senior recruiter + ATS specialist reviewing the résumé cold.
+# ============================================================================
+RESUME_AUDIT_PROMPT = (
+    "You are a SENIOR TECHNICAL RECRUITER and ATS (Applicant Tracking System) specialist with 15 "
+    "years hiring data/analytics talent. A candidate who has gotten ZERO interview calls in ~6 "
+    "months hands you their résumé with no job description. Audit it COLD and BRUTALLY HONESTLY — "
+    "your job is to explain why it isn't landing interviews and exactly how to fix it. Do not be "
+    "polite-vague; be specific and actionable. Judge it the way a real ATS parses it AND the way a "
+    "human recruiter skims it in 7 seconds.\n\n"
+    "Return STRICT JSON only — no markdown, no prose outside the JSON — with EXACTLY this shape:\n"
+    "{\n"
+    '  "overall_score": <int 0-100: overall résumé strength>,\n'
+    '  "ats_parse_score": <int 0-100: how cleanly an ATS parses/reads it>,\n'
+    '  "verdict": "<2-3 sentence blunt honest summary of why it is or isn\'t getting calls>",\n'
+    '  "sections": [ {"name":"Contact info|Summary|Skills|Experience|Education|Projects|Certifications",\n'
+    '                 "status":"present|missing|weak", "note":"<short specific note>"} ],\n'
+    '  "issues": [ {"severity":"high|medium|low",\n'
+    '               "category":"Formatting|Content|Keywords|Impact|Grammar|Length|Contact",\n'
+    '               "problem":"<what is wrong, specific>", "fix":"<exactly what to do about it>"} ],\n'
+    '  "missing": [ "<things entirely absent that recruiters/ATS expect>" ],\n'
+    '  "grammar": [ {"original":"<exact phrase from résumé>", "suggestion":"<corrected>",\n'
+    '                "type":"spelling|grammar|tense|passive-voice|wording"} ],\n'
+    '  "quantification": {"total_bullets":<int>, "bullets_with_metrics":<int>,\n'
+    '                     "note":"<how well achievements are quantified and what to add>"},\n'
+    '  "keywords_to_add": [ "<industry/role keywords likely expected that appear ABSENT — honest, '
+    'do not tell them to lie>" ],\n'
+    '  "top_priorities": [ "<the 3-6 highest-leverage changes, ordered, that will most increase '
+    'interview callbacks>" ]\n'
+    "}\n\n"
+    "RULES:\n"
+    "- Infer the target role from the résumé itself (e.g. Data Analyst). No job description is given.\n"
+    "- Quote REAL phrases from the résumé in 'grammar.original' and be precise — do not invent text.\n"
+    "- 'keywords_to_add' = skills the role generally expects that are missing; NEVER advise fabricating "
+    "experience — frame as 'add if you genuinely have it / learn it'.\n"
+    "- Cover ATS-parse killers (tables, columns, graphics, headers/footers, non-standard section titles, "
+    "date-format inconsistency, missing standard sections), impact/quantification, weak verbs, passive "
+    "voice, tense consistency, length, and contact completeness (email/phone/LinkedIn).\n"
+    "- 'issues' must be concrete and each have a real 'fix'. Prioritize by actual callback impact.\n"
+    "Output JSON only."
+)
+
+
+async def audit_resume(call_llm_fn) -> dict:
+    """Run a general (job-agnostic) ATS/recruiter audit on the saved master résumé,
+    cache the single latest result, and return it. {"error": ...} if no résumé."""
+    resume = await get_resume_template()
+    if not (resume or "").strip():
+        return {"error": "No master résumé saved yet. Upload or paste your résumé first."}
+    try:
+        raw = await call_llm_fn(RESUME_AUDIT_PROMPT, f"RÉSUMÉ:\n{resume[:8000]}", max_tokens=3000)
+        audit = _parse_json_object(raw)
+    except Exception as e:
+        print(f"⚠️ [resume_ats] audit failed: {e}")
+        return {"error": "Audit failed — try again in a moment."}
+    if not audit or "overall_score" not in audit:
+        return {"error": "Audit couldn't be parsed — try again."}
+
+    now = datetime.now(timezone.utc).isoformat()
+    audit["created_at"] = now
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO resume_audit (id, data, created_at) VALUES (1, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET data=excluded.data, created_at=excluded.created_at""",
+            (json.dumps(audit), now))
+        await db.commit()
+    return audit
+
+
+async def get_saved_audit() -> dict:
+    """Return the last stored audit (with created_at), or None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT data, created_at FROM resume_audit WHERE id = 1")
+        row = await cur.fetchone()
+    if not row or not row[0]:
+        return None
+    try:
+        a = json.loads(row[0])
+        a["created_at"] = row[1]
+        return a
+    except Exception:
+        return None

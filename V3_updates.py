@@ -120,6 +120,8 @@ from resume_ats_agent import (
     count_unviewed as count_ats_unviewed,
     save_resume_template,
     get_resume_template,
+    audit_resume,
+    get_saved_audit,
 )
 from pdf_import import extract_pdf_text
 try:
@@ -5356,6 +5358,20 @@ async def ats_google_doc_api(job_ref: str):
 @app.get("/ats/pending/count")
 async def ats_pending_count_api():
     return JSONResponse({"count": await count_ats_unviewed()})
+
+
+# ── Standalone résumé audit (job-agnostic health check) ──────────────────────
+@app.get("/resume/audit")
+async def resume_audit_get_api():
+    return JSONResponse({"audit": await get_saved_audit()})
+
+
+@app.post("/resume/audit")
+async def resume_audit_run_api():
+    result = await audit_resume(call_llm)
+    if result.get("error"):
+        return JSONResponse({"ok": False, "error": result["error"]}, status_code=400)
+    return JSONResponse({"ok": True, "audit": result})
 
 
 @app.post("/chat-message")
