@@ -278,8 +278,10 @@ async def fetch_jsearch(profile: dict, limit: int = 10) -> list:
     return out
 
 
-# Daily-cron sources only (JSearch is on-demand, deliberately excluded here).
+# Daily-cron sources. If RAPIDAPI_KEY is configured, we include fetch_jsearch to query LinkedIn/Indeed/Glassdoor.
 SOURCES = [fetch_adzuna, fetch_remotive]
+if RAPIDAPI_KEY:
+    SOURCES.append(fetch_jsearch)
 
 
 # =========================================================================
