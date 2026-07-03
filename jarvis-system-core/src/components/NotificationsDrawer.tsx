@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { motion } from "motion/react";
-import { X, Bell, RefreshCw, Trash2, Play, CheckCircle, Loader2 } from "lucide-react";
+import { X, Bell, RefreshCw, Trash2, Play, CheckCircle, Loader2, CornerDownLeft, Send, Sparkles } from "lucide-react";
 
 interface NotificationsDrawerProps {
   onClose: () => void;
@@ -28,6 +28,12 @@ export default function NotificationsDrawer({ onClose }: NotificationsDrawerProp
   const [loading, setLoading] = useState(true);
   const [runningJob, setRunningJob] = useState<string | null>(null);
   const [jobFeedback, setJobFeedback] = useState<Record<string, string>>({});
+
+  // Inline reply-to-notification state (routes through the JARVIS chat pipeline)
+  const [replyingId, setReplyingId] = useState<number | null>(null);
+  const [replyText, setReplyText] = useState("");
+  const [replyBusy, setReplyBusy] = useState(false);
+  const [replyResult, setReplyResult] = useState<Record<number, string>>({});
 
   const loadLogs = async () => {
     setLoading(true);
@@ -94,6 +100,29 @@ export default function NotificationsDrawer({ onClose }: NotificationsDrawerProp
       if (res.ok) setNotifications([]);
     } catch (err) {
       console.error("Failed to clear notifications:", err);
+    }
+  };
+
+  // Reply to a notification — routes the text through the same JARVIS pipeline
+  // the chat uses, so "TRACK 1", "remind me…", questions, etc. all work here.
+  const sendReply = async (id: number) => {
+    const text = replyText.trim();
+    if (!text) return;
+    setReplyBusy(true);
+    try {
+      const res = await fetch("/chat-message", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text }),
+      });
+      const data = await res.json();
+      setReplyResult((prev) => ({ ...prev, [id]: data?.reply || "✅ Done." }));
+      setReplyText("");
+      loadNotifications(); // a reply may itself create a new notification
+    } catch {
+      setReplyResult((prev) => ({ ...prev, [id]: "⚠️ Couldn't reach JARVIS." }));
+    } finally {
+      setReplyBusy(false);
     }
   };
 
@@ -251,6 +280,54 @@ export default function NotificationsDrawer({ onClose }: NotificationsDrawerProp
                       <p className="text-[12px] text-[#dfe2f3] leading-relaxed whitespace-pre-wrap break-words">
                         {n.body?.trim() ? n.body : "(no content)"}
                       </p>
+
+                      {/* Reply affordance */}
+                      {replyingId === n.id ? (
+                        <div className="mt-2">
+                          <div className="flex items-center gap-2">
+                            <input
+                              autoFocus
+                              value={replyText}
+                              onChange={(e) => setReplyText(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === "Enter" && !replyBusy) sendReply(n.id); }}
+                              placeholder="Reply to JARVIS — e.g. TRACK 1"
+                              className="flex-1 bg-[#0a0e1a]/70 border border-white/10 rounded px-2.5 py-1.5 text-[12px] font-mono text-[#dfe2f3] focus:outline-none focus:border-[#8aebff]/40"
+                            />
+                            <button
+                              onClick={() => sendReply(n.id)}
+                              disabled={replyBusy || !replyText.trim()}
+                              className="p-1.5 rounded bg-[#8aebff]/10 border border-[#8aebff]/30 text-[#8aebff] hover:bg-[#8aebff] hover:text-[#00363e] transition-all disabled:opacity-40 cursor-pointer"
+                              title="Send"
+                            >
+                              {replyBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                            </button>
+                            <button
+                              onClick={() => { setReplyingId(null); setReplyText(""); }}
+                              className="p-1.5 rounded text-[#859397] hover:text-white transition-colors cursor-pointer"
+                              title="Cancel"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => { setReplyingId(n.id); setReplyText(""); }}
+                          className="mt-1.5 inline-flex items-center gap-1 text-[10px] font-mono text-[#859397] hover:text-[#8aebff] transition-colors cursor-pointer"
+                        >
+                          <CornerDownLeft className="w-3 h-3" /> Reply
+                        </button>
+                      )}
+
+                      {/* JARVIS response to a reply */}
+                      {replyResult[n.id] && (
+                        <div className="mt-2 flex items-start gap-1.5 rounded bg-[#1b1f2c]/60 border border-[#8aebff]/20 p-2">
+                          <Sparkles className="w-3 h-3 text-[#8aebff] mt-0.5 shrink-0" />
+                          <p className="text-[11px] text-[#dfe2f3] whitespace-pre-wrap break-words leading-relaxed">
+                            {replyResult[n.id]}
+                          </p>
+                        </div>
+                      )}
                     </div>
                     <button
                       onClick={() => handleDeleteNotification(n.id)}
