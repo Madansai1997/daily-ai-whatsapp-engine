@@ -631,6 +631,18 @@ def init_db_tables():
         auth TEXT NOT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
+    # Migration: add severity, traceback, attempt_number columns to job_logs if they don't exist
+    try:
+        cols = [row[1] for row in cursor.execute("PRAGMA table_info(job_logs)").fetchall()]
+        if 'severity' not in cols:
+            cursor.execute("ALTER TABLE job_logs ADD COLUMN severity TEXT DEFAULT 'info'")
+        if 'traceback' not in cols:
+            cursor.execute("ALTER TABLE job_logs ADD COLUMN traceback TEXT DEFAULT ''")
+        if 'attempt_number' not in cols:
+            cursor.execute("ALTER TABLE job_logs ADD COLUMN attempt_number INTEGER DEFAULT 1")
+    except Exception as e:
+        print(f"⚠️ job_logs migration error: {e}")
+
     conn.commit()
     conn.close()
     print("✅ State Engine: All database tables verified and ready.")
@@ -2687,13 +2699,13 @@ Output raw JSON only:
     return header + missed_section + concepts_section + resources_section + footer + streak_msg
 
 
-async def _log_job(job_name: str, status: str, message: str = ""):
+async def _log_job(job_name: str, status: str, message: str = "", severity: str = "info", traceback: str = "", attempt_number: int = 1):
     """Write a single row to job_logs. Fire-and-forget — never raises."""
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                "INSERT INTO job_logs (job_name, status, message) VALUES (?, ?, ?)",
-                (job_name, status, message)
+                "INSERT INTO job_logs (job_name, status, message, severity, traceback, attempt_number) VALUES (?, ?, ?, ?, ?, ?)",
+                (job_name, status, message, severity, traceback, attempt_number)
             )
             await db.commit()
     except Exception:
@@ -3148,6 +3160,53 @@ def _run_bg(coro):
     task.add_done_callback(_CRON_BG_TASKS.discard)
 
 
+async def _run_managed_job(job_name: str, coro_factory, max_retries: int = 3):
+    """
+    Executes an async task factory with automatic retries, exponential backoff,
+    detailed exception traceback logging, and push notification alerts on final failure.
+    """
+    import traceback
+    attempt = 1
+    delay = 5.0
+    await _log_job(job_name, "started", f"Starting job execution (Attempt 1/{max_retries})", "info", "", attempt)
+    
+    while attempt <= max_retries:
+        try:
+            coro = coro_factory()
+            await coro
+            await _log_job(job_name, "success", f"Job completed successfully on attempt {attempt}", "info", "", attempt)
+            return
+        except Exception as e:
+            tb_str = traceback.format_exc()
+            is_final = (attempt == max_retries)
+            severity = "error" if is_final else "warning"
+            status = "failed" if is_final else "retrying"
+            msg = f"Attempt {attempt}/{max_retries} failed: {str(e)}"
+            
+            await _log_job(job_name, status, msg, severity, tb_str, attempt)
+            
+            if is_final:
+                try:
+                    _store_notification(
+                        f"🚨 CRITICAL ERROR: Background agent '{job_name}' failed after {max_retries} attempts.\n"
+                        f"Error: {str(e)}",
+                        category="system"
+                    )
+                except Exception as ne:
+                    print(f"⚠️ Failed to dispatch failure notification: {ne}")
+                return
+            
+            print(f"⚠️ Job '{job_name}' attempt {attempt} failed. Retrying in {delay}s...")
+            await asyncio.sleep(delay)
+            attempt += 1
+            delay *= 3.0  # exponential backoff
+
+
+def _run_bg_job(job_name: str, coro_factory, max_retries: int = 3):
+    """Fires and forgets a background task with managed logging and retry policies."""
+    _run_bg(_run_managed_job(job_name, coro_factory, max_retries))
+
+
 def _cron_guard(token: str):
     """Returns a JSONResponse to short-circuit with, or None if authorized."""
     if not CLAUDE_CODE_TRIGGER_SECRET:
@@ -3161,7 +3220,7 @@ def _cron_guard(token: str):
 async def cron_digest(token: str = ""):
     if (deny := _cron_guard(token)) is not None:
         return deny
-    _run_bg(run_morning_digest())
+    _run_bg_job("morning-digest", lambda: run_morning_digest())
     return JSONResponse({"status": "digest triggered"}, status_code=202)
 
 
@@ -3170,7 +3229,7 @@ async def cron_inbox(token: str = ""):
     """Hourly tick: inbox check + fire any reminders/automations now due (one ping covers both)."""
     if (deny := _cron_guard(token)) is not None:
         return deny
-    _run_bg(check_inbox_and_notify(call_llm, send_whatsapp_chunked))
+    _run_bg_job("inbox-check", lambda: check_inbox_and_notify(call_llm, send_whatsapp_chunked))
     fired = await _fire_due_reminders_and_automations()
     alert = await _check_mem_alert()
     selfheal = await _run_self_heal_check()
@@ -3185,7 +3244,7 @@ async def cron_inbox(token: str = ""):
 async def cron_checkin(token: str = "", n: int = 1):
     if (deny := _cron_guard(token)) is not None:
         return deny
-    _run_bg(send_checkin_reminder(n))
+    _run_bg_job("send_checkin_reminder", lambda: send_checkin_reminder(n))
     return JSONResponse({"status": f"checkin {n} triggered"}, status_code=202)
 
 
@@ -3193,10 +3252,10 @@ async def cron_checkin(token: str = "", n: int = 1):
 async def cron_weekly(token: str = ""):
     if (deny := _cron_guard(token)) is not None:
         return deny
-    _run_bg(send_weekly_report())
+    _run_bg_job("weekly-report", lambda: send_weekly_report())
     # Fold pattern-learning upkeep into the weekly tick — keeps reply_style (which has no
     # per-message trigger) and every other category current without a separate cron job.
-    _run_bg(refresh_all_patterns(call_llm))
+    _run_bg_job("learn-patterns", lambda: refresh_all_patterns(call_llm))
     return JSONResponse({"status": "weekly report triggered"}, status_code=202)
 
 
@@ -3206,7 +3265,7 @@ async def cron_job_scout(token: str = ""):
     Fire once/day from cron-job.org (respects source rate limits + instance-hours)."""
     if (deny := _cron_guard(token)) is not None:
         return deny
-    _run_bg(run_job_scout_digest(call_llm, send_whatsapp_chunked, track_fn=add_application))
+    _run_bg_job("job-scout", lambda: run_job_scout_digest(call_llm, send_whatsapp_chunked, track_fn=add_application))
     return JSONResponse({"status": "job scout digest triggered"}, status_code=202)
 
 
@@ -3217,8 +3276,7 @@ async def cron_scan_applications(token: str = ""):
     (with an undoable notification); ambiguous ones are parked for confirmation in Jobs."""
     if (deny := _cron_guard(token)) is not None:
         return deny
-    await _log_job("scan-applications", "triggered", "email → board sync")
-    _run_bg(scan_application_emails(call_llm, _store_notification))
+    _run_bg_job("scan-applications", lambda: scan_application_emails(call_llm, _store_notification))
     return JSONResponse({"status": "application email scan triggered"}, status_code=202)
 
 
@@ -3229,7 +3287,7 @@ async def cron_learn_patterns(token: str = ""):
     its minimum sample count, so this is safe to call anytime."""
     if (deny := _cron_guard(token)) is not None:
         return deny
-    _run_bg(refresh_all_patterns(call_llm))
+    _run_bg_job("learn-patterns", lambda: refresh_all_patterns(call_llm))
     return JSONResponse({"status": "pattern learning refresh triggered"}, status_code=202)
 
 
@@ -7292,17 +7350,38 @@ async def api_analytics():
         "SUM(CASE WHEN lower(status) IN ('failed','error') THEN 1 ELSE 0 END) AS errors, "
         "MAX(created_at) AS last_run "
         "FROM job_logs GROUP BY job_name ORDER BY total DESC LIMIT 12")
-    last_status_rows = await _rows(
-        "SELECT j1.job_name AS name, j1.status AS status FROM job_logs j1 "
-        "WHERE j1.created_at = (SELECT MAX(j2.created_at) FROM job_logs j2 WHERE j2.job_name = j1.job_name)")
-    last_status = {r["name"]: (r["status"] or "") for r in last_status_rows}
+    last_run_rows = await _rows(
+        "SELECT j1.job_name AS name, j1.status AS status, j1.message AS message, "
+        "j1.severity AS severity, j1.traceback AS traceback, j1.attempt_number AS attempt "
+        "FROM job_logs j1 WHERE j1.id IN (SELECT MAX(id) FROM job_logs GROUP BY job_name)")
+    last_details = {
+        r["name"]: {
+            "status": r["status"] or "",
+            "message": r["message"] or "",
+            "severity": r["severity"] or "info",
+            "traceback": r["traceback"] or "",
+            "attempt": r["attempt"] or 1
+        }
+        for r in last_run_rows
+    }
     agents = []
     for r in agent_rows:
         nm = r["name"] or "unknown"
-        st = last_status.get(nm, "").lower()
+        details = last_details.get(nm, {"status": "", "message": "", "severity": "info", "traceback": "", "attempt": 1})
+        st = details["status"].lower()
         health = "error" if st in ("failed", "error") else "ok"
-        agents.append({"name": nm, "total": r["total"], "errors": r["errors"] or 0,
-                       "last_run": r["last_run"], "last_status": st, "health": health})
+        agents.append({
+            "name": nm,
+            "total": r["total"],
+            "errors": r["errors"] or 0,
+            "last_run": r["last_run"],
+            "last_status": details["status"],
+            "last_message": details["message"],
+            "health": health,
+            "severity": details["severity"],
+            "traceback": details["traceback"],
+            "attempt": details["attempt"]
+        })
     tot_runs = sum(a["total"] for a in agents)
     tot_errs = sum(a["errors"] for a in agents)
     success_rate = round(100 * (1 - tot_errs / tot_runs)) if tot_runs else 100
@@ -7432,26 +7511,32 @@ async def api_run_job(request: Request):
         await _log_job(job_name, "triggered", "manual run from console")
 
     if job_name == "morning-digest":
-        _run_bg(run_morning_digest())
+        _run_bg_job("morning-digest", lambda: run_morning_digest())
         return JSONResponse({"ok": True, "message": "Morning digest started in background."})
     elif job_name == "job-scout":
-        _run_bg(run_job_scout_digest(call_llm, send_whatsapp_chunked, track_fn=add_application))
+        _run_bg_job("job-scout", lambda: run_job_scout_digest(call_llm, send_whatsapp_chunked, track_fn=add_application))
         return JSONResponse({"ok": True, "message": "Job scout digest started in background."})
     elif job_name == "learn-patterns":
-        _run_bg(refresh_all_patterns(call_llm))
+        _run_bg_job("learn-patterns", lambda: refresh_all_patterns(call_llm))
         return JSONResponse({"ok": True, "message": "Pattern learning started in background."})
     elif job_name == "reminders-due":
-        fired = await _fire_due_reminders_and_automations()
-        await _log_job("reminders-due", "completed", f"fired {fired} due reminder(s)")
-        return JSONResponse({"ok": True, "message": f"Reminders check complete. Fired {fired} due reminders."})
+        try:
+            fired = await _fire_due_reminders_and_automations()
+            await _log_job("reminders-due", "success", f"fired {fired} due reminder(s)", "info", "", 1)
+            return JSONResponse({"ok": True, "message": f"Reminders check complete. Fired {fired} due reminders."})
+        except Exception as e:
+            import traceback
+            tb_str = traceback.format_exc()
+            await _log_job("reminders-due", "failed", str(e), "error", tb_str, 1)
+            return JSONResponse({"ok": False, "error": f"Reminders check failed: {str(e)}"}, status_code=500)
     elif job_name == "inbox-check":
-        _run_bg(check_inbox_and_notify(call_llm, send_whatsapp_chunked))
+        _run_bg_job("inbox-check", lambda: check_inbox_and_notify(call_llm, send_whatsapp_chunked))
         return JSONResponse({"ok": True, "message": "Inbox check started in background."})
     elif job_name == "weekly-report":
-        _run_bg(send_weekly_report())
+        _run_bg_job("weekly-report", lambda: send_weekly_report())
         return JSONResponse({"ok": True, "message": "Weekly report send started in background."})
     elif job_name == "scan-applications":
-        _run_bg(scan_application_emails(call_llm, _store_notification))
+        _run_bg_job("scan-applications", lambda: scan_application_emails(call_llm, _store_notification))
         return JSONResponse({"ok": True, "message": "Scanning your email to sync the board…"})
 
     return JSONResponse({"ok": False, "error": f"Unknown job: {job_name}"}, status_code=400)

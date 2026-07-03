@@ -14,12 +14,13 @@ import {
 } from "recharts";
 import {
   RefreshCw, Activity, Cpu, TerminalSquare, Plus, X,
-  CircuitBoard, Database, Clock, Zap, ShieldCheck, AlertTriangle,
+  CircuitBoard, Database, Clock, Zap, ShieldCheck, AlertTriangle, Eye,
 } from "lucide-react";
 
 interface Agent {
   name: string; total: number; errors: number;
   last_run?: string; last_status?: string; health: "ok" | "error";
+  last_message?: string; severity?: string; traceback?: string; attempt?: number;
 }
 interface Analytics {
   days: number;
@@ -78,6 +79,29 @@ export default function Insights() {
   const [saving, setSaving] = useState(false);
   const todayStr = new Date().toISOString().slice(0, 10);
   const [form, setForm] = useState({ tool: "claude-code", day: todayStr, tokens: "", cost: "", duration_min: "", note: "" });
+
+  const [diagAgent, setDiagAgent] = useState<any | null>(null);
+  const [retryingJob, setRetryingJob] = useState<string | null>(null);
+
+  const handleManualRetry = async (jobName: string) => {
+    setRetryingJob(jobName);
+    try {
+      const res = await fetch("/api/run-job", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_name: jobName }),
+      });
+      const resData = await res.json();
+      if (!res.ok) throw new Error(resData.error || `HTTP ${res.status}`);
+      alert(`Triggered retry for ${jobName}!`);
+      setDiagAgent(null); // close modal on success
+      await load(true); // reload telemetry
+    } catch (e) {
+      alert(`Retry failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setRetryingJob(null);
+    }
+  };
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -201,17 +225,40 @@ export default function Insights() {
               {data!.agents.map((a) => {
                 const c = a.health === "error" ? RED : GREEN;
                 return (
-                  <div key={a.name} className="flex items-center gap-3 bg-white/[0.03] border border-white/5 rounded-lg p-3">
+                  <div key={a.name} className="flex items-center gap-3 bg-white/[0.03] border border-white/5 rounded-lg p-3 hover:border-white/10 transition-all">
                     <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: c, boxShadow: `0 0 8px ${c}` }} />
                     <div className="min-w-0 flex-1">
-                      <div className="text-[13px] font-mono font-semibold text-[#dfe2f3] truncate">{a.name}</div>
-                      <div className="text-[10px] font-mono text-[#859397]">
+                      <div className="text-[13px] font-mono font-semibold text-[#dfe2f3] truncate flex items-center gap-1.5">
+                        {a.name}
+                        {(a.attempt ?? 1) > 1 && (
+                          <span className="text-[9px] px-1 bg-amber-500/20 text-amber-300 rounded font-bold font-mono" title={`Attempt #${a.attempt}`}>
+                            A{a.attempt}
+                          </span>
+                        )}
+                        {a.severity && a.severity !== "info" && (
+                          <span className={`text-[9px] px-1.5 rounded font-mono font-bold ${
+                            a.severity === "critical" ? "bg-red-500/20 text-red-300" : "bg-amber-500/20 text-amber-300"
+                          }`}>
+                            {a.severity.toUpperCase()}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[10px] font-mono text-[#859397] mt-0.5">
                         {a.total} run{a.total === 1 ? "" : "s"} · {a.errors} err · {relTime(a.last_run)}
                       </div>
                     </div>
-                    {a.health === "error"
-                      ? <AlertTriangle className="w-4 h-4 text-[#ffb4ab] shrink-0" />
-                      : <ShieldCheck className="w-4 h-4 text-[#5eead4] shrink-0" />}
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setDiagAgent(a)}
+                        className="p-1.5 bg-white/5 hover:bg-[#8aebff]/10 border border-white/5 hover:border-[#8aebff]/30 text-[#859397] hover:text-[#8aebff] rounded transition-all cursor-pointer"
+                        title="View Diagnostics"
+                      >
+                        <Eye className="w-4 h-4" />
+                      </button>
+                      {a.health === "error"
+                        ? <AlertTriangle className="w-4 h-4 text-[#ffb4ab] shrink-0" />
+                        : <ShieldCheck className="w-4 h-4 text-[#5eead4] shrink-0" />}
+                    </div>
                   </div>
                 );
               })}
@@ -380,6 +427,110 @@ export default function Insights() {
               <button onClick={saveSession} disabled={saving} className="px-6 py-2.5 rounded-lg text-xs font-bold font-mono bg-[#8aebff] hover:bg-[#22d3ee] text-[#00363e] cursor-pointer disabled:opacity-50 flex items-center gap-2">
                 {saving ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> SAVING…</> : "SAVE"}
               </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {/* Diagnostics Modal */}
+      {diagAgent && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center px-4 bg-[#0a0e1a]/85 backdrop-blur-md">
+          <div className="absolute inset-0" onClick={() => setDiagAgent(null)} />
+          <motion.div initial={{ opacity: 0, y: 20, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} className="relative w-full max-w-2xl bg-[#0f131f] border border-[#3c494c] rounded-2xl shadow-2xl p-6 flex flex-col max-h-[85vh]">
+            <div className="flex justify-between items-start mb-4 border-b border-white/5 pb-3">
+              <div>
+                <h3 className="text-lg font-bold font-mono tracking-wide text-[#8aebff] flex items-center gap-2">
+                  <TerminalSquare className="w-5 h-5" /> AGENT DIAGNOSTICS: {diagAgent.name}
+                </h3>
+                <p className="text-[11px] font-mono text-[#859397] uppercase tracking-widest mt-1">
+                  System Health & Exception Trace logs
+                </p>
+              </div>
+              <button onClick={() => setDiagAgent(null)} className="w-8 h-8 rounded-full border border-white/10 flex items-center justify-center text-[#859397] hover:text-white cursor-pointer"><X className="w-4 h-4" /></button>
+            </div>
+
+            <div className="space-y-4 overflow-y-auto pr-1 flex-1">
+              {/* Telemetry stats summary */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="bg-[#0a0e1a]/40 border border-white/5 rounded-xl p-3">
+                  <div className="text-[10px] font-mono uppercase text-[#859397]">Total Executions</div>
+                  <div className="text-lg font-mono font-bold text-[#dfe2f3] mt-0.5">{diagAgent.total}</div>
+                </div>
+                <div className="bg-[#0a0e1a]/40 border border-white/5 rounded-xl p-3">
+                  <div className="text-[10px] font-mono uppercase text-[#859397]">Total Errors</div>
+                  <div className="text-lg font-mono font-bold text-[#ffb4ab] mt-0.5">{diagAgent.errors}</div>
+                </div>
+                <div className="bg-[#0a0e1a]/40 border border-white/5 rounded-xl p-3">
+                  <div className="text-[10px] font-mono uppercase text-[#859397]">Last Status</div>
+                  <div className={`text-sm font-mono font-bold mt-1 uppercase ${
+                    diagAgent.health === "error" ? "text-[#ffb4ab]" : "text-[#5eead4]"
+                  }`}>
+                    {diagAgent.last_status || "UNKNOWN"}
+                  </div>
+                </div>
+                <div className="bg-[#0a0e1a]/40 border border-white/5 rounded-xl p-3">
+                  <div className="text-[10px] font-mono uppercase text-[#859397]">Last Attempt</div>
+                  <div className="text-lg font-mono font-bold text-[#8aebff] mt-0.5">#{diagAgent.attempt || 1}</div>
+                </div>
+              </div>
+
+              {/* Status details */}
+              <div className="bg-[#0a0e1a]/60 border border-white/10 rounded-xl p-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="text-[10px] font-mono uppercase tracking-widest text-[#859397]">Execution Details</div>
+                  {diagAgent.severity && (
+                    <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded ${
+                      diagAgent.severity === "critical" ? "bg-red-500/20 text-red-300 border border-red-500/30" :
+                      diagAgent.severity === "warning" ? "bg-amber-500/20 text-amber-300 border border-amber-500/30" :
+                      "bg-blue-500/20 text-blue-300 border border-blue-500/30"
+                    }`}>
+                      {diagAgent.severity.toUpperCase()}
+                    </span>
+                  )}
+                </div>
+                <div className="text-sm font-mono text-[#dfe2f3] break-words">
+                  {diagAgent.last_message || "No message logged for the last execution."}
+                </div>
+                <div className="text-[10px] font-mono text-[#859397] pt-1 border-t border-white/5">
+                  Timestamp: {diagAgent.last_run || "Never"}
+                </div>
+              </div>
+
+              {/* Traceback Log */}
+              <div>
+                <div className="text-[10px] font-mono uppercase tracking-widest text-[#859397] mb-1.5 flex items-center gap-1">
+                  <span>Stack Trace / Error logs</span>
+                </div>
+                {diagAgent.traceback ? (
+                  <pre className="bg-[#0a0e1a]/90 border border-white/10 rounded-xl p-4 text-[11px] font-mono text-[#ffb4ab] overflow-x-auto overflow-y-auto max-h-[220px] select-text">
+                    {diagAgent.traceback}
+                  </pre>
+                ) : (
+                  <div className="bg-[#0a0e1a]/30 border border-white/5 rounded-xl p-6 text-center text-xs font-mono text-[#859397]">
+                    ✓ No traceback error logs. The last execution completed with clean system conditions.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex justify-between items-center mt-5 border-t border-white/5 pt-4">
+              <div className="text-[9px] font-mono text-[#859397] uppercase tracking-wider">
+                Interactive Diagnostics Console
+              </div>
+              <div className="flex gap-3">
+                <button onClick={() => setDiagAgent(null)} className="px-5 py-2.5 rounded-lg text-xs font-semibold font-mono text-[#bbc9cd] bg-white/5 border border-white/10 hover:bg-white/10 cursor-pointer">CLOSE</button>
+                <button
+                  onClick={() => handleManualRetry(diagAgent.name)}
+                  disabled={retryingJob !== null}
+                  className="px-6 py-2.5 rounded-lg text-xs font-bold font-mono bg-[#8aebff] hover:bg-[#22d3ee] text-[#00363e] cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                >
+                  {retryingJob === diagAgent.name ? (
+                    <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> RETRYING…</>
+                  ) : (
+                    "RETRY AGENT NOW"
+                  )}
+                </button>
+              </div>
             </div>
           </motion.div>
         </div>
