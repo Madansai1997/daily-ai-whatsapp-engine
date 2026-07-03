@@ -123,6 +123,12 @@ from resume_ats_agent import (
 )
 from pdf_import import extract_pdf_text
 try:
+    from google_docs_agent import create_resume_doc
+except Exception as e:
+    print(f"❌ google_docs_agent import failed: {e}")
+    def create_resume_doc(*args, **kwargs):
+        raise RuntimeError("Google Docs agent unavailable")
+try:
     from weather_agent import get_weather, get_weather_brief, get_weather_data
 except Exception as e:
     print(f"❌ weather_agent import failed: {e}")
@@ -5242,6 +5248,49 @@ async def resume_upload_api(request: Request):
     return JSONResponse({"ok": True})
 
 
+def _extract_resume_text(filename: str, data: bytes) -> str:
+    """Extract plain text from an uploaded résumé — PDF, DOCX, or TXT."""
+    name = (filename or "").lower()
+    if name.endswith(".pdf"):
+        return extract_pdf_text(data) or ""
+    if name.endswith(".docx"):
+        import docx2txt, io
+        return (docx2txt.process(io.BytesIO(data)) or "").strip()
+    if name.endswith(".txt"):
+        return data.decode("utf-8", errors="ignore").strip()
+    return ""
+
+
+@app.post("/resume/upload-file")
+async def resume_upload_file_api(file: UploadFile = File(...)):
+    """Upload a résumé as a PDF / DOCX / TXT file — extracts the text and saves it
+    as the master résumé template. Old binary .doc isn't supported (ask for PDF/DOCX)."""
+    name = (file.filename or "").lower()
+    if not name.endswith((".pdf", ".docx", ".txt")):
+        hint = " Save it as PDF or DOCX and try again." if name.endswith(".doc") else ""
+        return JSONResponse(
+            {"ok": False, "error": f"Unsupported file type.{hint} Use PDF, DOCX, or TXT."},
+            status_code=400,
+        )
+    try:
+        data = await file.read()
+        text = _extract_resume_text(file.filename, data)
+        del data
+        _malloc_trim()
+    except Exception as e:
+        print(f"❌ resume upload-file extraction error for {file.filename}: {e}")
+        return JSONResponse({"ok": False, "error": f"Couldn't read that file: {e}"}, status_code=400)
+
+    text = (text or "").strip()
+    if not text:
+        return JSONResponse(
+            {"ok": False, "error": "No text found (a scanned/image-only PDF won't work — use a text PDF or DOCX)."},
+            status_code=400,
+        )
+    await save_resume_template(text)
+    return JSONResponse({"ok": True, "content": text, "chars": len(text)})
+
+
 @app.post("/applications/{app_id}/ats")
 async def application_ats_api(app_id: int):
     """Run (or refresh) the ATS resume analysis for one tracked application, on demand."""
@@ -5277,6 +5326,31 @@ async def ats_download_api(job_ref: str):
         media_type="text/plain",
         headers={"Content-Disposition": f'attachment; filename="ATS_{fname}.txt"'},
     )
+
+
+@app.post("/ats/{job_ref}/google-doc")
+async def ats_google_doc_api(job_ref: str):
+    """Create a Google Doc with the master résumé + the changes to make, return its URL."""
+    a = await get_ats_analysis(job_ref)
+    if not a:
+        return JSONResponse({"ok": False, "error": "no analysis"}, status_code=404)
+    master = await get_resume_template()
+    if not (master or "").strip():
+        return JSONResponse({"ok": False, "error": "No master résumé saved yet."}, status_code=400)
+    try:
+        loop = asyncio.get_running_loop()
+        url = await loop.run_in_executor(
+            None,
+            lambda: create_resume_doc(master, a, a.get("job_title") or "Role", a.get("company") or "Company"),
+        )
+        return JSONResponse({"ok": True, "url": url})
+    except Exception as e:
+        msg = str(e)
+        # A scope error means the refresh token predates the documents scope.
+        if "insufficient" in msg.lower() or "scope" in msg.lower() or "permission" in msg.lower():
+            msg = "Google Docs access isn't authorized yet — re-run the token step with the documents scope."
+        print(f"❌ ats google-doc error for {job_ref}: {e}")
+        return JSONResponse({"ok": False, "error": msg}, status_code=500)
 
 
 @app.get("/ats/pending/count")

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { ScreenId } from "../types";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -12,6 +12,7 @@ import {
   AlertCircle,
   Trash2,
   ChevronDown,
+  Upload,
 } from "lucide-react";
 
 interface JobsBoardProps {
@@ -107,12 +108,15 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
   const [activeTab, setActiveTab] = useState<"keyword" | "star">("keyword");
   const [atsResult, setAtsResult] = useState<AtsResult | null>(null);
   const [atsLoadingId, setAtsLoadingId] = useState<number | null>(null);
+  const [docLoading, setDocLoading] = useState(false);
 
   // Résumé modal
   const [resumeOpen, setResumeOpen] = useState(false);
   const [resumeContent, setResumeContent] = useState("");
   const [resumeLoading, setResumeLoading] = useState(false);
   const [resumeSaving, setResumeSaving] = useState(false);
+  const [resumeUploading, setResumeUploading] = useState(false);
+  const resumeFileRef = useRef<HTMLInputElement>(null);
 
   /* ---- Data loading ---- */
 
@@ -231,6 +235,42 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
       alert(`Could not save résumé: ${e instanceof Error ? e.message : e}`);
     } finally {
       setResumeSaving(false);
+    }
+  };
+
+  const uploadResumeFile = async (file: File) => {
+    setResumeUploading(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch("/resume/upload-file", { method: "POST", body: form });
+      const data = await res.json();
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      // Populate the editor with the extracted text (already saved server-side).
+      setResumeContent(typeof data?.content === "string" ? data.content : "");
+    } catch (e) {
+      alert(`Could not read that file: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setResumeUploading(false);
+      if (resumeFileRef.current) resumeFileRef.current.value = "";
+    }
+  };
+
+  const openInGoogleDoc = async (jobRef: string) => {
+    setDocLoading(true);
+    try {
+      const res = await fetch(`/ats/${encodeURIComponent(jobRef)}/google-doc`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      if (data?.url) window.open(data.url, "_blank");
+    } catch (e) {
+      alert(`Couldn't create the Google Doc: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setDocLoading(false);
     }
   };
 
@@ -643,8 +683,20 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
                 )}
               </div>
 
-              {/* Modal footer download action */}
-              <div className="p-6 bg-white/5 border-t border-white/5">
+              {/* Modal footer actions */}
+              <div className="p-6 bg-white/5 border-t border-white/5 flex flex-col sm:flex-row gap-3">
+                <button
+                  onClick={() => openInGoogleDoc(atsResult.job_ref)}
+                  disabled={docLoading}
+                  className="flex-1 bg-[#8aebff]/10 border border-[#8aebff]/40 text-[#8aebff] hover:bg-[#8aebff] hover:text-[#00363e] py-3 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-50"
+                  title="Create a Google Doc with your résumé + the changes to make"
+                >
+                  {docLoading ? (
+                    <><RefreshCw className="w-4.5 h-4.5 animate-spin" /> CREATING DOC…</>
+                  ) : (
+                    <><FileText className="w-4.5 h-4.5" /> OPEN IN GOOGLE DOCS</>
+                  )}
+                </button>
                 <button
                   onClick={() =>
                     window.open(
@@ -652,10 +704,10 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
                       "_blank"
                     )
                   }
-                  className="w-full bg-[#22d3ee] hover:bg-[#8aebff] text-[#00363e] py-3 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-lg hover:scale-[1.01]"
+                  className="flex-1 bg-[#22d3ee] hover:bg-[#8aebff] text-[#00363e] py-3 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-lg hover:scale-[1.01]"
                 >
                   <Download className="w-4.5 h-4.5" />
-                  DOWNLOAD OPTIMIZED TEXT FILE
+                  DOWNLOAD TEXT FILE
                 </button>
               </div>
             </motion.div>
@@ -701,13 +753,37 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
                   <textarea
                     value={resumeContent}
                     onChange={(e) => setResumeContent(e.target.value)}
-                    placeholder="Paste your master résumé text here…"
+                    placeholder="Paste your master résumé text here — or use “Upload PDF / DOC” below to import a file…"
                     className="w-full min-h-[320px] bg-[#0a0e1a]/60 border border-white/10 rounded-lg p-4 font-mono text-xs text-[#dfe2f3] leading-relaxed focus:outline-none focus:border-[#8aebff]/40 resize-y"
                   />
                 )}
               </div>
 
-              <div className="p-6 bg-white/5 border-t border-white/5 flex justify-end gap-3">
+              <div className="p-6 bg-white/5 border-t border-white/5 flex justify-between items-center gap-3">
+                {/* Upload a PDF / DOCX / TXT — extracted server-side and loaded into the editor */}
+                <input
+                  ref={resumeFileRef}
+                  type="file"
+                  accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) uploadResumeFile(f);
+                  }}
+                />
+                <button
+                  onClick={() => resumeFileRef.current?.click()}
+                  disabled={resumeUploading || resumeLoading}
+                  className="px-4 py-2.5 rounded-lg text-xs font-semibold font-mono text-[#8aebff] bg-[#8aebff]/10 border border-[#8aebff]/30 hover:bg-[#8aebff]/20 transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                  title="Upload a PDF, DOCX, or TXT résumé"
+                >
+                  {resumeUploading ? (
+                    <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> READING…</>
+                  ) : (
+                    <><Upload className="w-3.5 h-3.5" /> UPLOAD PDF / DOC</>
+                  )}
+                </button>
+                <div className="flex gap-3">
                 <button
                   onClick={() => setResumeOpen(false)}
                   className="px-5 py-2.5 rounded-lg text-xs font-semibold font-mono text-[#bbc9cd] bg-white/5 border border-white/10 hover:bg-white/10 transition-all cursor-pointer"
@@ -727,6 +803,7 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
                     "SAVE RÉSUMÉ"
                   )}
                 </button>
+                </div>
               </div>
             </motion.div>
           </div>
