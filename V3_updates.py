@@ -370,6 +370,30 @@ def _model_chain() -> list:
     return chain
 
 
+_llm_log_tasks: set = set()
+
+
+def _log_llm_call(provider: str, model: str, ok: bool = True):
+    """Fire-and-forget: record which provider/model answered, for the Insights dashboard.
+    Never blocks or raises into the LLM hot path. Keeps a strong task ref so the write
+    isn't garbage-collected before it runs."""
+    async def _w():
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "INSERT INTO llm_calls (provider, model, ok) VALUES (?,?,?)",
+                    (provider, model, 1 if ok else 0))
+                await db.commit()
+        except Exception:
+            pass
+    try:
+        task = asyncio.get_running_loop().create_task(_w())
+        _llm_log_tasks.add(task)
+        task.add_done_callback(_llm_log_tasks.discard)
+    except RuntimeError:
+        pass
+
+
 async def _complete_with_fallback(messages: list, max_tokens: int) -> str:
     """Run a chat completion across the model chain, returning the first non-empty answer.
 
@@ -391,6 +415,7 @@ async def _complete_with_fallback(messages: list, max_tokens: int) -> str:
             )
             content = response.choices[0].message.content
             if content and content.strip():
+                _log_llm_call("gemini" if model == GEMINI_MODEL else "groq", model, True)
                 return content
             print(f"⚠️ Model {model} returned empty content. Trying next...")
         except Exception as e:
@@ -511,6 +536,27 @@ def init_db_tables():
         job_name TEXT,
         status TEXT,
         message TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+    # Dev-tool usage log for the Insights tab — Claude Code / Antigravity sessions
+    # (tokens/cost/duration), fed manually from the UI or pushed by a local script.
+    cursor.execute('''CREATE TABLE IF NOT EXISTS dev_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tool TEXT,
+        day TEXT,
+        tokens INTEGER DEFAULT 0,
+        cost REAL DEFAULT 0,
+        duration_min REAL DEFAULT 0,
+        note TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+    # LLM call log — which provider/model actually answered (Groq primary vs Gemini fallback),
+    # for the Insights engine dashboard. Written fire-and-forget so it never blocks a response.
+    cursor.execute('''CREATE TABLE IF NOT EXISTS llm_calls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT,
+        model TEXT,
+        ok INTEGER DEFAULT 1,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS user_settings (
@@ -7201,6 +7247,178 @@ async def api_system_metrics():
         "scheduler_mode": SCHEDULER_MODE,
         "weather": await _get_weather_cached(),
     })
+
+
+def _day_series(n: int) -> list:
+    """Last n calendar days as 'YYYY-MM-DD' strings (UTC), oldest first."""
+    today = dt.datetime.now(dt.timezone.utc).date()
+    return [(today - dt.timedelta(days=i)).isoformat() for i in range(n - 1, -1, -1)]
+
+
+@app.get("/api/analytics")
+async def api_analytics():
+    """Aggregates the console 'Insights' tab from data JARVIS already logs — activity,
+    agent runs, errors, busiest hours, job pipeline, and dev-tool (Claude Code / Antigravity)
+    usage. All grouped in-DB; substr(...,1,10) gets the day across every timestamp format."""
+    DAYS = 14
+    days = _day_series(DAYS)
+    since = days[0]
+
+    async def _rows(sql, args=()):
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(sql, args)
+            return [dict(r) for r in await cur.fetchall()]
+
+    # Activity per day: user chat messages + agent/job runs
+    msg_rows = await _rows(
+        "SELECT substr(timestamp,1,10) AS d, COUNT(*) AS n FROM chat_history "
+        "WHERE role='user' AND substr(timestamp,1,10) >= ? GROUP BY d", (since,))
+    job_rows = await _rows(
+        "SELECT substr(created_at,1,10) AS d, COUNT(*) AS n FROM job_logs "
+        "WHERE substr(created_at,1,10) >= ? GROUP BY d", (since,))
+    err_rows = await _rows(
+        "SELECT substr(created_at,1,10) AS d, COUNT(*) AS n FROM job_logs "
+        "WHERE lower(status) IN ('failed','error') AND substr(created_at,1,10) >= ? GROUP BY d", (since,))
+    msg_map = {r["d"]: r["n"] for r in msg_rows}
+    job_map = {r["d"]: r["n"] for r in job_rows}
+    err_map = {r["d"]: r["n"] for r in err_rows}
+    activity = [{"day": d[5:], "messages": msg_map.get(d, 0),
+                 "jobs": job_map.get(d, 0), "errors": err_map.get(d, 0)} for d in days]
+
+    # Agent/job run breakdown (all-time), success vs error + last-run status (health matrix)
+    agent_rows = await _rows(
+        "SELECT job_name AS name, COUNT(*) AS total, "
+        "SUM(CASE WHEN lower(status) IN ('failed','error') THEN 1 ELSE 0 END) AS errors, "
+        "MAX(created_at) AS last_run "
+        "FROM job_logs GROUP BY job_name ORDER BY total DESC LIMIT 12")
+    last_status_rows = await _rows(
+        "SELECT j1.job_name AS name, j1.status AS status FROM job_logs j1 "
+        "WHERE j1.created_at = (SELECT MAX(j2.created_at) FROM job_logs j2 WHERE j2.job_name = j1.job_name)")
+    last_status = {r["name"]: (r["status"] or "") for r in last_status_rows}
+    agents = []
+    for r in agent_rows:
+        nm = r["name"] or "unknown"
+        st = last_status.get(nm, "").lower()
+        health = "error" if st in ("failed", "error") else "ok"
+        agents.append({"name": nm, "total": r["total"], "errors": r["errors"] or 0,
+                       "last_run": r["last_run"], "last_status": st, "health": health})
+    tot_runs = sum(a["total"] for a in agents)
+    tot_errs = sum(a["errors"] for a in agents)
+    success_rate = round(100 * (1 - tot_errs / tot_runs)) if tot_runs else 100
+
+    # LLM provider split (Groq primary vs Gemini fallback)
+    llm_day = await _rows(
+        "SELECT substr(created_at,1,10) AS d, provider, COUNT(*) AS n FROM llm_calls "
+        "WHERE substr(created_at,1,10) >= ? GROUP BY d, provider", (since,))
+    llm_tot = await _rows("SELECT provider, COUNT(*) AS n FROM llm_calls GROUP BY provider")
+    llm_pmap = {}
+    for r in llm_day:
+        llm_pmap.setdefault(r["d"], {})[r["provider"]] = r["n"]
+    llm_by_day = []
+    for d in days:
+        row = {"day": d[5:]}
+        for prov, n in llm_pmap.get(d, {}).items():
+            row[prov] = n
+        llm_by_day.append(row)
+    llm_totals = [{"provider": r["provider"] or "unknown", "calls": r["n"]} for r in llm_tot]
+    llm_total_calls = sum(x["calls"] for x in llm_totals)
+    gemini_calls = sum(x["calls"] for x in llm_totals if x["provider"] == "gemini")
+    fallback_rate = round(100 * gemini_calls / llm_total_calls) if llm_total_calls else 0
+    # Which specific models actually answered (the free-model chain) — the "model distribution".
+    model_rows = await _rows(
+        "SELECT model, COUNT(*) AS n FROM llm_calls GROUP BY model ORDER BY n DESC LIMIT 8")
+    def _short_model(m):
+        m = (m or "unknown").split("/")[-1]
+        return m[:24]
+    llm_models = [{"model": _short_model(r["model"]), "calls": r["n"]} for r in model_rows]
+    today_str = dt.datetime.now(dt.timezone.utc).date().isoformat()
+    today_rows = await _rows(
+        "SELECT COUNT(*) AS n FROM llm_calls WHERE substr(created_at,1,10) = ?", (today_str,))
+    llm_today = today_rows[0]["n"] if today_rows else 0
+
+    # Busiest hours (user prompts by hour of day, all-time)
+    hour_rows = await _rows(
+        "SELECT substr(timestamp,12,2) AS h, COUNT(*) AS n FROM chat_history "
+        "WHERE role='user' GROUP BY h")
+    hour_map = {r["h"]: r["n"] for r in hour_rows}
+    prompts_by_hour = [{"hour": f"{h:02d}", "count": hour_map.get(f"{h:02d}", 0)} for h in range(24)]
+
+    # Job pipeline + ATS
+    pipe_rows = await _rows("SELECT status, COUNT(*) AS n FROM applications GROUP BY status")
+    pipeline = [{"status": r["status"], "count": r["n"]} for r in pipe_rows]
+    ats_rows = await _rows("SELECT COUNT(*) AS n, AVG(ats_score) AS avg FROM ats_analysis_cache")
+    ats_count = ats_rows[0]["n"] if ats_rows else 0
+    ats_avg = round(ats_rows[0]["avg"] or 0) if ats_rows and ats_rows[0]["avg"] is not None else 0
+
+    # Dev-tool usage (Claude Code / Antigravity)
+    dev_day = await _rows(
+        "SELECT day AS d, tool, SUM(tokens) AS tokens, SUM(cost) AS cost, SUM(duration_min) AS mins "
+        "FROM dev_usage WHERE day >= ? GROUP BY day, tool", (since,))
+    dev_tot = await _rows(
+        "SELECT tool, SUM(tokens) AS tokens, SUM(cost) AS cost, SUM(duration_min) AS mins, COUNT(*) AS sessions "
+        "FROM dev_usage GROUP BY tool ORDER BY tokens DESC")
+    dev_by_day = []
+    dmap = {}
+    for r in dev_day:
+        dmap.setdefault(r["d"], {})[r["tool"]] = {"tokens": r["tokens"] or 0, "cost": round(r["cost"] or 0, 4), "mins": round(r["mins"] or 0, 1)}
+    for d in days:
+        row = {"day": d[5:]}
+        for tool, v in dmap.get(d, {}).items():
+            row[tool] = v["tokens"]
+        dev_by_day.append(row)
+    dev_totals = [{"tool": r["tool"], "tokens": r["tokens"] or 0, "cost": round(r["cost"] or 0, 4),
+                   "mins": round(r["mins"] or 0, 1), "sessions": r["sessions"]} for r in dev_tot]
+
+    totals = {
+        "messages": sum(msg_map.values()),
+        "job_runs": sum(job_map.values()),
+        "errors": sum(err_map.values()),
+        "applications": sum(p["count"] for p in pipeline),
+        "ats_runs": ats_count,
+        "ats_avg": ats_avg,
+    }
+    return JSONResponse({
+        "days": DAYS, "activity": activity, "agents": agents,
+        "success_rate": success_rate,
+        "llm_by_day": llm_by_day, "llm_totals": llm_totals, "fallback_rate": fallback_rate,
+        "llm_models": llm_models, "llm_total_calls": llm_total_calls, "llm_today": llm_today,
+        "prompts_by_hour": prompts_by_hour, "pipeline": pipeline,
+        "dev_by_day": dev_by_day, "dev_totals": dev_totals, "totals": totals,
+    })
+
+
+@app.post("/api/dev-usage")
+async def api_dev_usage(request: Request):
+    """Log a Claude Code / Antigravity work session (manual entry or pushed by a local script)."""
+    body = await request.json()
+    tool = (body.get("tool") or "").strip().lower() or "claude-code"
+    day = (body.get("day") or "").strip() or dt.datetime.now(dt.timezone.utc).date().isoformat()
+    try:
+        tokens = int(body.get("tokens") or 0)
+    except Exception:
+        tokens = 0
+    try:
+        cost = float(body.get("cost") or 0)
+    except Exception:
+        cost = 0.0
+    try:
+        duration = float(body.get("duration_min") or 0)
+    except Exception:
+        duration = 0.0
+    note = (body.get("note") or "").strip()
+    # replace=true (used by the backfill script) makes a day idempotent — re-running never
+    # double-counts. Manual UI entries append (replace omitted), so you can log several a day.
+    replace = bool(body.get("replace"))
+    async with aiosqlite.connect(DB_PATH) as db:
+        if replace:
+            await db.execute("DELETE FROM dev_usage WHERE tool = ? AND day = ?", (tool, day))
+        await db.execute(
+            "INSERT INTO dev_usage (tool, day, tokens, cost, duration_min, note) VALUES (?,?,?,?,?,?)",
+            (tool, day, tokens, cost, duration, note))
+        await db.commit()
+    return JSONResponse({"ok": True})
+
 
 @app.post("/api/run-job")
 async def api_run_job(request: Request):

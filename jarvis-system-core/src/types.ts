@@ -8,7 +8,8 @@ export enum ScreenId {
   Chat = "chat",
   Jobs = "jobs",
   Terminal = "terminal",
-  AtsAnalysis = "ats_analysis"
+  AtsAnalysis = "ats_analysis",
+  Insights = "insights"
 }
 
 export interface ChatMessage {
