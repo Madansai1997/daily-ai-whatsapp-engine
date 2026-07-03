@@ -36,9 +36,20 @@ const nowTime = () =>
   new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 // Turn a backend ISO/timestamp (or nothing) into the short display time.
+// SQLite CURRENT_TIMESTAMP is UTC but emits "YYYY-MM-DD HH:MM:SS" with no zone
+// marker, which V8 parses as *local* time — shifting history by the UTC offset.
+// Normalize such naive strings to explicit UTC so they render in the correct
+// local time, matching live-sent messages (which use nowTime()).
 const formatTime = (ts?: string): string => {
   if (!ts) return nowTime();
-  const d = new Date(ts);
+  let iso = ts.trim();
+  if (
+    /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}/.test(iso) &&
+    !/([zZ]|[+-]\d{2}:?\d{2})$/.test(iso)
+  ) {
+    iso = iso.replace(" ", "T") + "Z";
+  }
+  const d = new Date(iso);
   if (isNaN(d.getTime())) return ts;
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 };
