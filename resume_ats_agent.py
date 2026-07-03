@@ -99,6 +99,16 @@ def init_resume_ats_tables():
         data TEXT,
         created_at TEXT
     )''')
+    # Original master résumé as a .docx (base64), for in-place format-preserving edits.
+    cur.execute('''CREATE TABLE IF NOT EXISTS resume_docx (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        filename TEXT, data_b64 TEXT, updated_at TEXT
+    )''')
+    # Per-job tailored .docx output (base64).
+    cur.execute('''CREATE TABLE IF NOT EXISTS tailored_docx (
+        job_ref TEXT PRIMARY KEY,
+        filename TEXT, data_b64 TEXT, created_at TEXT
+    )''')
     conn.commit()
     conn.close()
     print("✅ Resume ATS tables ready.")
@@ -321,3 +331,54 @@ async def get_saved_audit() -> dict:
         return a
     except Exception:
         return None
+
+
+# ── Original / tailored .docx storage (base64 in Turso) ─────────────────────
+import base64 as _b64
+
+
+async def save_master_docx(filename: str, data: bytes):
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO resume_docx (id, filename, data_b64, updated_at) VALUES (1, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET filename=excluded.filename,
+                 data_b64=excluded.data_b64, updated_at=excluded.updated_at""",
+            (filename, _b64.b64encode(data).decode(), now))
+        await db.commit()
+
+
+async def get_master_docx():
+    """Return (filename, bytes) or None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT filename, data_b64 FROM resume_docx WHERE id = 1")
+        row = await cur.fetchone()
+    if not row or not row[1]:
+        return None
+    return row[0], _b64.b64decode(row[1])
+
+
+async def has_master_docx() -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT 1 FROM resume_docx WHERE id = 1")
+        return (await cur.fetchone()) is not None
+
+
+async def save_tailored_docx(job_ref: str, filename: str, data: bytes):
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO tailored_docx (job_ref, filename, data_b64, created_at) VALUES (?, ?, ?, ?)
+               ON CONFLICT(job_ref) DO UPDATE SET filename=excluded.filename,
+                 data_b64=excluded.data_b64, created_at=excluded.created_at""",
+            (str(job_ref), filename, _b64.b64encode(data).decode(), now))
+        await db.commit()
+
+
+async def get_tailored_docx(job_ref: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT filename, data_b64 FROM tailored_docx WHERE job_ref = ?", (str(job_ref),))
+        row = await cur.fetchone()
+    if not row or not row[1]:
+        return None
+    return row[0], _b64.b64decode(row[1])

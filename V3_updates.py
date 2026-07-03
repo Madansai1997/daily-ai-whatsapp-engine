@@ -122,7 +122,20 @@ from resume_ats_agent import (
     get_resume_template,
     audit_resume,
     get_saved_audit,
+    save_master_docx,
+    get_master_docx,
+    has_master_docx,
+    save_tailored_docx,
+    get_tailored_docx,
 )
+try:
+    from resume_editor import apply_rewrites, append_bullet
+except Exception as e:
+    print(f"❌ resume_editor import failed: {e}")
+    def apply_rewrites(b, r):
+        raise RuntimeError("resume_editor unavailable")
+    def append_bullet(b, s, t):
+        raise RuntimeError("resume_editor unavailable")
 from pdf_import import extract_pdf_text
 try:
     from google_docs_agent import create_resume_doc
@@ -5277,6 +5290,9 @@ async def resume_upload_file_api(file: UploadFile = File(...)):
     try:
         data = await file.read()
         text = _extract_resume_text(file.filename, data)
+        # Keep the raw .docx so we can later edit it in place (format-preserving).
+        is_docx = name.endswith(".docx")
+        docx_bytes = data if is_docx else None
         del data
         _malloc_trim()
     except Exception as e:
@@ -5290,7 +5306,9 @@ async def resume_upload_file_api(file: UploadFile = File(...)):
             status_code=400,
         )
     await save_resume_template(text)
-    return JSONResponse({"ok": True, "content": text, "chars": len(text)})
+    if docx_bytes is not None:
+        await save_master_docx(file.filename, docx_bytes)
+    return JSONResponse({"ok": True, "content": text, "chars": len(text), "docx": docx_bytes is not None})
 
 
 @app.post("/applications/{app_id}/ats")
@@ -5372,6 +5390,75 @@ async def resume_audit_run_api():
     if result.get("error"):
         return JSONResponse({"ok": False, "error": result["error"]}, status_code=400)
     return JSONResponse({"ok": True, "audit": result})
+
+
+# ── Apply ATS changes to the original .docx (format-preserving, Option A) ─────
+@app.get("/resume/docx-status")
+async def resume_docx_status_api():
+    return JSONResponse({"has_docx": await has_master_docx()})
+
+
+@app.post("/ats/{job_ref}/apply-to-docx")
+async def ats_apply_docx_api(job_ref: str, request: Request):
+    """Auto-apply the rewrites to the stored master .docx (format preserved), plus any
+    user-approved additions, and stash the tailored .docx for download."""
+    a = await get_ats_analysis(job_ref)
+    if not a:
+        return JSONResponse({"ok": False, "error": "Run the ATS analysis first."}, status_code=400)
+    master = await get_master_docx()
+    if not master:
+        return JSONResponse(
+            {"ok": False, "error": "No .docx on file — re-upload your résumé as a .docx (PDFs can't be edited in place)."},
+            status_code=400,
+        )
+    try:
+        approved_additions = (await request.json()).get("additions", []) or []
+    except Exception:
+        approved_additions = []
+
+    filename, docx_bytes = master
+    breakdown = a.get("star_xyz_breakdown", []) or []
+    rewrites = [
+        (b.get("current_text", ""), b.get("optimized_text", ""))
+        for b in breakdown
+        if (b.get("current_text") or "").strip() and (b.get("optimized_text") or "").strip()
+    ]
+
+    loop = asyncio.get_running_loop()
+    try:
+        new_bytes, applied = await loop.run_in_executor(None, lambda: apply_rewrites(docx_bytes, rewrites))
+        added = 0
+        if approved_additions:
+            line = "Additional skills: " + ", ".join(str(x) for x in approved_additions)
+            new_bytes, ok = await loop.run_in_executor(None, lambda: append_bullet(new_bytes, "Skills", line))
+            added = len(approved_additions) if ok else 0
+    except Exception as e:
+        print(f"❌ apply-to-docx error for {job_ref}: {e}")
+        return JSONResponse({"ok": False, "error": f"Couldn't edit the .docx: {e}"}, status_code=500)
+
+    out_name = f"Tailored_{(a.get('company') or 'resume')}.docx".replace(" ", "_")
+    await save_tailored_docx(job_ref, out_name, new_bytes)
+    return JSONResponse({
+        "ok": True,
+        "rewrites_applied": applied,
+        "rewrites_total": len(rewrites),
+        "rewrites_missed": len(rewrites) - applied,
+        "additions_applied": added,
+        "download": f"/ats/{job_ref}/tailored-docx",
+    })
+
+
+@app.get("/ats/{job_ref}/tailored-docx")
+async def ats_tailored_docx_api(job_ref: str):
+    t = await get_tailored_docx(job_ref)
+    if not t:
+        return JSONResponse({"error": "no tailored docx"}, status_code=404)
+    filename, data = t
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/chat-message")

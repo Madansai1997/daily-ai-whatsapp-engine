@@ -14,3 +14,4 @@ google-auth
 pdfplumber
 pywebpush
 docx2txt
+python-docx
