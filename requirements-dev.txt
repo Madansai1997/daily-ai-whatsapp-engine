@@ -1,0 +1,6 @@
+# Dev-only dependencies — NOT needed by the deployed app (Render installs requirements.txt).
+# Install into your local .venv:  pip install -r requirements.txt -r requirements-dev.txt
+
+# Local SQLite/Turso MCP server (mcp_sqlite_server.py) for inspecting the DB from
+# Claude Code / Claude Desktop / Antigravity during development.
+mcp
