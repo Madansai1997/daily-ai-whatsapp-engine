@@ -3138,7 +3138,7 @@ async def cron_job_scout(token: str = ""):
     Fire once/day from cron-job.org (respects source rate limits + instance-hours)."""
     if (deny := _cron_guard(token)) is not None:
         return deny
-    _run_bg(run_job_scout_digest(call_llm, send_whatsapp_chunked))
+    _run_bg(run_job_scout_digest(call_llm, send_whatsapp_chunked, track_fn=add_application))
     return JSONResponse({"status": "job scout digest triggered"}, status_code=202)
 
 
@@ -4072,7 +4072,7 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
             if not job:
                 msg = f"🤷 No job #{n} to track — run a job search first, then reply TRACK <n>."
             else:
-                _ok, msg = await add_application(job, status="applied")
+                _ok, msg = await add_application(job, status="interested")
             await log_chat_message("assistant", msg)
             return msg
 
@@ -7077,7 +7077,7 @@ async def api_run_job(request: Request):
         _run_bg(run_morning_digest())
         return JSONResponse({"ok": True, "message": "Morning digest started in background."})
     elif job_name == "job-scout":
-        _run_bg(run_job_scout_digest(call_llm, send_whatsapp_chunked))
+        _run_bg(run_job_scout_digest(call_llm, send_whatsapp_chunked, track_fn=add_application))
         return JSONResponse({"ok": True, "message": "Job scout digest started in background."})
     elif job_name == "learn-patterns":
         _run_bg(refresh_all_patterns(call_llm))

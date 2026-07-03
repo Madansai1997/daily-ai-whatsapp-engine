@@ -477,10 +477,12 @@ async def run_on_demand_search(call_llm_fn, override: dict = None, top_n: int = 
     return format_digest(scored, top_n=top_n, header=f"🎯 *Live job search — {src}:*", on_demand=True)
 
 
-async def run_job_scout_digest(call_llm_fn, notify_fn=None, min_score: int = 70,
-                               top_n: int = 5, profile: dict = None) -> str:
+async def run_job_scout_digest(call_llm_fn, notify_fn=None, track_fn=None, min_score: int = 70,
+                               top_n: int = 10, profile: dict = None) -> str:
     """Cron entrypoint: fetch -> dedup -> prefilter -> rank -> persist -> digest.
-    If notify_fn is given, sends the digest. Returns the digest text either way."""
+    If notify_fn is given, sends the digest. If track_fn is given, EVERY shown match is
+    auto-added to the application tracker as 'interested' (deduped by job key) — this is
+    the automatic digest, so the board gets stocked without a manual TRACK reply."""
     profile = profile or await get_profile()
     fresh = await fetch_all(profile)
     candidates = prefilter(fresh, profile)
@@ -493,8 +495,25 @@ async def run_job_scout_digest(call_llm_fn, notify_fn=None, min_score: int = 70,
     scored = await rank_jobs(candidates, profile, call_llm_fn)
     strong = [j for j in scored if j.get("score", 0) >= min_score]
     await persist_matches(scored)  # mark ALL seen so weak ones don't re-appear
-    await record_last_shown(strong[:top_n])  # so TRACK <n> can resolve these
+    shown = strong[:top_n]
+    await record_last_shown(shown)  # so TRACK <n> can still resolve these
     digest = format_digest(strong, top_n=top_n)
+
+    # Auto-add every shown match to the Kanban (deduped). Only for the digest — the
+    # on-demand "search now" path stays look-only and uses TRACK on the user's say-so.
+    if track_fn and shown:
+        added = 0
+        for j in shown:
+            try:
+                ok, _ = await track_fn(j, "interested")
+                added += 1 if ok else 0
+            except Exception as e:
+                print(f"⚠️ [job_scout] auto-track failed for {j.get('key')}: {e}")
+        header = (f"🎯 *Added {added} new match{'es' if added != 1 else ''} to your Jobs board* "
+                  f"— review & remove in Jobs.\n\n") if added else \
+                 "🎯 *Job Scout* — these are already on your Jobs board.\n\n"
+        digest = header + digest
+
     if notify_fn:
         notify_fn(digest)
     return digest
