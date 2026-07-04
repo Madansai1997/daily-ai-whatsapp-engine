@@ -72,7 +72,7 @@ const cleanForSpeech = (text: string): string => {
 export default function SecureChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputVal, setInputVal] = useState("");
-  const [isPrivaChatMode, setIsPrivaChatMode] = useState(false);
+
   const [isThinking, setIsThinking] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [voiceOutput, setVoiceOutput] = useState(false);
@@ -281,19 +281,6 @@ export default function SecureChat() {
           </div>
         </div>
 
-        {isPrivaChatMode ? (
-          /* PrivaChat embedded app */
-          <div className="flex-1 overflow-hidden bg-[#0a0e1a]/60">
-            <iframe
-              src="https://privachat.onrender.com"
-              allow="notifications"
-              title="PrivaChat"
-              className="w-full h-full border-0"
-              style={{ width: "100%", height: "100%", border: "none" }}
-            />
-          </div>
-        ) : (
-          <>
             {/* Chat message logs scrollbox */}
             <div className="flex-1 overflow-y-auto px-6 py-8 space-y-8 custom-scrollbar">
               {historyError && (
@@ -478,8 +465,6 @@ export default function SecureChat() {
                 </div>
               </div>
             </div>
-          </>
-        )}
       </section>
     </motion.div>
   );

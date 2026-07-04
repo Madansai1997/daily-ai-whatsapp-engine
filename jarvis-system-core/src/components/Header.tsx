@@ -126,20 +126,7 @@ export default function Header({
             >
               JARVIS
             </a>
-            <a
-              href="#"
-              onClick={(e) => {
-                e.preventDefault();
-                onNavigate(ScreenId.Chat);
-              }}
-              className={`transition-colors duration-200 font-medium tracking-wide uppercase text-sm ${
-                activeScreen === ScreenId.Chat
-                  ? "text-[#8aebff] font-bold border-b-2 border-[#8aebff] pb-1 nav-active-glow"
-                  : "text-[#bbc9cd] hover:text-[#8aebff]"
-              }`}
-            >
-              PRIVACHAT
-            </a>
+
             <a
               href="#"
               onClick={(e) => {

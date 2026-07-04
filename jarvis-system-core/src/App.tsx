@@ -4,7 +4,6 @@ import Header from "./components/Header";
 import Footer from "./components/Footer";
 import CoreInterface from "./components/CoreInterface";
 import SecureChat from "./components/SecureChat";
-import PrivaChat from "./components/PrivaChat";
 import JobsBoard from "./components/JobsBoard";
 import Insights from "./components/Insights";
 import Bills from "./components/Bills";
@@ -60,7 +59,7 @@ export default function App() {
     }
 
     // Nav order index to determine forward vs backward push
-    const screenOrder = [ScreenId.Core, ScreenId.Assistant, ScreenId.Chat, ScreenId.Terminal, ScreenId.Jobs, ScreenId.Insights, ScreenId.Bills];
+    const screenOrder = [ScreenId.Core, ScreenId.Assistant, ScreenId.Terminal, ScreenId.Jobs, ScreenId.Insights, ScreenId.Bills];
     const fromIndex = screenOrder.indexOf(from);
     const toIndex = screenOrder.indexOf(to);
 
@@ -130,9 +129,6 @@ export default function App() {
             {activeScreen === ScreenId.Assistant && (
               <SecureChat />
             )}
-            {activeScreen === ScreenId.Chat && (
-              <PrivaChat />
-            )}
             {(activeScreen === ScreenId.Jobs || activeScreen === ScreenId.AtsAnalysis) && (
               <JobsBoard activeScreen={activeScreen} onNavigate={handleNavigate} />
             )}
@@ -169,15 +165,7 @@ export default function App() {
           <Bot className="w-5.5 h-5.5" />
           <span className="text-[10px] font-mono mt-1 font-bold">JARVIS</span>
         </button>
-        <button
-          onClick={() => handleNavigate(ScreenId.Chat)}
-          className={`flex flex-col items-center justify-center flex-1 h-full cursor-pointer transition-colors ${
-            activeScreen === ScreenId.Chat ? "text-[#8aebff] nav-active-glow" : "text-[#bbc9cd]"
-          }`}
-        >
-          <Lock className="w-5.5 h-5.5" />
-          <span className="text-[10px] font-mono mt-1 font-bold">CHAT</span>
-        </button>
+
         <button
           onClick={() => handleNavigate(ScreenId.Terminal)}
           className={`flex flex-col items-center justify-center flex-1 h-full cursor-pointer transition-colors ${

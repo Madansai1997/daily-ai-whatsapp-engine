@@ -413,40 +413,7 @@ export default function CoreInterface({ onNavigate, onOpenNotifications }: CoreI
       </div>
 
       {/* Featured Nav Launchers Cards Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {/* Card 1: PrivaChat */}
-        <div
-          id="core-privachat-card"
-          onClick={() => onNavigate(ScreenId.Chat)}
-          className="md:col-span-1 p-6 glass-panel rounded-xl border border-[#3c494c] hover:border-[#8aebff]/50 transition-all cursor-pointer group hover:shadow-2xl flex flex-col justify-between"
-        >
-          <div className="space-y-4">
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 rounded-lg bg-[#22d3ee]/10 flex items-center justify-center border border-[#8aebff]/20 group-hover:border-[#8aebff]/60 transition-all">
-                <MessageSquare className="w-6 h-6 text-[#8aebff]" />
-              </div>
-              <div>
-                <h3 className="text-lg font-bold text-[#dfe2f3] group-hover:text-[#8aebff] transition-colors">
-                  PrivaChat
-                </h3>
-                <p className="text-[11px] font-mono text-[#859397] tracking-wider uppercase">
-                  E2E Encrypted Comm
-                </p>
-              </div>
-            </div>
-            <p className="text-xs font-mono text-[#bbc9cd] leading-relaxed">
-              Secure line is active. 3 pending messages in the encrypted queue from [REDACTED].
-            </p>
-          </div>
-          <div className="flex justify-between items-center pt-6 border-t border-white/5 mt-4">
-            <span className="text-[10px] font-semibold font-mono text-[#8aebff] tracking-widest uppercase">
-              OPEN CHANNEL
-            </span>
-            <span className="text-[#8aebff] font-bold group-hover:translate-x-1.5 transition-transform duration-200">
-              →
-            </span>
-          </div>
-        </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
 
         {/* Card 2: Terminal */}
         <div

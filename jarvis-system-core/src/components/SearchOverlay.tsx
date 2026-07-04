@@ -48,7 +48,7 @@ const actionCommands: SearchResult[] = [
 const navCommands: SearchResult[] = [
   { category: "Navigation", title: "Go to Core dashboard", subtitle: "System telemetry & health monitor", target: "core" },
   { category: "Navigation", title: "Go to JARVIS chat", subtitle: "Autonomous LLM assistant", target: "assistant" },
-  { category: "Navigation", title: "Go to PrivaChat", subtitle: "Encrypted private messenger", target: "chat" },
+
   { category: "Navigation", title: "Go to System Terminal", subtitle: "Live feed, commands & PDF upload", target: "terminal" },
   { category: "Navigation", title: "Go to Jobs board", subtitle: "Kanban pipeline, ATS & résumé", target: "jobs" },
 ];
