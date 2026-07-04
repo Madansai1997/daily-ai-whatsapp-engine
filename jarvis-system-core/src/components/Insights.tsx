@@ -377,7 +377,9 @@ export default function Insights() {
                 {(data?.dev_totals || []).map((t) => (
                   <div key={t.tool} className="text-[11px] font-mono text-[#bbc9cd] flex items-center gap-1.5">
                     <span className="w-2.5 h-2.5 rounded-full" style={{ background: TOOL_COLORS[t.tool] || LIME }} />
-                    <b>{t.tool}</b>: {t.tokens.toLocaleString()} tok · {Math.round(t.mins)}m
+                    <b>{t.tool}</b>: {t.tokens > 0
+                      ? `${t.tokens.toLocaleString()} tok · ${Math.round(t.mins)}m`
+                      : `${Math.round(t.mins)}m active · ${t.sessions} ${t.sessions === 1 ? "day" : "days"}`}
                   </div>
                 ))}
               </div>

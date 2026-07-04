@@ -77,6 +77,8 @@ def main():
         print(f"No Claude Code usage found in the last {days_back} days — nothing to push.")
         return
 
+    dry = os.environ.get("DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on")
+
     pin = os.environ.get("JARVIS_PIN")
     if not pin:
         try:
@@ -87,7 +89,7 @@ def main():
 
     base = os.environ.get("JARVIS_URL", "http://localhost:8000").rstrip("/")
     headers = {"Content-Type": "application/json"}
-    if pin:
+    if pin and not dry:
         try:
             req = urllib.request.Request(f"{base}/auth/login", data=json.dumps({"pin": pin}).encode(), headers=headers)
             tok = json.load(urllib.request.urlopen(req, timeout=15)).get("token")
@@ -111,6 +113,10 @@ def main():
             "tool": "claude-code", "day": day, "replace": True,
             "tokens": d["tokens"], "cost": 0, "duration_min": minutes, "note": "auto-push",
         }
+        if dry:
+            print(f"  {day}: ~{d['tokens']:,} tokens (output+cached), {minutes}m")
+            pushed += 1
+            continue
         req = urllib.request.Request(f"{base}/api/dev-usage", data=json.dumps(payload).encode(), headers=headers)
         try:
             json.load(urllib.request.urlopen(req, timeout=15))
@@ -119,7 +125,8 @@ def main():
         except Exception as e:
             print(f"  ❌ {day} push failed: {e}")
 
-    print(f"✅ Backfilled {pushed} day(s) of Claude Code usage.")
+    verb = "Would backfill" if dry else "Backfilled"
+    print(f"✅ {verb} {pushed} day(s) of Claude Code usage.")
     if pushed == 0:
         sys.exit(1)
 

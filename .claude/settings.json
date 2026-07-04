@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "JARVIS_URL=https://daily-ai-whatsapp-engine.onrender.com bash \"$CLAUDE_PROJECT_DIR/scripts/push_dev_usage.sh\" >> /tmp/jarvis_dev_usage_push.log 2>&1",
+            "async": true,
+            "timeout": 180,
+            "statusMessage": "Pushing dev-usage to JARVIS Insights…"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -129,7 +129,7 @@ export default function CoreInterface({ onNavigate, onOpenNotifications }: CoreI
 
   // Format a job-log row for the HUD list.
   const logTime = (iso: string) => {
-    const d = new Date(iso.includes("T") ? iso : iso.replace(" ", "T"));
+    const d = new Date(iso.includes("T") ? iso : iso.replace(" ", "T") + "Z");
     if (isNaN(d.getTime())) return "--:--";
     return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
   };
