@@ -278,10 +278,8 @@ async def fetch_jsearch(profile: dict, limit: int = 10) -> list:
     return out
 
 
-# Daily-cron sources. If RAPIDAPI_KEY is configured, we include fetch_jsearch to query LinkedIn/Indeed/Glassdoor.
+# Daily-cron sources only (JSearch is on-demand, deliberately excluded here).
 SOURCES = [fetch_adzuna, fetch_remotive]
-if RAPIDAPI_KEY:
-    SOURCES.append(fetch_jsearch)
 
 
 # =========================================================================
@@ -480,7 +478,7 @@ async def run_on_demand_search(call_llm_fn, override: dict = None, top_n: int = 
 
 
 async def run_job_scout_digest(call_llm_fn, notify_fn=None, track_fn=None, min_score: int = 70,
-                               top_n: int = 10, profile: dict = None) -> str:
+                               top_n: int = 10, profile: dict = None, apply_hook=None) -> str:
     """Cron entrypoint: fetch -> dedup -> prefilter -> rank -> persist -> digest.
     If notify_fn is given, sends the digest. If track_fn is given, EVERY shown match is
     auto-added to the application tracker as 'interested' (deduped by job key) — this is
@@ -518,4 +516,12 @@ async def run_job_scout_digest(call_llm_fn, notify_fn=None, track_fn=None, min_s
 
     if notify_fn:
         notify_fn(digest)
+
+    # Apply-prep runs on the strong shown matches (own thresholds/cap/notifications inside).
+    # Isolated so a failure here never breaks the digest that already went out.
+    if apply_hook and shown:
+        try:
+            await apply_hook(shown)
+        except Exception as e:
+            print(f"⚠️ [job_scout] apply_hook failed: {e}")
     return digest

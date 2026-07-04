@@ -206,6 +206,72 @@ export default function SettingsDrawer({ onClose }: SettingsDrawerProps) {
                 </div>
               </div>
 
+              {/* Job Scout — Auto-Apply desk */}
+              <div className="space-y-3">
+                <h4 className="text-xs font-bold tracking-widest text-[#8aebff] uppercase font-mono">
+                  3b. Job Scout — Auto-Apply
+                </h4>
+                <div className="flex justify-between items-center bg-[#1b1f2c]/50 p-3 rounded border border-white/5">
+                  <div>
+                    <span className="font-mono text-xs font-bold block">Apply-prep on strong matches</span>
+                    <span className="text-[11px] text-[#859397]">Tailor resume + draft cover note, notify to 1-tap apply</span>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                    <input
+                      type="checkbox"
+                      checked={["1", "true", "on", "yes"].includes(String(settings.apply_prep_enabled ?? "1").toLowerCase())}
+                      onChange={(e) => handleChange("apply_prep_enabled", e.target.checked ? "1" : "0")}
+                      className="sr-only peer"
+                    />
+                    <div className="w-9 h-5 bg-[#3c494c] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[#5eead4]"></div>
+                  </label>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <label className="text-xs text-[#859397] block">Prep score ≥</label>
+                    <input
+                      type="number" min={0} max={100}
+                      value={settings.apply_prep_threshold ?? "75"}
+                      onChange={(e) => handleChange("apply_prep_threshold", e.target.value)}
+                      className="w-full bg-[#1b1f2c] border border-[#3c494c] rounded px-3 py-2 text-white font-mono text-xs focus:border-[#8aebff] outline-none"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-[#859397] block">Max per day</label>
+                    <input
+                      type="number" min={1} max={50}
+                      value={settings.apply_prep_daily_cap ?? "6"}
+                      onChange={(e) => handleChange("apply_prep_daily_cap", e.target.value)}
+                      className="w-full bg-[#1b1f2c] border border-[#3c494c] rounded px-3 py-2 text-white font-mono text-xs focus:border-[#8aebff] outline-none"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs text-[#859397] block">Email applications (jobs that accept apply-by-email)</label>
+                  <select
+                    value={settings.auto_email_mode || "confirm"}
+                    onChange={(e) => handleChange("auto_email_mode", e.target.value)}
+                    className="w-full bg-[#1b1f2c] border border-[#3c494c] rounded px-3 py-2 text-white font-mono text-xs focus:border-[#8aebff] outline-none"
+                  >
+                    <option value="off">Off — never auto-email</option>
+                    <option value="confirm">Confirm first — queue & ask (recommended)</option>
+                    <option value="auto">Auto-send — fire immediately</option>
+                  </select>
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs text-[#859397] whitespace-nowrap">Auto-email score ≥</label>
+                    <input
+                      type="number" min={0} max={100}
+                      value={settings.auto_email_threshold ?? "88"}
+                      onChange={(e) => handleChange("auto_email_threshold", e.target.value)}
+                      className="w-24 bg-[#1b1f2c] border border-[#3c494c] rounded px-3 py-2 text-white font-mono text-xs focus:border-[#8aebff] outline-none"
+                    />
+                  </div>
+                  <span className="text-[11px] text-[#859397] block">
+                    Web-form jobs are always prep-only (1-tap). Only email-apply jobs at/above this score are auto-sent.
+                  </span>
+                </div>
+              </div>
+
               {/* Text-to-Speech & Sound options */}
               <div className="space-y-3">
                 <h4 className="text-xs font-bold tracking-widest text-[#8aebff] uppercase font-mono">

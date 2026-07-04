@@ -101,6 +101,12 @@ from job_scout_agent import (
     get_profile as get_job_profile,
     save_profile as save_job_profile,
 )
+from job_apply_agent import (
+    init_job_apply_tables,
+    run_apply_prep,
+    confirm_apply,
+    list_pending_confirm,
+)
 from application_tracker import (
     init_application_tracker_tables,
     add_application,
@@ -679,6 +685,7 @@ init_calendar_tables()
 init_automation_tables()
 init_pattern_tables()
 init_job_scout_tables()
+init_job_apply_tables()
 init_application_tracker_tables()
 init_application_email_tracker_tables()
 init_bill_watcher_tables()
@@ -3288,12 +3295,25 @@ async def cron_weekly(token: str = ""):
 
 
 @app.post("/cron/job-scout")
+async def _job_apply_hook(shown_matches):
+    """Post-digest apply desk: tailor resume + draft cover note for strong matches, then notify
+    (and, for high-scoring email-apply roles, queue/send per the user's approval setting). All
+    thresholds, the daily cap, and the approval mode live in job_apply_agent."""
+    try:
+        prof = await get_job_profile()
+    except Exception:
+        prof = None
+    await run_apply_prep(shown_matches, call_llm, notify_fn=send_whatsapp_chunked,
+                         profile=prof, track_fn=add_application)
+
+
 async def cron_job_scout(token: str = ""):
     """Daily job digest: Adzuna (+ Remotive) → dedup → rank → WhatsApp top matches.
     Fire once/day from cron-job.org (respects source rate limits + instance-hours)."""
     if (deny := _cron_guard(token)) is not None:
         return deny
-    _run_bg_job("job-scout", lambda: run_job_scout_digest(call_llm, send_whatsapp_chunked, track_fn=add_application))
+    _run_bg_job("job-scout", lambda: run_job_scout_digest(
+        call_llm, send_whatsapp_chunked, track_fn=add_application, apply_hook=_job_apply_hook))
     return JSONResponse({"status": "job scout digest triggered"}, status_code=202)
 
 
@@ -4251,6 +4271,22 @@ async def process_message(user_message: str, source: str = "whatsapp") -> str:
                 _ok, msg = await add_application(job, status="interested")
             await log_chat_message("assistant", msg)
             return msg
+
+    # =========================================================================
+    # JOB APPLY DESK — approve a queued email application: "APPLY <n>" (or just "APPLY").
+    # Sends the tailored resume + cover note the apply-prep step drafted, marks it applied.
+    # =========================================================================
+    if user_message_clean.startswith("apply"):
+        await log_chat_message("user", user_message)
+        m = re.search(r"apply\s*#?\s*(\d+)", user_message_clean)
+        ref = int(m.group(1)) if m else None
+        try:
+            prof = await get_job_profile()
+        except Exception:
+            prof = None
+        msg = await confirm_apply(ref, notify_fn=None, profile=prof, track_fn=add_application)
+        await log_chat_message("assistant", msg)
+        return msg
 
     # =========================================================================
     # EMAIL TRIAGE — edit the active draft reply
@@ -7148,6 +7184,10 @@ async def api_get_settings():
         async with db.execute("SELECT key, value FROM user_settings") as cursor:
             rows = await cursor.fetchall()
     settings = {r["key"]: r["value"] for r in rows}
+    # Backfill Job Scout apply-desk defaults so the UI renders current-or-default values.
+    from job_apply_agent import _DEFAULTS as _APPLY_DEFAULTS
+    for k, v in _APPLY_DEFAULTS.items():
+        settings.setdefault(k, v)
     # Inject read-only environment variables for reference
     settings["_env_gemini_model"] = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
     settings["_env_has_gemini_key"] = "yes" if os.environ.get("GEMINI_API_KEY") else "no"
@@ -7613,7 +7653,8 @@ async def api_run_job(request: Request):
         _run_bg_job("morning-digest", lambda: run_morning_digest())
         return JSONResponse({"ok": True, "message": "Morning digest started in background."})
     elif job_name == "job-scout":
-        _run_bg_job("job-scout", lambda: run_job_scout_digest(call_llm, send_whatsapp_chunked, track_fn=add_application))
+        _run_bg_job("job-scout", lambda: run_job_scout_digest(
+            call_llm, send_whatsapp_chunked, track_fn=add_application, apply_hook=_job_apply_hook))
         return JSONResponse({"ok": True, "message": "Job scout digest started in background."})
     elif job_name == "learn-patterns":
         _run_bg_job("learn-patterns", lambda: refresh_all_patterns(call_llm))
