@@ -154,6 +154,8 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
     url: "",
     source: "",
     status: "applied",
+    description: "",
+    notes: "",
   };
   const [manual, setManual] = useState({ ...emptyManual });
 
@@ -178,6 +180,17 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
   const [auditFetching, setAuditFetching] = useState(false);
   const [auditRunning, setAuditRunning] = useState(false);
   const [auditError, setAuditError] = useState("");
+
+  // Job Scout review queue (per-job review popup)
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewQueue, setReviewQueue] = useState<any[]>([]);
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewCount, setReviewCount] = useState(0);
+  const [reviewBusyId, setReviewBusyId] = useState<number | null>(null);
+  const [reviewExpanded, setReviewExpanded] = useState<number | null>(null);
+  const [reviewStage, setReviewStage] = useState<Record<number, string>>({});
+  const [reviewAts, setReviewAts] = useState<Record<string, AtsResult | "loading">>({});
+  const [reviewMsg, setReviewMsg] = useState("");
 
   /* ---- Data loading ---- */
 
@@ -212,10 +225,90 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
     }
   }, []);
 
+  const loadReviewCount = useCallback(async () => {
+    try {
+      const res = await fetch("/api/job-scout/review-queue/count");
+      const data = await res.json();
+      setReviewCount(Number(data?.count) || 0);
+    } catch {
+      setReviewCount(0);
+    }
+  }, []);
+
   useEffect(() => {
     loadApplications();
     loadPending();
-  }, [loadApplications, loadPending]);
+    loadReviewCount();
+  }, [loadApplications, loadPending, loadReviewCount]);
+
+  /* ---- Job Scout review queue ---- */
+
+  const openReview = async () => {
+    setReviewOpen(true);
+    setReviewLoading(true);
+    setReviewMsg("");
+    try {
+      const res = await fetch("/api/job-scout/review-queue");
+      const data = await res.json();
+      const q = Array.isArray(data?.queue) ? data.queue : [];
+      setReviewQueue(q);
+      setStatuses(Array.isArray(data?.statuses) ? data.statuses : statuses);
+      // Default every card's stage selector to "applied".
+      const stageMap: Record<number, string> = {};
+      q.forEach((c: any) => (stageMap[c.id] = "applied"));
+      setReviewStage(stageMap);
+    } catch {
+      setReviewQueue([]);
+    } finally {
+      setReviewLoading(false);
+    }
+  };
+
+  const loadReviewAts = async (item: any) => {
+    const ref = item.job_key || `app:${item.id}`;
+    if (reviewAts[ref]) return; // already loaded/loading
+    setReviewAts((m) => ({ ...m, [ref]: "loading" }));
+    try {
+      const res = await fetch(`/ats/${encodeURIComponent(ref)}`);
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      setReviewAts((m) => ({ ...m, [ref]: data as AtsResult }));
+    } catch {
+      setReviewAts((m) => {
+        const next = { ...m };
+        delete next[ref];
+        return next;
+      });
+    }
+  };
+
+  const toggleReviewRow = (item: any) => {
+    const next = reviewExpanded === item.id ? null : item.id;
+    setReviewExpanded(next);
+    if (next !== null && !item.ats_pending) loadReviewAts(item);
+  };
+
+  const decideReview = async (item: any, action: "apply" | "skip") => {
+    setReviewBusyId(item.id);
+    setReviewMsg("");
+    try {
+      const res = await fetch(`/api/job-scout/review/${item.id}/decide`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, status: reviewStage[item.id] || "applied" }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      // Drop the decided card from the queue.
+      setReviewQueue((q) => q.filter((c) => c.id !== item.id));
+      if (action === "apply" && data?.message) setReviewMsg(data.message);
+      await Promise.all([loadApplications(), loadReviewCount()]);
+    } catch (e) {
+      setReviewMsg(`⚠️ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setReviewBusyId(null);
+    }
+  };
 
   /* ---- Email → board sync ---- */
 
@@ -416,7 +509,7 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
     setAddOpen(true);
   };
 
-  const saveManual = async () => {
+  const saveManual = async (andAnalyze = false) => {
     if (!manual.title.trim()) {
       setAddError("Job title is required.");
       return;
@@ -435,12 +528,16 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
       }
       setAddOpen(false);
       await loadApplications();
+      if (andAnalyze && data?.id) {
+        await runAts(data.id, manual.description);
+      }
     } catch (e) {
       setAddError(e instanceof Error ? e.message : String(e));
     } finally {
       setAddSaving(false);
     }
   };
+
 
   /* ---- Résumé Audit (general, no JD) ---- */
   const openAudit = async () => {
@@ -600,6 +697,16 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
               <Mail className={`w-4 h-4 ${scanning ? "animate-pulse" : ""}`} />
               {scanning ? "SCANNING…" : "SCAN EMAILS"}
             </button>
+            {reviewCount > 0 && (
+              <button
+                onClick={openReview}
+                className="flex items-center gap-2 px-5 py-2 bg-[#c084fc]/10 border border-[#c084fc]/40 rounded-lg text-xs font-semibold hover:bg-[#c084fc]/20 transition-all text-[#c084fc] cursor-pointer animate-pulse"
+                title="Review fresh Job Scout matches — ATS score, apply or skip, move to a stage"
+              >
+                <Sparkles className="w-4 h-4" />
+                REVIEW ({reviewCount})
+              </button>
+            )}
             <button
               onClick={openAdd}
               className="flex items-center gap-2 px-5 py-2 bg-[#8aebff]/10 border border-[#8aebff]/30 rounded-lg text-xs font-semibold hover:bg-[#8aebff]/20 transition-all text-[#8aebff] cursor-pointer"
@@ -850,6 +957,136 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
 
       {/* Slide-Up ATS Analysis Modal Overlay */}
       <AnimatePresence>
+        {reviewOpen && (
+          <div className="fixed inset-0 bg-[#0a0e1a]/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ y: "100%", opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: "100%", opacity: 0 }}
+              transition={{ type: "spring", damping: 25, stiffness: 180 }}
+              className="w-full max-w-3xl glass-panel rounded-2xl overflow-hidden shadow-2xl border border-[#c084fc]/25 max-h-[90vh] flex flex-col"
+            >
+              <div className="p-6 border-b border-[#3c494c]/50 bg-[#161e2e]/80 flex justify-between items-center">
+                <div>
+                  <h2 className="text-xl font-extrabold text-[#dfe2f3] tracking-wide uppercase font-mono flex items-center gap-2">
+                    <Sparkles className="w-5 h-5 text-[#c084fc]" /> Review New Matches
+                  </h2>
+                  <p className="text-xs font-mono text-[#859397] mt-1">
+                    {reviewQueue.length} fresh {reviewQueue.length === 1 ? "match" : "matches"} · apply, skip, or move to a stage
+                  </p>
+                </div>
+                <button
+                  onClick={() => setReviewOpen(false)}
+                  aria-label="Close review"
+                  className="p-2 hover:bg-white/5 text-[#bbc9cd] hover:text-[#c084fc] rounded-full border border-white/5 cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {reviewMsg && (
+                <div className="px-6 py-2 text-xs font-mono text-[#a3e635] bg-[#a3e635]/5 border-b border-[#a3e635]/10">
+                  {reviewMsg}
+                </div>
+              )}
+
+              <div className="overflow-y-auto p-4 space-y-3">
+                {reviewLoading ? (
+                  <div className="text-center text-[#859397] font-mono text-sm py-10">Loading matches…</div>
+                ) : reviewQueue.length === 0 ? (
+                  <div className="text-center text-[#859397] font-mono text-sm py-10">🎉 All caught up — no matches to review.</div>
+                ) : (
+                  reviewQueue.map((item) => {
+                    const ref = item.job_key || `app:${item.id}`;
+                    const ats = reviewAts[ref];
+                    const expanded = reviewExpanded === item.id;
+                    const busy = reviewBusyId === item.id;
+                    return (
+                      <div key={item.id} className="bg-[#161e2e]/60 border border-white/10 rounded-xl overflow-hidden">
+                        <div className="p-4 flex items-start justify-between gap-3 cursor-pointer" onClick={() => toggleReviewRow(item)}>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-semibold text-[#dfe2f3] truncate">{item.title}</span>
+                              <span className="text-xs text-[#859397]">{item.company}</span>
+                              {item.location && <span className="text-[10px] font-mono text-[#859397]">· {item.location}</span>}
+                            </div>
+                            {item.why && <p className="text-xs text-[#bbc9cd] mt-1">{item.why}</p>}
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            {typeof item.match_score === "number" && (
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#8aebff]/10 text-[#8aebff] border border-[#8aebff]/20">FIT {item.match_score}</span>
+                            )}
+                            {item.ats_score != null ? (
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#a3e635]/10 text-[#a3e635] border border-[#a3e635]/20">ATS {item.ats_score}</span>
+                            ) : (
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white/5 text-[#859397] border border-white/10">ATS —</span>
+                            )}
+                            <ChevronDown className={`w-4 h-4 text-[#859397] transition-transform ${expanded ? "rotate-180" : ""}`} />
+                          </div>
+                        </div>
+
+                        {expanded && (
+                          <div className="px-4 pb-4 border-t border-white/5 pt-3 space-y-3">
+                            {item.flags && <div className="text-[10px] font-mono text-[#c084fc]">{item.flags}</div>}
+                            {item.url && (
+                              <a href={item.url} target="_blank" rel="noreferrer" className="text-xs text-[#8aebff] inline-flex items-center gap-1 hover:underline">
+                                Open posting <ArrowUpRight className="w-3 h-3" />
+                              </a>
+                            )}
+                            {item.ats_pending ? (
+                              <div className="text-xs text-[#859397] font-mono">No ATS analysis yet — the apply desk scores strong matches automatically.</div>
+                            ) : ats === "loading" || !ats ? (
+                              <div className="text-xs text-[#859397] font-mono">Loading ATS…</div>
+                            ) : (
+                              <div className="space-y-1">
+                                <div className="text-[10px] font-mono text-[#859397] uppercase tracking-widest">Keyword match</div>
+                                <div className="flex flex-wrap gap-1.5">
+                                  {ats.keyword_matrix.required.map((kw) => {
+                                    const present = ats.keyword_matrix.present.includes(kw);
+                                    return (
+                                      <span key={kw} className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${present ? "bg-[#a3e635]/10 text-[#a3e635] border-[#a3e635]/20" : "bg-[#ffb4ab]/10 text-[#ffb4ab] border-[#ffb4ab]/20"}`}>
+                                        {present ? "✓" : "✗"} {kw}
+                                      </span>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        <div className="px-4 py-3 bg-[#0e1420]/60 border-t border-white/5 flex items-center justify-end gap-2">
+                          <button
+                            disabled={busy}
+                            onClick={() => decideReview(item, "skip")}
+                            className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-white/5 border border-white/10 text-[#859397] hover:text-[#ffb4ab] hover:border-[#ffb4ab]/30 transition-all cursor-pointer disabled:opacity-50"
+                          >
+                            Skip
+                          </button>
+                          <select
+                            value={reviewStage[item.id] || "applied"}
+                            onChange={(e) => setReviewStage((m) => ({ ...m, [item.id]: e.target.value }))}
+                            className="bg-[#1b1f2c] border border-[#3c494c] rounded-lg px-2 py-1.5 text-xs text-white font-mono focus:border-[#c084fc] outline-none cursor-pointer"
+                          >
+                            {statuses.map((s) => <option key={s} value={s} className="bg-[#0a0e1a]">{s}</option>)}
+                          </select>
+                          <button
+                            disabled={busy}
+                            onClick={() => decideReview(item, "apply")}
+                            className="px-4 py-1.5 text-xs font-bold rounded-lg bg-[#c084fc]/15 border border-[#c084fc]/40 text-[#c084fc] hover:bg-[#c084fc]/25 transition-all cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+                          >
+                            {busy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />} Apply
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+
         {activeScreen === ScreenId.AtsAnalysis && atsResult && (
           <div className="fixed inset-0 bg-[#0a0e1a]/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
             <motion.div
@@ -1288,10 +1525,34 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
                   </div>
                 </div>
 
+                <div>
+                  <label className="text-[10px] font-mono uppercase tracking-widest text-[#859397] block mb-1.5">
+                    Job Description
+                  </label>
+                  <textarea
+                    value={manual.description || ""}
+                    onChange={(e) => setManual((m) => ({ ...m, description: e.target.value }))}
+                    placeholder="Paste the job posting description here (required for 'Add & Analyze')..."
+                    className="w-full h-24 bg-[#0a0e1a]/60 border border-white/10 rounded-lg px-3 py-2.5 font-mono text-sm text-[#dfe2f3] focus:outline-none focus:border-[#8aebff]/40 resize-y"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-mono uppercase tracking-widest text-[#859397] block mb-1.5">
+                    Notes
+                  </label>
+                  <textarea
+                    value={manual.notes || ""}
+                    onChange={(e) => setManual((m) => ({ ...m, notes: e.target.value }))}
+                    placeholder="Add personal notes or tracking remarks..."
+                    className="w-full h-20 bg-[#0a0e1a]/60 border border-white/10 rounded-lg px-3 py-2.5 font-mono text-sm text-[#dfe2f3] focus:outline-none focus:border-[#8aebff]/40 resize-y"
+                  />
+                </div>
+
                 {addError && <p className="text-xs font-mono text-[#ffb4ab]">{addError}</p>}
               </div>
 
-              <div className="p-6 pt-0 flex justify-end gap-3">
+              <div className="p-6 pt-0 flex flex-wrap justify-end gap-3">
                 <button
                   onClick={() => setAddOpen(false)}
                   className="px-5 py-2.5 rounded-lg text-xs font-semibold font-mono text-[#bbc9cd] bg-white/5 border border-white/10 hover:bg-white/10 transition-all cursor-pointer"
@@ -1299,17 +1560,29 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
                   CANCEL
                 </button>
                 <button
-                  onClick={saveManual}
+                  onClick={() => saveManual(false)}
                   disabled={addSaving}
-                  className="px-6 py-2.5 rounded-lg text-xs font-bold font-mono bg-[#8aebff] hover:bg-[#22d3ee] text-[#00363e] transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                  className="px-5 py-2.5 rounded-lg text-xs font-bold font-mono bg-white/10 hover:bg-white/20 text-[#dfe2f3] border border-white/10 transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
                 >
                   {addSaving ? (
                     <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> ADDING…</>
                   ) : (
-                    <><Plus className="w-3.5 h-3.5" /> ADD TO BOARD</>
+                    <><Plus className="w-3.5 h-3.5" /> ADD ONLY</>
+                  )}
+                </button>
+                <button
+                  onClick={() => saveManual(true)}
+                  disabled={addSaving}
+                  className="px-6 py-2.5 rounded-lg text-xs font-bold font-mono bg-[#8aebff] hover:bg-[#22d3ee] text-[#00363e] transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                >
+                  {addSaving ? (
+                    <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> ANALYZING…</>
+                  ) : (
+                    <><Sparkles className="w-3.5 h-3.5" /> ADD & ANALYZE</>
                   )}
                 </button>
               </div>
+
             </motion.div>
           </div>
         )}

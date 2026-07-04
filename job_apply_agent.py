@@ -107,19 +107,89 @@ def _find_apply_email(job: dict) -> str | None:
     """Return an application email if the job is email-apply, else None. Prefers a mailto: in the
     apply URL, then an address in the description near an apply cue (to avoid grabbing a random
     contact address)."""
+    # 1. Check URL for email or mailto link
     url = (job.get("url") or "").strip()
-    if url.lower().startswith("mailto:"):
-        m = _EMAIL_RE.search(url)
+    if url:
+        if "mailto:" in url.lower():
+            m = _EMAIL_RE.search(url)
+            if m:
+                return m.group(0)
+        # If URL itself is a raw email address
+        m = _EMAIL_RE.match(url)
         if m:
             return m.group(0)
+            
     desc = job.get("description") or ""
-    cue = re.search(
-        r"(?:apply|send|email|resume|cv|cover letter)[^.\n]{0,60}?(" + _EMAIL_RE.pattern + ")",
-        desc, re.IGNORECASE,
-    )
-    if cue:
-        return cue.group(1)
+    if not desc:
+        return None
+        
+    # 2. Extract all emails from description
+    emails = _EMAIL_RE.findall(desc)
+    if not emails:
+        return None
+        
+    # Clean and dedup emails preserving order
+    unique_emails = []
+    for email in emails:
+        cleaned = email.strip().lower()
+        if cleaned not in unique_emails:
+            unique_emails.append(cleaned)
+            
+    if not unique_emails:
+        return None
+        
+    # Keywords indicating job application context
+    apply_keywords = ["apply", "send", "email", "resume", "cv", "cover letter", "careers", "jobs", "hiring", "recruitment", "recruiting", "hr", "talent"]
+    email_hiring_prefixes = ["hr", "careers", "jobs", "apply", "recruiting", "hiring", "work", "resume", "cv", "talent", "join", "people"]
+    
+    # If only one email exists, check if there are any apply keywords in the description or if the email matches hiring prefix
+    if len(unique_emails) == 1:
+        email = unique_emails[0]
+        # Check if email prefix contains hiring keywords
+        prefix = email.split("@")[0]
+        if any(p in prefix for p in email_hiring_prefixes):
+            return email
+        # Or if the description mentions any apply keyword
+        desc_lower = desc.lower()
+        if any(kw in desc_lower for kw in apply_keywords):
+            return email
+        return None
+        
+    # 3. Score multiple emails to find the best match
+    best_email = None
+    best_score = -1
+    desc_lower = desc.lower()
+    
+    for email in unique_emails:
+        score = 0
+        prefix = email.split("@")[0]
+        
+        # Rule A: Prefix match (+5 points)
+        if any(p in prefix for p in email_hiring_prefixes):
+            score += 5
+            
+        # Rule B: Find distance to nearest apply keyword
+        # Search in a window of 120 characters before and after the email
+        email_idx = desc_lower.find(email)
+        if email_idx != -1:
+            window_start = max(0, email_idx - 120)
+            window_end = min(len(desc_lower), email_idx + len(email) + 120)
+            window_text = desc_lower[window_start:window_end]
+            
+            for kw in apply_keywords:
+                if kw in window_text:
+                    score += 3
+                    
+        if score > best_score:
+            best_score = score
+            best_email = email
+            
+    # Require at least a threshold score (e.g. 3) to prevent matching random footer links/contact emails
+    if best_score >= 3:
+        return best_email
+        
     return None
+
 
 
 async def _already_prepped(job_key: str) -> bool:
@@ -311,6 +381,47 @@ async def run_apply_prep(matches: list, call_llm_fn, notify_fn=None, profile: di
     if msg and notify_fn:
         notify_fn(msg)
     return msg
+
+
+async def apply_now(job: dict, call_llm_fn, notify_fn=None, profile: dict = None,
+                    track_fn=None, send_email_fn=None) -> dict:
+    """Explicit, user-initiated apply for ONE job (e.g. the console review popup's Apply button).
+    Unlike run_apply_prep this ignores the score threshold and daily cap — the user chose this
+    job — but STILL honors auto_email_mode for the irreversible email path. Returns
+    {"outcome": "applied"|"queued"|"ready", "message": str}."""
+    prep = await prepare_one(job, call_llm_fn)
+    if not prep:
+        return {"outcome": "error", "message": "Couldn't prepare that job."}
+    s = _get_settings()
+    email_mode = str(s["auto_email_mode"]).lower().strip()
+    job_key = prep["job_key"]
+
+    if prep["method"] == "email" and email_mode == "auto":
+        if await send_application_email(prep, profile, send_email_fn):
+            await _set_status(job_key, "applied")
+            if track_fn:
+                try:
+                    await track_fn(job, "applied")
+                except Exception:
+                    pass
+            msg = f"✅ Applied — emailed your resume + note for {prep['title']} — {prep['company']}."
+            if notify_fn:
+                notify_fn(msg)
+            return {"outcome": "applied", "message": msg}
+        await _set_status(job_key, "ready")
+        return {"outcome": "ready", "message": f"Couldn't email — prepped {prep['title']} for manual send."}
+
+    if prep["method"] == "email" and email_mode == "confirm":
+        await _set_status(job_key, "pending_confirm")
+        msg = f"📧 Ready to email *{prep['title']}* — {prep['company']} (to {prep['apply_email']}). Reply APPLY to send."
+        if notify_fn:
+            notify_fn(msg)
+        return {"outcome": "queued", "message": msg}
+
+    # link method, or email with mode 'off'
+    await _set_status(job_key, "ready")
+    return {"outcome": "ready",
+            "message": f"📝 Prepped {prep['title']} — resume tailored, cover note drafted. Apply: {prep['url']}"}
 
 
 def _format_notice(applied: list, ready: list, awaiting: list) -> str:

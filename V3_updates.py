@@ -104,18 +104,23 @@ from job_scout_agent import (
 from job_apply_agent import (
     init_job_apply_tables,
     run_apply_prep,
+    apply_now,
     confirm_apply,
     list_pending_confirm,
 )
 from application_tracker import (
     init_application_tracker_tables,
     add_application,
+    add_scout_application,
     list_applications,
     get_application,
     update_status as update_application_status,
     update_status_by_id as update_application_status_by_id,
     delete_application,
     update_description as update_application_description,
+    list_review_queue,
+    count_review_queue,
+    mark_reviewed,
     format_applications,
     VALID_STATUSES as APPLICATION_STATUSES,
 )
@@ -3313,7 +3318,7 @@ async def cron_job_scout(token: str = ""):
     if (deny := _cron_guard(token)) is not None:
         return deny
     _run_bg_job("job-scout", lambda: run_job_scout_digest(
-        call_llm, send_whatsapp_chunked, track_fn=add_application, apply_hook=_job_apply_hook))
+        call_llm, send_whatsapp_chunked, track_fn=add_scout_application, apply_hook=_job_apply_hook))
     return JSONResponse({"status": "job scout digest triggered"}, status_code=202)
 
 
@@ -5492,6 +5497,71 @@ async def applications_list_api():
     return JSONResponse({"applications": apps, "statuses": APPLICATION_STATUSES})
 
 
+# ── Job Scout review queue — per-job review popup (fresh matches awaiting a decision) ──
+@app.get("/api/job-scout/review-queue")
+async def api_review_queue():
+    """Fresh scout matches (reviewed=0), enriched with the LLM match score/why/flags and the
+    ATS score if already analysed. Full ATS keyword matrix is lazy-loaded via /ats/<job_ref>."""
+    cards = await list_review_queue()
+    keys = [(c.get("job_key") or f"app:{c['id']}") for c in cards]
+    scores = await get_ats_scores_map(keys)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT job_key, score, why, flags FROM matched_jobs")
+        mj = {r["job_key"]: dict(r) for r in await cur.fetchall()}
+    out = []
+    for c in cards:
+        jk = c.get("job_key") or f"app:{c['id']}"
+        s = scores.get(jk)
+        m = mj.get(c.get("job_key"), {})
+        out.append({
+            "id": c["id"], "job_key": c.get("job_key"), "title": c.get("title"),
+            "company": c.get("company"), "location": c.get("location"),
+            "url": c.get("url"), "description": c.get("description"), "status": c.get("status"),
+            "match_score": m.get("score"), "why": m.get("why"), "flags": m.get("flags"),
+            "ats_score": s["ats_score"] if s else None,
+            "ats_pending": not (s and s.get("ats_score") is not None),
+        })
+    return JSONResponse({"queue": out, "statuses": APPLICATION_STATUSES})
+
+
+@app.get("/api/job-scout/review-queue/count")
+async def api_review_queue_count():
+    return JSONResponse({"count": await count_review_queue()})
+
+
+@app.post("/api/job-scout/review/{app_id}/decide")
+async def api_review_decide(app_id: int, request: Request):
+    """Resolve a reviewed match. action='skip' just clears it from the queue; action='apply'
+    moves the card to the chosen stage (default 'applied') AND fires apply-prep for it (tailored
+    resume + cover note; email-apply jobs honor the confirm-first setting)."""
+    body = await request.json()
+    action = (body.get("action") or "").strip().lower()
+    card = await get_application(app_id)
+    if not card:
+        return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+    if action == "skip":
+        await mark_reviewed(app_id)
+        return JSONResponse({"ok": True, "outcome": "skipped"})
+    if action == "apply":
+        stage = body.get("status") or "applied"
+        await update_application_status_by_id(app_id, stage)
+        await mark_reviewed(app_id)
+        job = {"key": card.get("job_key"), "title": card.get("title"),
+               "company": card.get("company"), "location": card.get("location"),
+               "url": card.get("url"), "description": card.get("description"),
+               "source": card.get("source")}
+        try:
+            prof = await get_job_profile()
+        except Exception:
+            prof = None
+        # Card already exists — don't re-track; just prep + route.
+        res = await apply_now(job, call_llm, notify_fn=send_whatsapp_chunked, profile=prof)
+        return JSONResponse({"ok": True, "outcome": res.get("outcome"),
+                             "message": res.get("message"), "stage": stage})
+    return JSONResponse({"ok": False, "error": "unknown action"}, status_code=400)
+
+
 @app.post("/applications/update")
 async def applications_update_api(request: Request):
     body = await request.json()
@@ -5532,9 +5602,18 @@ async def applications_add_manual_api(request: Request):
         "title": title, "company": company, "location": location,
         "url": url, "source": source,
         "description": (body.get("description") or "").strip() or None,
+        "notes": (body.get("notes") or "").strip() or None,
     }
     ok, msg = await add_application(job, status=status)
-    return JSONResponse({"ok": ok, "result": msg}, status_code=200 if ok else 200)
+    app_id = None
+    if ok:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT id FROM applications WHERE job_key = ?", (job["key"],)) as cur:
+                row = await cur.fetchone()
+                if row:
+                    app_id = row[0]
+    return JSONResponse({"ok": ok, "result": msg, "id": app_id}, status_code=200 if ok else 200)
+
 
 
 @app.post("/applications/scan")
@@ -7654,7 +7733,7 @@ async def api_run_job(request: Request):
         return JSONResponse({"ok": True, "message": "Morning digest started in background."})
     elif job_name == "job-scout":
         _run_bg_job("job-scout", lambda: run_job_scout_digest(
-            call_llm, send_whatsapp_chunked, track_fn=add_application, apply_hook=_job_apply_hook))
+            call_llm, send_whatsapp_chunked, track_fn=add_scout_application, apply_hook=_job_apply_hook))
         return JSONResponse({"ok": True, "message": "Job scout digest started in background."})
     elif job_name == "learn-patterns":
         _run_bg_job("learn-patterns", lambda: refresh_all_patterns(call_llm))

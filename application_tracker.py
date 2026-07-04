@@ -37,11 +37,16 @@ def init_application_tracker_tables():
         applied_at TEXT,
         updated_at TEXT
     )''')
-    # Migration: add description to a pre-existing applications table if missing.
+    # Migrations on a pre-existing applications table.
     try:
         cols = [r[1] for r in cur.execute("PRAGMA table_info(applications)").fetchall()]
         if "description" not in cols:
             cur.execute("ALTER TABLE applications ADD COLUMN description TEXT")
+        # `reviewed` drives the Job Scout review queue. DEFAULT 1 so existing/manual/email
+        # cards are NOT dumped into the queue — only fresh scout matches (added with
+        # reviewed=0) surface for review.
+        if "reviewed" not in cols:
+            cur.execute("ALTER TABLE applications ADD COLUMN reviewed INTEGER DEFAULT 1")
     except Exception:
         pass
     conn.commit()
@@ -65,8 +70,10 @@ def _normalize_status(raw: str) -> str:
     return aliases.get(s, s)
 
 
-async def add_application(job: dict, status: str = "applied") -> tuple:
-    """Add a job (usually from a Job Scout digest) to the tracker. Idempotent on job_key."""
+async def add_application(job: dict, status: str = "applied", reviewed: int = 1,
+                          notes: str = None) -> tuple:
+    """Add a job to the tracker. Idempotent on job_key. `reviewed=0` puts it in the Job Scout
+    review queue (used by the scout auto-track path); manual/email adds stay reviewed=1."""
     job = job or {}
     title = (job.get("title") or "").strip()
     if not title:
@@ -81,10 +88,12 @@ async def add_application(job: dict, status: str = "applied") -> tuple:
                 return False, f"📌 *{title}* — {job.get('company','')} is already in your tracker."
         await db.execute(
             """INSERT OR IGNORE INTO applications
-               (job_key, title, company, location, url, source, description, status, applied_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+               (job_key, title, company, location, url, source, description, status,
+                notes, reviewed, applied_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (job.get("key"), title, job.get("company"), job.get("location"),
-             job.get("url"), job.get("source"), job.get("description"), status, now, now),
+             job.get("url"), job.get("source"), job.get("description"), status,
+             (notes if notes is not None else job.get("notes")), int(reviewed), now, now),
         )
         await db.commit()
     emoji = _STATUS_EMOJI.get(status, "📌")
@@ -165,6 +174,37 @@ async def update_description(app_id: int, description: str) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE applications SET description = ?, updated_at = ? WHERE id = ?",
                          ((description or "").strip(), now, app_id))
+        await db.commit()
+    return True
+
+
+async def add_scout_application(job: dict, status: str = "interested") -> tuple:
+    """track_fn for the Job Scout digest — files the match AND flags it reviewed=0 so it lands
+    in the console review queue."""
+    return await add_application(job, status=status, reviewed=0)
+
+
+async def list_review_queue() -> list:
+    """Fresh scout matches awaiting review (reviewed=0), newest first."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM applications WHERE COALESCE(reviewed, 1) = 0 ORDER BY applied_at DESC")
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def count_review_queue() -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT COUNT(*) FROM applications WHERE COALESCE(reviewed, 1) = 0")
+        row = await cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+async def mark_reviewed(app_id: int) -> bool:
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE applications SET reviewed = 1, updated_at = ? WHERE id = ?",
+                         (now, app_id))
         await db.commit()
     return True
 
