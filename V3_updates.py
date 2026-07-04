@@ -58,6 +58,7 @@ from email_triage import (
     send_composed_email,
     create_gmail_draft,
     get_connected_gmail_address,
+    search_company_threads,
 )
 from reminders import (
     init_reminder_tables,
@@ -121,8 +122,26 @@ from application_tracker import (
     list_review_queue,
     count_review_queue,
     mark_reviewed,
+    list_application_events,
+    response_analytics,
     format_applications,
     VALID_STATUSES as APPLICATION_STATUSES,
+)
+from followup_agent import (
+    list_followup_candidates,
+    draft_followup,
+    send_followup,
+)
+from workspace_notes import (
+    init_workspace_notes_tables,
+    list_notes,
+    create_note,
+    update_note,
+    delete_note,
+)
+from interview_prep import (
+    list_interview_events,
+    prep_brief,
 )
 from application_email_tracker import (
     init_application_email_tracker_tables,
@@ -149,6 +168,7 @@ from resume_ats_agent import (
     analyze as run_ats_analysis,
     get_analysis as get_ats_analysis,
     get_scores_map as get_ats_scores_map,
+    skill_gap_summary,
     delete_analysis as delete_ats_analysis,
     mark_viewed as mark_ats_viewed,
     count_unviewed as count_ats_unviewed,
@@ -695,6 +715,7 @@ init_application_tracker_tables()
 init_application_email_tracker_tables()
 init_bill_watcher_tables()
 init_resume_ats_tables()
+init_workspace_notes_tables()
 
 
 # ==========================================
@@ -5528,6 +5549,108 @@ async def api_review_queue():
 @app.get("/api/job-scout/review-queue/count")
 async def api_review_queue_count():
     return JSONResponse({"count": await count_review_queue()})
+
+
+@app.get("/api/skill-gap")
+async def api_skill_gap():
+    """Market demand vs résumé coverage, aggregated from every analysed job's keyword matrix.
+    Pure read over ats_analysis_cache — no LLM cost."""
+    return JSONResponse(await skill_gap_summary())
+
+
+@app.get("/api/response-analytics")
+async def api_response_analytics():
+    """Funnel + response-rate/ghost-rate/source-yield over the applications + event ledger."""
+    return JSONResponse(await response_analytics())
+
+
+# ── Recruiter follow-up (stale 'applied' cards → drafted follow-up → 1-tap Gmail send) ──
+@app.get("/api/followups")
+async def api_followups():
+    return JSONResponse({"candidates": await list_followup_candidates()})
+
+
+@app.post("/api/followups/{app_id}/draft")
+async def api_followup_draft(app_id: int):
+    try:
+        prof = await get_job_profile()
+    except Exception:
+        prof = None
+    return JSONResponse(await draft_followup(app_id, call_llm, profile=prof))
+
+
+@app.post("/api/followups/send")
+async def api_followup_send(request: Request):
+    """Send a follow-up. The Send click IS the approval. SAFE_MODE short-circuits the real send."""
+    body = await request.json()
+    to = (body.get("to") or "").strip()
+    subject = (body.get("subject") or "").strip()
+    text = body.get("body") or ""
+    if SAFE_MODE:
+        return JSONResponse({"ok": True, "message": f"[SAFE_MODE] Would send to {to}."})
+
+    async def _send(to_addr, subj, b):
+        return await send_composed_email(to_addr, subj, b)
+
+    return JSONResponse(await send_followup(to, subject, text, _send))
+
+
+@app.get("/api/applications/{app_id}/emails")
+async def api_application_emails(app_id: int):
+    """Per-company e-mail timeline for one card (Gmail search by company/domain)."""
+    card = await get_application(app_id)
+    if not card:
+        return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+    threads = await search_company_threads(card.get("company") or "")
+    return JSONResponse({"ok": True, "company": card.get("company"), "threads": threads})
+
+
+# ── Interview Prep Dock (upcoming calendar interviews → on-demand LLM prep brief) ──
+@app.get("/api/interviews")
+async def api_interviews():
+    return JSONResponse({"interviews": await list_interview_events()})
+
+
+@app.post("/api/interviews/prep")
+async def api_interview_prep(request: Request):
+    body = await request.json()
+    event = {
+        "id": body.get("id"), "summary": body.get("summary"),
+        "start": body.get("start"), "end": body.get("end"),
+        "attendees": body.get("attendees"), "role": body.get("role"),
+        "company": body.get("company"),
+    }
+    app_row = None
+    if body.get("matched_app_id"):
+        app_row = await get_application(int(body["matched_app_id"]))
+    return JSONResponse(await prep_brief(event, call_llm, app=app_row))
+
+
+# ── Workspace Notes (DB-backed markdown scratchpad) ──
+@app.get("/api/notes")
+async def api_notes_list():
+    return JSONResponse({"notes": await list_notes()})
+
+
+@app.post("/api/notes")
+async def api_notes_create(request: Request):
+    body = await request.json()
+    note = await create_note(body.get("title", ""), body.get("body", ""))
+    return JSONResponse({"ok": True, "note": note})
+
+
+@app.post("/api/notes/{note_id}")
+async def api_notes_update(note_id: int, request: Request):
+    body = await request.json()
+    note = await update_note(note_id, title=body.get("title"), body=body.get("body"),
+                             pinned=body.get("pinned"))
+    return JSONResponse({"ok": True, "note": note})
+
+
+@app.post("/api/notes/{note_id}/delete")
+async def api_notes_delete(note_id: int):
+    await delete_note(note_id)
+    return JSONResponse({"ok": True})
 
 
 @app.post("/api/job-scout/review/{app_id}/decide")

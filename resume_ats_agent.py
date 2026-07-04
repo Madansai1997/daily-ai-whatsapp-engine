@@ -290,6 +290,51 @@ async def get_scores_map(keys=None) -> dict:
     return {r["job_ref"]: {"ats_score": r["ats_score"], "created_at": r["created_at"]} for r in rows}
 
 
+async def skill_gap_summary(top_n: int = 24) -> dict:
+    """Aggregate the cached keyword matrices across every analysed job into a market-demand vs
+    resume-coverage view. For each required skill: how many jobs demand it (demand), how many of
+    those the resume already covers (have), and how many it's missing (gap). Pure read — no LLM."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT keyword_matrix FROM ats_analysis_cache")
+        rows = await cur.fetchall()
+
+    # skill(lowercased) -> {"label": original, "demand": n, "have": n}
+    agg: dict = {}
+    analyzed = 0
+    for r in rows:
+        try:
+            km = json.loads(r["keyword_matrix"] or "{}")
+        except Exception:
+            continue
+        required = km.get("required") or []
+        if not required:
+            continue
+        analyzed += 1
+        present = {str(k).strip().lower() for k in (km.get("present") or [])}
+        for kw in required:
+            label = str(kw).strip()
+            key = label.lower()
+            if not key:
+                continue
+            slot = agg.setdefault(key, {"label": label, "demand": 0, "have": 0})
+            slot["demand"] += 1
+            if key in present:
+                slot["have"] += 1
+
+    skills = [
+        {"skill": v["label"], "demand": v["demand"], "have": v["have"],
+         "gap": v["demand"] - v["have"],
+         "coverage": round(100 * v["have"] / v["demand"]) if v["demand"] else 0}
+        for v in agg.values()
+    ]
+    # Rank the main list by demand; the gap list by how many jobs want a skill you lack.
+    skills.sort(key=lambda s: (s["demand"], s["gap"]), reverse=True)
+    top_gaps = sorted([s for s in skills if s["gap"] > 0],
+                      key=lambda s: (s["gap"], s["demand"]), reverse=True)[:8]
+    return {"analyzed_jobs": analyzed, "skills": skills[:top_n], "top_gaps": top_gaps}
+
+
 async def mark_viewed(job_ref: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE ats_analysis_cache SET viewed = 1 WHERE job_ref = ?", (str(job_ref),))

@@ -480,6 +480,60 @@ async def create_gmail_draft(to_address: str, subject: str, body: str):
         return None
 
 
+def _company_domain(company: str) -> str | None:
+    """Best-effort domain guess from a company name, e.g. 'Acme Corp' -> 'acme'. Used only as a
+    Gmail search hint (matched loosely), never as an authoritative address."""
+    import re as _re
+    c = (company or "").lower()
+    c = _re.sub(r"\b(inc|llc|ltd|limited|corp|corporation|technologies|technology|systems|"
+                r"solutions|labs|software|pvt|private|the|and)\b", " ", c)
+    c = _re.sub(r"[^a-z0-9]", "", c)
+    return c or None
+
+
+async def search_company_threads(company: str, domain: str = None, max_results: int = 10) -> list:
+    """Recent Gmail correspondence for a company — the per-company e-mail timeline on a card.
+    Searches by explicit domain if known, else by the company name and a guessed domain token.
+    Read-only. Returns newest-first [{id, from, subject, date, snippet, unread}]."""
+    company = (company or "").strip()
+    if not company and not domain:
+        return []
+    try:
+        service = _get_gmail_service()
+        clauses = []
+        if domain:
+            d = domain.strip().lstrip("@")
+            clauses.append(f"from:{d}")
+            clauses.append(f"to:{d}")
+        guess = _company_domain(company)
+        if guess:
+            clauses.append(f"from:{guess}.com")
+        if company:
+            clauses.append(f'"{company}"')
+        query = " OR ".join(f"({c})" for c in clauses)
+        resp = service.users().messages().list(
+            userId="me", q=query, maxResults=max_results).execute()
+        ids = [m["id"] for m in resp.get("messages", [])]
+        out = []
+        for mid in ids:
+            msg = service.users().messages().get(
+                userId="me", id=mid, format="metadata",
+                metadataHeaders=["From", "Subject", "Date"]).execute()
+            headers = msg.get("payload", {}).get("headers", [])
+            out.append({
+                "id": mid,
+                "from": _short_sender(_extract_header(headers, "From")),
+                "subject": _extract_header(headers, "Subject") or "(no subject)",
+                "date": _extract_header(headers, "Date"),
+                "snippet": msg.get("snippet", ""),
+                "unread": "UNREAD" in msg.get("labelIds", []),
+            })
+        return out
+    except Exception as e:
+        print(f"⚠️ [email_triage] search_company_threads failed: {e}")
+        return []
+
+
 async def send_composed_email(to_address: str, subject: str, body: str, draft_id: int = None) -> bool:
     """Send a freshly-composed (not a reply) email via Gmail API."""
     try:

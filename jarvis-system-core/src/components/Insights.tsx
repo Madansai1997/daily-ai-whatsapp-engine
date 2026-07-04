@@ -74,6 +74,8 @@ function Panel({ title, icon, children, className = "" }: { title: string; icon?
 export default function Insights() {
   const [data, setData] = useState<Analytics | null>(null);
   const [metrics, setMetrics] = useState<Metrics | null>(null);
+  const [skillGap, setSkillGap] = useState<{ analyzed_jobs: number; skills: { skill: string; demand: number; have: number; gap: number; coverage: number }[]; top_gaps: { skill: string; demand: number; gap: number }[] } | null>(null);
+  const [funnel, setFunnel] = useState<{ funnel: { stage: string; count: number }[]; rejected: number; applied_total: number; response_rate: number; responded_total: number; avg_response_days: number | null; ghost_rate: number; ghosted: number; ghost_days: number; sources: { source: string; applied: number; responded: number; yield: number }[] } | null>(null);
   const [loading, setLoading] = useState(true);
   const [logOpen, setLogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -106,12 +108,16 @@ export default function Insights() {
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      const [a, m] = await Promise.all([
+      const [a, m, sg, fn] = await Promise.all([
         fetch("/api/analytics", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
         fetch("/api/system-metrics", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
+        fetch("/api/skill-gap", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
+        fetch("/api/response-analytics", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
       ]);
       if (a) setData(a);
       if (m) setMetrics(m);
+      if (sg) setSkillGap(sg);
+      if (fn) setFunnel(fn);
     } catch { /* keep last */ } finally {
       if (!silent) setLoading(false);
     }
@@ -380,6 +386,111 @@ export default function Insights() {
                     <b>{t.tool}</b>: {t.tokens > 0
                       ? `${t.tokens.toLocaleString()} tok · ${Math.round(t.mins)}m`
                       : `${Math.round(t.mins)}m active · ${t.sessions} ${t.sessions === 1 ? "day" : "days"}`}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </Panel>
+      </section>
+
+      <section className="grid grid-cols-1 gap-6">
+        <Panel title="Application funnel — where things actually go" icon={<Activity className="w-4 h-4" />}>
+          {!funnel || funnel.funnel[0]?.count === 0 ? (
+            <div className="flex flex-col items-center justify-center h-[150px] text-center gap-2">
+              <Activity className="w-8 h-8 text-[#8aebff]/40" />
+              <p className="text-sm text-[#bbc9cd]">No pipeline data yet.</p>
+              <p className="text-[11px] font-mono text-[#859397] max-w-xs">Track a few jobs and move them through the board — response rate, ghost rate and source yield build up here.</p>
+            </div>
+          ) : (
+            <>
+              {/* KPI row */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+                {[
+                  { label: "Applied", val: funnel.applied_total, tone: CYAN },
+                  { label: "Response rate", val: `${funnel.response_rate}%`, tone: GREEN, sub: `${funnel.responded_total} replied` },
+                  { label: "Avg response", val: funnel.avg_response_days == null ? "—" : `${funnel.avg_response_days}d`, tone: AMBER },
+                  { label: "Ghost rate", val: `${funnel.ghost_rate}%`, tone: RED, sub: `${funnel.ghosted} silent >${funnel.ghost_days}d` },
+                ].map((k) => (
+                  <div key={k.label} className="rounded-lg border border-white/5 bg-white/[0.02] p-3">
+                    <div className="text-[10px] font-mono uppercase tracking-widest text-[#859397]">{k.label}</div>
+                    <div className="text-2xl font-bold font-mono" style={{ color: k.tone }}>{k.val}</div>
+                    {k.sub && <div className="text-[9px] font-mono text-[#859397] mt-0.5">{k.sub}</div>}
+                  </div>
+                ))}
+              </div>
+              {/* Funnel bars */}
+              <div className="space-y-1.5 mb-4">
+                {funnel.funnel.map((s) => {
+                  const top = funnel.funnel[0]?.count || 1;
+                  const pct = Math.round((s.count / top) * 100);
+                  return (
+                    <div key={s.stage} className="flex items-center gap-2">
+                      <span className="w-24 shrink-0 text-xs font-mono text-[#dfe2f3] capitalize">{s.stage}</span>
+                      <div className="flex-1 h-4 bg-white/5 rounded overflow-hidden">
+                        <div className="h-full rounded" style={{ width: `${pct}%`, background: "linear-gradient(90deg,#8aebff,#5eead4)" }} />
+                      </div>
+                      <span className="w-8 shrink-0 text-right text-xs font-mono text-[#859397]">{s.count}</span>
+                    </div>
+                  );
+                })}
+                {funnel.rejected > 0 && (
+                  <div className="text-[10px] font-mono text-[#ffb4ab] pt-1">+ {funnel.rejected} rejected</div>
+                )}
+              </div>
+              {/* Source yield */}
+              {funnel.sources.length > 0 && (
+                <div>
+                  <div className="text-[10px] font-mono text-[#859397] uppercase tracking-widest mb-1.5">Which sources convert</div>
+                  <div className="space-y-1">
+                    {funnel.sources.map((s) => (
+                      <div key={s.source} className="flex items-center gap-2 text-[11px] font-mono">
+                        <span className="w-28 shrink-0 text-[#dfe2f3] truncate" title={s.source}>{s.source}</span>
+                        <div className="flex-1 h-2 bg-white/5 rounded-full overflow-hidden">
+                          <div className="h-full rounded-full" style={{ width: `${s.yield}%`, background: s.yield >= 50 ? "#5eead4" : s.yield >= 20 ? "#fbbf24" : "#ffb4ab" }} />
+                        </div>
+                        <span className="w-24 shrink-0 text-right text-[#859397]">{s.responded}/{s.applied} · {s.yield}%</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </Panel>
+
+        <Panel title="Skill gap — market demand vs your résumé" icon={<Activity className="w-4 h-4" />}>
+          {!skillGap || skillGap.analyzed_jobs === 0 ? (
+            <div className="flex flex-col items-center justify-center h-[150px] text-center gap-2">
+              <Activity className="w-8 h-8 text-[#8aebff]/40" />
+              <p className="text-sm text-[#bbc9cd]">No skill data yet.</p>
+              <p className="text-[11px] font-mono text-[#859397] max-w-xs">Run ATS analysis on jobs in your board — the skills each JD demands are aggregated here vs what's on your résumé.</p>
+            </div>
+          ) : (
+            <>
+              <div className="text-[11px] font-mono text-[#859397] mb-3">
+                Across {skillGap.analyzed_jobs} analysed {skillGap.analyzed_jobs === 1 ? "job" : "jobs"}
+              </div>
+              {skillGap.top_gaps.length > 0 && (
+                <div className="mb-4">
+                  <div className="text-[10px] font-mono text-[#859397] uppercase tracking-widest mb-1.5">Biggest gaps — learn these next</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {skillGap.top_gaps.map((g) => (
+                      <span key={g.skill} className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-[#ffb4ab]/10 text-[#ffb4ab] border border-[#ffb4ab]/20">
+                        {g.skill} · missing in {g.gap}/{g.demand}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="space-y-1.5 max-h-[260px] overflow-y-auto pr-1">
+                {skillGap.skills.map((s) => (
+                  <div key={s.skill} className="flex items-center gap-2">
+                    <span className="w-28 shrink-0 text-xs font-mono text-[#dfe2f3] truncate" title={s.skill}>{s.skill}</span>
+                    <div className="flex-1 h-2.5 bg-white/5 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full" style={{ width: `${s.coverage}%`, background: s.coverage >= 67 ? "#5eead4" : s.coverage >= 34 ? "#fbbf24" : "#ffb4ab" }} />
+                    </div>
+                    <span className="w-20 shrink-0 text-right text-[10px] font-mono text-[#859397]">{s.have}/{s.demand} · {s.coverage}%</span>
                   </div>
                 ))}
               </div>

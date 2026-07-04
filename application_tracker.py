@@ -37,6 +37,16 @@ def init_application_tracker_tables():
         applied_at TEXT,
         updated_at TEXT
     )''')
+    # Append-only stage-transition ledger. The applications row only keeps the CURRENT status
+    # (updated_at is overwritten on every change), so per-stage history — needed for response
+    # time, ghost rate, and funnel analytics — is captured here and never mutated.
+    cur.execute('''CREATE TABLE IF NOT EXISTS application_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        app_id INTEGER,
+        from_status TEXT,
+        to_status TEXT,
+        at TEXT
+    )''')
     # Migrations on a pre-existing applications table.
     try:
         cols = [r[1] for r in cur.execute("PRAGMA table_info(applications)").fetchall()]
@@ -52,6 +62,29 @@ def init_application_tracker_tables():
     conn.commit()
     conn.close()
     print("✅ Application Tracker tables ready.")
+
+
+async def _log_event(db, app_id: int, from_status, to_status: str):
+    """Append a stage-transition row. Called within an existing connection so it shares the
+    caller's transaction. No-op when the stage didn't actually change."""
+    if from_status == to_status:
+        return
+    await db.execute(
+        "INSERT INTO application_events (app_id, from_status, to_status, at) VALUES (?,?,?,?)",
+        (app_id, from_status, to_status, datetime.now(timezone.utc).isoformat()),
+    )
+
+
+async def list_application_events(app_id: int = None) -> list:
+    """Stage-transition history, oldest first — for the response-analytics funnel."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if app_id is not None:
+            cur = await db.execute(
+                "SELECT * FROM application_events WHERE app_id = ? ORDER BY at ASC", (app_id,))
+        else:
+            cur = await db.execute("SELECT * FROM application_events ORDER BY at ASC")
+        return [dict(r) for r in await cur.fetchall()]
 
 
 def _normalize_status(raw: str) -> str:
@@ -86,7 +119,7 @@ async def add_application(job: dict, status: str = "applied", reviewed: int = 1,
             cur = await db.execute("SELECT id FROM applications WHERE job_key = ?", (job["key"],))
             if await cur.fetchone():
                 return False, f"📌 *{title}* — {job.get('company','')} is already in your tracker."
-        await db.execute(
+        cur = await db.execute(
             """INSERT OR IGNORE INTO applications
                (job_key, title, company, location, url, source, description, status,
                 notes, reviewed, applied_at, updated_at)
@@ -95,6 +128,8 @@ async def add_application(job: dict, status: str = "applied", reviewed: int = 1,
              job.get("url"), job.get("source"), job.get("description"), status,
              (notes if notes is not None else job.get("notes")), int(reviewed), now, now),
         )
+        if cur.lastrowid:  # a row was actually inserted (not ignored as a dup)
+            await _log_event(db, cur.lastrowid, None, status)
         await db.commit()
     emoji = _STATUS_EMOJI.get(status, "📌")
     return True, f"{emoji} *Tracked:* {title} — {job.get('company','')}\n_Status: {status}_"
@@ -132,8 +167,11 @@ async def update_status(query: str, new_status: str) -> tuple:
         if len(rows) > 1:
             names = "\n".join(f"- {r['title']} — {r['company']}" for r in rows)
             return False, f"⚠️ More than one match — be more specific:\n\n{names}"
+        cur = await db.execute("SELECT status FROM applications WHERE id = ?", (rows[0]["id"],))
+        prev = (await cur.fetchone() or {})
         await db.execute("UPDATE applications SET status = ?, updated_at = ? WHERE id = ?",
                          (status, now, rows[0]["id"]))
+        await _log_event(db, rows[0]["id"], prev["status"] if prev else None, status)
         await db.commit()
     emoji = _STATUS_EMOJI.get(status, "📌")
     return True, f"{emoji} *{rows[0]['title']}* — {rows[0]['company']} → *{status}*"
@@ -154,8 +192,12 @@ async def update_status_by_id(app_id: int, new_status: str) -> tuple:
         return False, f"Invalid status. Use one of: {', '.join(VALID_STATUSES)}."
     now = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT status FROM applications WHERE id = ?", (app_id,))
+        prev = await cur.fetchone()
         await db.execute("UPDATE applications SET status = ?, updated_at = ? WHERE id = ?",
                          (status, now, app_id))
+        await _log_event(db, app_id, prev["status"] if prev else None, status)
         await db.commit()
     return True, status
 
@@ -207,6 +249,120 @@ async def mark_reviewed(app_id: int) -> bool:
                          (now, app_id))
         await db.commit()
     return True
+
+
+# ── Response-analytics funnel ────────────────────────────────────────────────
+# The pipeline in forward order. `rejected` is terminal/off-pipeline (still counts as a
+# recruiter *response*, just a negative one) and is reported separately.
+_PIPELINE = ["interested", "applied", "interviewing", "offer", "accepted"]
+
+
+def _parse_iso(s):
+    if not s:
+        return None
+    try:
+        s = s.strip().replace("Z", "+00:00")
+        if "T" not in s and " " in s:  # SQLite CURRENT_TIMESTAMP style
+            s = s.replace(" ", "T", 1)
+        dt = datetime.fromisoformat(s)
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+    except Exception:
+        return None
+
+
+def _days_between(a, b):
+    da, db = _parse_iso(a), _parse_iso(b)
+    if not da or not db:
+        return None
+    return (db - da).total_seconds() / 86400.0
+
+
+async def response_analytics(ghost_days: int = 14) -> dict:
+    """Funnel + response metrics over the applications table and the append-only event ledger.
+
+    Reaching a stage is derived from the event history when present (an app that later moved
+    backwards still 'reached' its furthest stage) and falls back to the card's current status
+    for pre-ledger rows. Pure read — no LLM cost."""
+    apps = await list_applications()
+    events = await list_application_events()
+    ev_by_app = {}
+    for e in events:
+        ev_by_app.setdefault(e["app_id"], []).append(e)
+
+    idx = {s: i for i, s in enumerate(_PIPELINE)}
+    funnel = {s: 0 for s in _PIPELINE}
+    rejected = 0
+    source_stats = {}      # source -> {"applied": n, "responded": n}
+    response_days = []     # applied -> first recruiter response, in days
+    ghosted = 0
+    applied_total = 0
+    responded_total = 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for a in apps:
+        aid = a["id"]
+        cur_status = a.get("status")
+        evs = ev_by_app.get(aid, [])
+
+        reached = {idx[e["to_status"]] for e in evs if e.get("to_status") in idx}
+        if cur_status in idx:
+            reached.add(idx[cur_status])
+        max_idx = max(reached) if reached else -1
+
+        for s, i in idx.items():
+            if max_idx >= i:
+                funnel[s] += 1
+        if cur_status == "rejected":
+            rejected += 1
+
+        applied_reached = max_idx >= idx["applied"] or cur_status == "rejected"
+        if not applied_reached:
+            continue
+
+        # When did it hit 'applied'? Prefer the event; fall back to the card timestamp.
+        applied_at = next((e["at"] for e in evs if e.get("to_status") == "applied"), None) \
+            or a.get("applied_at") or a.get("updated_at")
+
+        source = (a.get("source") or "Unknown").strip() or "Unknown"
+        applied_total += 1
+        st = source_stats.setdefault(source, {"applied": 0, "responded": 0})
+        st["applied"] += 1
+
+        responded = max_idx >= idx["interviewing"] or cur_status == "rejected"
+        if responded:
+            responded_total += 1
+            st["responded"] += 1
+            resp_at = next(
+                (e["at"] for e in evs
+                 if e.get("to_status") in ("interviewing", "offer", "accepted", "rejected")),
+                None)
+            d = _days_between(applied_at, resp_at)
+            if d is not None and d >= 0:
+                response_days.append(d)
+        elif cur_status == "applied":
+            d = _days_between(applied_at, now_iso)
+            if d is not None and d >= ghost_days:
+                ghosted += 1
+
+    sources = []
+    for name, st in source_stats.items():
+        y = round(100 * st["responded"] / st["applied"]) if st["applied"] else 0
+        sources.append({"source": name, "applied": st["applied"],
+                        "responded": st["responded"], "yield": y})
+    sources.sort(key=lambda s: (-s["applied"], s["source"]))
+
+    return {
+        "funnel": [{"stage": s, "count": funnel[s]} for s in _PIPELINE],
+        "rejected": rejected,
+        "applied_total": applied_total,
+        "response_rate": round(100 * responded_total / applied_total) if applied_total else 0,
+        "responded_total": responded_total,
+        "avg_response_days": round(sum(response_days) / len(response_days), 1) if response_days else None,
+        "ghost_rate": round(100 * ghosted / applied_total) if applied_total else 0,
+        "ghosted": ghosted,
+        "ghost_days": ghost_days,
+        "sources": sources,
+    }
 
 
 def format_applications(apps: list) -> str:

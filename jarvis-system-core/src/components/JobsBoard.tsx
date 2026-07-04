@@ -18,6 +18,11 @@ import {
   Sparkles,
   Plus,
   Mail,
+  Send,
+  Clock,
+  CalendarClock,
+  StickyNote,
+  Pin,
 } from "lucide-react";
 
 interface JobsBoardProps {
@@ -114,6 +119,24 @@ const atsColor = (score: number) =>
     ? { text: "#ffd6a3", border: "#ffd6a3", bg: "#ffd6a3" }
     : { text: "#ffb4ab", border: "#ffb4ab", bg: "#ffb4ab" };
 
+// Tiny markdown renderer — enough for LLM briefs & notes (## headings, - bullets, **bold**).
+function renderMarkdown(md: string): React.ReactNode {
+  const lines = (md || "").split("\n");
+  const bold = (t: string) =>
+    t.split(/(\*\*[^*]+\*\*)/g).map((seg, i) =>
+      seg.startsWith("**") && seg.endsWith("**")
+        ? <b key={i} className="text-[#dfe2f3]">{seg.slice(2, -2)}</b>
+        : <React.Fragment key={i}>{seg}</React.Fragment>);
+  return lines.map((ln, i) => {
+    const t = ln.trim();
+    if (!t) return <div key={i} className="h-2" />;
+    if (t.startsWith("## ")) return <h4 key={i} className="text-sm font-bold font-mono text-[#8aebff] uppercase tracking-wide mt-3 mb-1">{t.slice(3)}</h4>;
+    if (t.startsWith("# ")) return <h3 key={i} className="text-base font-bold text-[#dfe2f3] mt-3 mb-1">{t.slice(2)}</h3>;
+    if (/^[-*]\s+/.test(t)) return <div key={i} className="flex gap-2 text-[13px] text-[#bbc9cd] pl-1"><span className="text-[#5eead4]">•</span><span>{bold(t.replace(/^[-*]\s+/, ""))}</span></div>;
+    return <p key={i} className="text-[13px] text-[#bbc9cd] leading-relaxed">{bold(t)}</p>;
+  });
+}
+
 export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) {
   const [applications, setApplications] = useState<Application[]>([]);
   const [statuses, setStatuses] = useState<string[]>([]);
@@ -192,6 +215,37 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
   const [reviewAts, setReviewAts] = useState<Record<string, AtsResult | "loading">>({});
   const [reviewMsg, setReviewMsg] = useState("");
 
+  // Recruiter follow-ups (stale 'applied' cards → drafted follow-up → 1-tap Gmail send)
+  const [followOpen, setFollowOpen] = useState(false);
+  const [followCands, setFollowCands] = useState<any[]>([]);
+  const [followCount, setFollowCount] = useState(0);
+  const [followLoading, setFollowLoading] = useState(false);
+  const [followDraft, setFollowDraft] = useState<any | null>(null); // {id, subject, body, recipient, card}
+  const [followBusyId, setFollowBusyId] = useState<number | null>(null);
+  const [followSending, setFollowSending] = useState(false);
+  const [followMsg, setFollowMsg] = useState("");
+
+  // Per-company email timeline (Gmail search by company/domain)
+  const [emailsOpen, setEmailsOpen] = useState(false);
+  const [emailsFor, setEmailsFor] = useState<{ id: number; title: string; company: string } | null>(null);
+  const [emailThreads, setEmailThreads] = useState<any[]>([]);
+  const [emailsLoading, setEmailsLoading] = useState(false);
+
+  // Interview prep dock (upcoming calendar interviews → on-demand LLM brief)
+  const [prepOpen, setPrepOpen] = useState(false);
+  const [interviews, setInterviews] = useState<any[]>([]);
+  const [interviewsLoading, setInterviewsLoading] = useState(false);
+  const [prepBrief, setPrepBrief] = useState<{ ev: any; markdown: string } | null>(null);
+  const [prepBusyId, setPrepBusyId] = useState<string | null>(null);
+
+  // Workspace notes (DB-backed markdown scratchpad)
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [notes, setNotes] = useState<any[]>([]);
+  const [notesLoading, setNotesLoading] = useState(false);
+  const [activeNote, setActiveNote] = useState<any | null>(null);
+  const [noteDraft, setNoteDraft] = useState({ title: "", body: "" });
+  const [notesSaving, setNotesSaving] = useState(false);
+
   /* ---- Data loading ---- */
 
   const loadApplications = useCallback(async () => {
@@ -235,11 +289,198 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
     }
   }, []);
 
+  const loadFollowCount = useCallback(async () => {
+    try {
+      const res = await fetch("/api/followups");
+      const data = await res.json();
+      setFollowCount(Array.isArray(data?.candidates) ? data.candidates.length : 0);
+    } catch {
+      setFollowCount(0);
+    }
+  }, []);
+
   useEffect(() => {
     loadApplications();
     loadPending();
     loadReviewCount();
-  }, [loadApplications, loadPending, loadReviewCount]);
+    loadFollowCount();
+  }, [loadApplications, loadPending, loadReviewCount, loadFollowCount]);
+
+  /* ---- Recruiter follow-ups ---- */
+
+  const openFollowups = async () => {
+    setFollowOpen(true);
+    setFollowLoading(true);
+    setFollowDraft(null);
+    setFollowMsg("");
+    try {
+      const res = await fetch("/api/followups");
+      const data = await res.json();
+      setFollowCands(Array.isArray(data?.candidates) ? data.candidates : []);
+    } catch {
+      setFollowCands([]);
+    } finally {
+      setFollowLoading(false);
+    }
+  };
+
+  const draftFollowup = async (cand: any) => {
+    setFollowBusyId(cand.id);
+    setFollowMsg("");
+    try {
+      const res = await fetch(`/api/followups/${cand.id}/draft`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      setFollowDraft({ id: cand.id, subject: data.subject, body: data.body, recipient: data.recipient, card: data.card });
+    } catch (e) {
+      setFollowMsg(`Draft failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setFollowBusyId(null);
+    }
+  };
+
+  const sendFollowup = async () => {
+    if (!followDraft) return;
+    setFollowSending(true);
+    setFollowMsg("");
+    try {
+      const res = await fetch("/api/followups/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to: followDraft.recipient, subject: followDraft.subject, body: followDraft.body }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      setFollowMsg(data.message || "Sent.");
+      setFollowDraft(null);
+      await Promise.all([openFollowups(), loadFollowCount()]);
+    } catch (e) {
+      setFollowMsg(`${e instanceof Error ? e.message : e}`);
+    } finally {
+      setFollowSending(false);
+    }
+  };
+
+  /* ---- Per-company email timeline ---- */
+
+  const openEmails = async (card: any) => {
+    setEmailsOpen(true);
+    setEmailsFor({ id: card.id, title: card.title, company: card.company });
+    setEmailThreads([]);
+    setEmailsLoading(true);
+    try {
+      const res = await fetch(`/api/applications/${card.id}/emails`);
+      const data = await res.json();
+      setEmailThreads(Array.isArray(data?.threads) ? data.threads : []);
+    } catch {
+      setEmailThreads([]);
+    } finally {
+      setEmailsLoading(false);
+    }
+  };
+
+  /* ---- Interview prep dock ---- */
+
+  const openPrep = async () => {
+    setPrepOpen(true);
+    setPrepBrief(null);
+    setInterviewsLoading(true);
+    try {
+      const res = await fetch("/api/interviews");
+      const data = await res.json();
+      setInterviews(Array.isArray(data?.interviews) ? data.interviews : []);
+    } catch {
+      setInterviews([]);
+    } finally {
+      setInterviewsLoading(false);
+    }
+  };
+
+  const buildPrep = async (ev: any) => {
+    setPrepBusyId(ev.id);
+    try {
+      const res = await fetch("/api/interviews/prep", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(ev),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      setPrepBrief({ ev, markdown: data.markdown });
+    } catch (e) {
+      setPrepBrief({ ev, markdown: `_Prep failed: ${e instanceof Error ? e.message : e}_` });
+    } finally {
+      setPrepBusyId(null);
+    }
+  };
+
+  /* ---- Workspace notes ---- */
+
+  const openNotes = async () => {
+    setNotesOpen(true);
+    setActiveNote(null);
+    setNotesLoading(true);
+    try {
+      const res = await fetch("/api/notes");
+      const data = await res.json();
+      setNotes(Array.isArray(data?.notes) ? data.notes : []);
+    } catch {
+      setNotes([]);
+    } finally {
+      setNotesLoading(false);
+    }
+  };
+
+  const selectNote = (n: any) => {
+    setActiveNote(n);
+    setNoteDraft({ title: n.title || "", body: n.body || "" });
+  };
+
+  const newNote = () => {
+    setActiveNote({ id: null });
+    setNoteDraft({ title: "", body: "" });
+  };
+
+  const saveNote = async () => {
+    setNotesSaving(true);
+    try {
+      const isNew = !activeNote?.id;
+      const url = isNew ? "/api/notes" : `/api/notes/${activeNote.id}`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: noteDraft.title, body: noteDraft.body }),
+      });
+      const data = await res.json();
+      if (data?.note) setActiveNote(data.note);
+      const list = await fetch("/api/notes").then((r) => r.json());
+      setNotes(Array.isArray(list?.notes) ? list.notes : []);
+    } catch { /* ignore */ } finally {
+      setNotesSaving(false);
+    }
+  };
+
+  const togglePinNote = async (n: any) => {
+    try {
+      await fetch(`/api/notes/${n.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pinned: n.pinned ? 0 : 1 }),
+      });
+      const list = await fetch("/api/notes").then((r) => r.json());
+      setNotes(Array.isArray(list?.notes) ? list.notes : []);
+    } catch { /* ignore */ }
+  };
+
+  const deleteNote = async (n: any) => {
+    if (!confirm(`Delete note "${n.title}"?`)) return;
+    try {
+      await fetch(`/api/notes/${n.id}/delete`, { method: "POST" });
+      if (activeNote?.id === n.id) setActiveNote(null);
+      const list = await fetch("/api/notes").then((r) => r.json());
+      setNotes(Array.isArray(list?.notes) ? list.notes : []);
+    } catch { /* ignore */ }
+  };
 
   /* ---- Job Scout review queue ---- */
 
@@ -708,6 +949,30 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
               </button>
             )}
             <button
+              onClick={openFollowups}
+              className="flex items-center gap-2 px-5 py-2 bg-[#ffd6a3]/10 border border-[#ffd6a3]/30 rounded-lg text-xs font-semibold hover:bg-[#ffd6a3]/20 transition-all text-[#ffd6a3] cursor-pointer"
+              title="Cards sitting in Applied with no reply — draft & send a follow-up"
+            >
+              <Clock className="w-4 h-4" />
+              FOLLOW-UPS{followCount > 0 ? ` (${followCount})` : ""}
+            </button>
+            <button
+              onClick={openPrep}
+              className="flex items-center gap-2 px-5 py-2 bg-[#5eead4]/10 border border-[#5eead4]/30 rounded-lg text-xs font-semibold hover:bg-[#5eead4]/20 transition-all text-[#5eead4] cursor-pointer"
+              title="Upcoming interviews from your calendar — build a prep brief"
+            >
+              <CalendarClock className="w-4 h-4" />
+              INTERVIEWS
+            </button>
+            <button
+              onClick={openNotes}
+              className="flex items-center gap-2 px-5 py-2 bg-white/5 border border-white/10 rounded-lg text-xs font-semibold hover:bg-white/10 hover:border-[#c084fc]/30 transition-all text-[#c084fc] cursor-pointer"
+              title="Workspace notes & scratchpad"
+            >
+              <StickyNote className="w-4 h-4" />
+              NOTES
+            </button>
+            <button
               onClick={openAdd}
               className="flex items-center gap-2 px-5 py-2 bg-[#8aebff]/10 border border-[#8aebff]/30 rounded-lg text-xs font-semibold hover:bg-[#8aebff]/20 transition-all text-[#8aebff] cursor-pointer"
               title="Track a job you applied to elsewhere (LinkedIn, Naukri, careers page…)"
@@ -914,6 +1179,14 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
                               className="ats-chip px-2.5 py-1 rounded text-[10px] font-bold font-mono text-[#8aebff] border border-[#8aebff]/30 hover:bg-[#8aebff]/10 transition-all cursor-pointer disabled:opacity-50"
                             >
                               {atsLoadingId === card.id ? "ANALYZING…" : "ATS ANALYSIS"}
+                            </button>
+
+                            <button
+                              onClick={() => openEmails(card)}
+                              title={`Recent email with ${card.company || "this company"}`}
+                              className="px-2.5 py-1 rounded text-[10px] font-bold font-mono text-[#a3e635] border border-[#a3e635]/30 hover:bg-[#a3e635]/10 transition-all cursor-pointer flex items-center gap-1"
+                            >
+                              <Mail className="w-3 h-3" /> EMAILS
                             </button>
 
                             <div className="relative inline-flex items-center">
@@ -2053,6 +2326,229 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
                     </button>
                   </>
                 )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Recruiter follow-ups modal ── */}
+      <AnimatePresence>
+        {followOpen && (
+          <div className="fixed inset-0 bg-[#0a0e1a]/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+            <motion.div initial={{ y: 30, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 30, opacity: 0 }}
+              className="w-full max-w-2xl glass-panel rounded-2xl overflow-hidden shadow-2xl border border-[#ffd6a3]/25 max-h-[90vh] flex flex-col">
+              <div className="p-6 border-b border-[#3c494c]/50 bg-[#161e2e]/80 flex justify-between items-center">
+                <div>
+                  <h2 className="text-xl font-extrabold text-[#dfe2f3] tracking-wide uppercase font-mono flex items-center gap-2">
+                    <Clock className="w-5 h-5 text-[#ffd6a3]" /> Follow-ups
+                  </h2>
+                  <p className="text-xs font-mono text-[#859397] mt-1">Applied &gt; 7 days ago, no reply yet · draft a gracious nudge</p>
+                </div>
+                <button onClick={() => setFollowOpen(false)} aria-label="Close" className="p-2 hover:bg-white/5 text-[#bbc9cd] hover:text-[#ffd6a3] rounded-full border border-white/5 cursor-pointer"><X className="w-5 h-5" /></button>
+              </div>
+              {followMsg && <div className="px-6 py-2 text-xs font-mono text-[#a3e635] bg-[#a3e635]/5 border-b border-[#a3e635]/10">{followMsg}</div>}
+              <div className="overflow-y-auto p-4 space-y-3">
+                {followLoading ? (
+                  <div className="text-center text-[#859397] font-mono text-sm py-10">Loading…</div>
+                ) : followDraft ? (
+                  <div className="space-y-3">
+                    <div className="text-xs font-mono text-[#859397]">Follow-up for <b className="text-[#dfe2f3]">{followDraft.card?.title}</b>{followDraft.card?.company ? ` — ${followDraft.card.company}` : ""}</div>
+                    <div>
+                      <label className="text-[10px] font-mono uppercase tracking-widest text-[#859397]">To</label>
+                      <input value={followDraft.recipient || ""} onChange={(e) => setFollowDraft({ ...followDraft, recipient: e.target.value })}
+                        placeholder="No apply address found — paste the recruiter's email"
+                        className="w-full mt-1 bg-white/5 border border-white/10 rounded px-3 py-2 text-sm text-[#dfe2f3] font-mono focus:outline-none focus:border-[#ffd6a3]/40" />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-mono uppercase tracking-widest text-[#859397]">Subject</label>
+                      <input value={followDraft.subject} onChange={(e) => setFollowDraft({ ...followDraft, subject: e.target.value })}
+                        className="w-full mt-1 bg-white/5 border border-white/10 rounded px-3 py-2 text-sm text-[#dfe2f3] focus:outline-none focus:border-[#ffd6a3]/40" />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-mono uppercase tracking-widest text-[#859397]">Body</label>
+                      <textarea value={followDraft.body} onChange={(e) => setFollowDraft({ ...followDraft, body: e.target.value })} rows={9}
+                        className="w-full mt-1 bg-white/5 border border-white/10 rounded px-3 py-2 text-sm text-[#dfe2f3] leading-relaxed focus:outline-none focus:border-[#ffd6a3]/40" />
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button onClick={sendFollowup} disabled={followSending || !followDraft.recipient}
+                        title={!followDraft.recipient ? "Add a recipient to send" : "Send via Gmail"}
+                        className="flex-1 py-2.5 rounded-lg text-sm font-bold bg-[#ffd6a3] hover:bg-[#ffe0b8] text-[#0a0e1a] transition-all cursor-pointer disabled:opacity-40 flex items-center justify-center gap-2">
+                        {followSending ? <><RefreshCw className="w-4 h-4 animate-spin" /> SENDING…</> : <><Send className="w-4 h-4" /> SEND</>}
+                      </button>
+                      <button onClick={() => navigator.clipboard?.writeText(`${followDraft.subject}\n\n${followDraft.body}`)}
+                        className="px-4 py-2.5 rounded-lg text-sm font-bold bg-white/5 border border-white/10 text-[#bbc9cd] hover:bg-white/10 cursor-pointer">Copy</button>
+                      <button onClick={() => setFollowDraft(null)} className="px-4 py-2.5 rounded-lg text-sm font-bold bg-white/5 border border-white/10 text-[#859397] hover:bg-white/10 cursor-pointer">Back</button>
+                    </div>
+                  </div>
+                ) : followCands.length === 0 ? (
+                  <div className="text-center text-[#859397] font-mono text-sm py-10">🎉 Nothing stale — every applied card is fresh or has moved.</div>
+                ) : (
+                  followCands.map((c) => (
+                    <div key={c.id} className="rounded-lg border border-white/5 bg-white/[0.02] p-4 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-bold text-[#dfe2f3] truncate">{c.title}</div>
+                        <div className="text-[11px] font-mono text-[#859397] truncate">{c.company}{c.location ? ` • ${c.location}` : ""}</div>
+                        <div className="text-[10px] font-mono mt-1 flex items-center gap-2">
+                          <span className="text-[#ffd6a3]">{c.days_since_applied}d silent</span>
+                          <span className={c.recipient ? "text-[#5eead4]" : "text-[#859397]"}>{c.recipient ? `✉ ${c.recipient}` : "no apply email"}</span>
+                        </div>
+                      </div>
+                      <button onClick={() => draftFollowup(c)} disabled={followBusyId === c.id}
+                        className="shrink-0 px-3 py-2 rounded-lg text-[11px] font-bold font-mono bg-[#ffd6a3]/10 border border-[#ffd6a3]/30 text-[#ffd6a3] hover:bg-[#ffd6a3]/20 cursor-pointer disabled:opacity-50">
+                        {followBusyId === c.id ? "DRAFTING…" : "DRAFT FOLLOW-UP"}
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Per-company email timeline modal ── */}
+      <AnimatePresence>
+        {emailsOpen && (
+          <div className="fixed inset-0 bg-[#0a0e1a]/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+            <motion.div initial={{ y: 30, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 30, opacity: 0 }}
+              className="w-full max-w-2xl glass-panel rounded-2xl overflow-hidden shadow-2xl border border-[#a3e635]/25 max-h-[85vh] flex flex-col">
+              <div className="p-6 border-b border-[#3c494c]/50 bg-[#161e2e]/80 flex justify-between items-center">
+                <div>
+                  <h2 className="text-lg font-extrabold text-[#dfe2f3] tracking-wide font-mono flex items-center gap-2">
+                    <Mail className="w-5 h-5 text-[#a3e635]" /> {emailsFor?.company || "Company"} — email
+                  </h2>
+                  <p className="text-xs font-mono text-[#859397] mt-1">{emailsFor?.title}</p>
+                </div>
+                <button onClick={() => setEmailsOpen(false)} aria-label="Close" className="p-2 hover:bg-white/5 text-[#bbc9cd] hover:text-[#a3e635] rounded-full border border-white/5 cursor-pointer"><X className="w-5 h-5" /></button>
+              </div>
+              <div className="overflow-y-auto p-4 space-y-2">
+                {emailsLoading ? (
+                  <div className="text-center text-[#859397] font-mono text-sm py-10">Searching your inbox…</div>
+                ) : emailThreads.length === 0 ? (
+                  <div className="text-center text-[#859397] font-mono text-sm py-10">No email found for this company.<div className="text-[11px] mt-1 opacity-70">Needs a connected Gmail account and matching correspondence.</div></div>
+                ) : (
+                  emailThreads.map((t) => (
+                    <div key={t.id} className="rounded-lg border border-white/5 bg-white/[0.02] p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-semibold text-[#dfe2f3] truncate flex items-center gap-2">
+                          {t.unread && <span className="w-2 h-2 rounded-full bg-[#8aebff] shrink-0" />}{t.subject}
+                        </span>
+                        <span className="text-[10px] font-mono text-[#859397] shrink-0">{t.date ? new Date(t.date).toLocaleDateString() : ""}</span>
+                      </div>
+                      <div className="text-[11px] font-mono text-[#859397] mt-0.5">{t.from}</div>
+                      <div className="text-[12px] text-[#bbc9cd] mt-1 line-clamp-2">{t.snippet}</div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Interview prep dock modal ── */}
+      <AnimatePresence>
+        {prepOpen && (
+          <div className="fixed inset-0 bg-[#0a0e1a]/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+            <motion.div initial={{ y: 30, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 30, opacity: 0 }}
+              className="w-full max-w-2xl glass-panel rounded-2xl overflow-hidden shadow-2xl border border-[#5eead4]/25 max-h-[90vh] flex flex-col">
+              <div className="p-6 border-b border-[#3c494c]/50 bg-[#161e2e]/80 flex justify-between items-center">
+                <div>
+                  <h2 className="text-xl font-extrabold text-[#dfe2f3] tracking-wide uppercase font-mono flex items-center gap-2">
+                    <CalendarClock className="w-5 h-5 text-[#5eead4]" /> Interview Prep
+                  </h2>
+                  <p className="text-xs font-mono text-[#859397] mt-1">Upcoming interviews from your calendar</p>
+                </div>
+                <button onClick={() => setPrepOpen(false)} aria-label="Close" className="p-2 hover:bg-white/5 text-[#bbc9cd] hover:text-[#5eead4] rounded-full border border-white/5 cursor-pointer"><X className="w-5 h-5" /></button>
+              </div>
+              <div className="overflow-y-auto p-4 space-y-3">
+                {interviewsLoading ? (
+                  <div className="text-center text-[#859397] font-mono text-sm py-10">Reading your calendar…</div>
+                ) : prepBrief ? (
+                  <div className="space-y-3">
+                    <button onClick={() => setPrepBrief(null)} className="text-[11px] font-mono text-[#5eead4] hover:underline cursor-pointer">← back to interviews</button>
+                    <div className="text-sm font-bold text-[#dfe2f3]">{prepBrief.ev.summary}</div>
+                    <div className="rounded-lg border border-white/5 bg-white/[0.02] p-4 space-y-1">{renderMarkdown(prepBrief.markdown)}</div>
+                  </div>
+                ) : interviews.length === 0 ? (
+                  <div className="text-center text-[#859397] font-mono text-sm py-10">No upcoming interviews detected.<div className="text-[11px] mt-1 opacity-70">Add interview events to your calendar (or use words like "interview"/"screen" in the title).</div></div>
+                ) : (
+                  interviews.map((ev) => (
+                    <div key={ev.id} className="rounded-lg border border-white/5 bg-white/[0.02] p-4 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-bold text-[#dfe2f3] truncate">{ev.summary}</div>
+                        <div className="text-[11px] font-mono text-[#859397] mt-0.5">
+                          {ev.start ? new Date(ev.start).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : ""}
+                          {ev.company ? ` · ${ev.company}` : ""}
+                        </div>
+                      </div>
+                      <button onClick={() => buildPrep(ev)} disabled={prepBusyId === ev.id}
+                        className="shrink-0 px-3 py-2 rounded-lg text-[11px] font-bold font-mono bg-[#5eead4]/10 border border-[#5eead4]/30 text-[#5eead4] hover:bg-[#5eead4]/20 cursor-pointer disabled:opacity-50">
+                        {prepBusyId === ev.id ? "PREPPING…" : "BUILD BRIEF"}
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Workspace notes modal ── */}
+      <AnimatePresence>
+        {notesOpen && (
+          <div className="fixed inset-0 bg-[#0a0e1a]/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+            <motion.div initial={{ y: 30, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 30, opacity: 0 }}
+              className="w-full max-w-4xl glass-panel rounded-2xl overflow-hidden shadow-2xl border border-[#c084fc]/25 h-[80vh] flex flex-col">
+              <div className="p-5 border-b border-[#3c494c]/50 bg-[#161e2e]/80 flex justify-between items-center">
+                <h2 className="text-lg font-extrabold text-[#dfe2f3] tracking-wide uppercase font-mono flex items-center gap-2">
+                  <StickyNote className="w-5 h-5 text-[#c084fc]" /> Workspace Notes
+                </h2>
+                <button onClick={() => setNotesOpen(false)} aria-label="Close" className="p-2 hover:bg-white/5 text-[#bbc9cd] hover:text-[#c084fc] rounded-full border border-white/5 cursor-pointer"><X className="w-5 h-5" /></button>
+              </div>
+              <div className="flex-1 flex min-h-0">
+                {/* list */}
+                <div className="w-64 shrink-0 border-r border-white/5 flex flex-col">
+                  <button onClick={newNote} className="m-3 px-3 py-2 rounded-lg text-[11px] font-bold font-mono bg-[#c084fc]/10 border border-[#c084fc]/30 text-[#c084fc] hover:bg-[#c084fc]/20 cursor-pointer flex items-center justify-center gap-1"><Plus className="w-3.5 h-3.5" /> NEW NOTE</button>
+                  <div className="overflow-y-auto px-3 pb-3 space-y-1">
+                    {notesLoading ? <div className="text-center text-[#859397] font-mono text-xs py-6">Loading…</div> :
+                      notes.length === 0 ? <div className="text-center text-[#859397] font-mono text-xs py-6">No notes yet.</div> :
+                        notes.map((n) => (
+                          <div key={n.id} onClick={() => selectNote(n)}
+                            className={`group rounded-lg px-3 py-2 cursor-pointer border ${activeNote?.id === n.id ? "bg-[#c084fc]/10 border-[#c084fc]/30" : "border-transparent hover:bg-white/5"}`}>
+                            <div className="flex items-center gap-1">
+                              {n.pinned ? <Pin className="w-3 h-3 text-[#c084fc] shrink-0" /> : null}
+                              <span className="text-sm text-[#dfe2f3] truncate flex-1">{n.title}</span>
+                            </div>
+                            <div className="flex items-center gap-2 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button onClick={(e) => { e.stopPropagation(); togglePinNote(n); }} className="text-[9px] font-mono text-[#859397] hover:text-[#c084fc] cursor-pointer">{n.pinned ? "unpin" : "pin"}</button>
+                              <button onClick={(e) => { e.stopPropagation(); deleteNote(n); }} className="text-[9px] font-mono text-[#859397] hover:text-[#ffb4ab] cursor-pointer">delete</button>
+                            </div>
+                          </div>
+                        ))}
+                  </div>
+                </div>
+                {/* editor */}
+                <div className="flex-1 flex flex-col min-w-0 p-4">
+                  {!activeNote ? (
+                    <div className="flex-1 flex items-center justify-center text-[#859397] font-mono text-sm">Select a note or create a new one.</div>
+                  ) : (
+                    <>
+                      <input value={noteDraft.title} onChange={(e) => setNoteDraft({ ...noteDraft, title: e.target.value })} placeholder="Title"
+                        className="bg-transparent text-lg font-bold text-[#dfe2f3] focus:outline-none border-b border-white/5 pb-2 mb-3" />
+                      <textarea value={noteDraft.body} onChange={(e) => setNoteDraft({ ...noteDraft, body: e.target.value })} placeholder="Markdown supported — ## headings, - bullets, **bold**…"
+                        className="flex-1 bg-white/[0.02] border border-white/5 rounded-lg p-3 text-sm text-[#dfe2f3] leading-relaxed font-mono resize-none focus:outline-none focus:border-[#c084fc]/30" />
+                      <div className="flex items-center gap-2 mt-3">
+                        <button onClick={saveNote} disabled={notesSaving} className="px-4 py-2 rounded-lg text-sm font-bold bg-[#c084fc] hover:bg-[#d0a0ff] text-[#0a0e1a] cursor-pointer disabled:opacity-50 flex items-center gap-2">
+                          {notesSaving ? <><RefreshCw className="w-4 h-4 animate-spin" /> SAVING…</> : "SAVE"}
+                        </button>
+                        <span className="text-[10px] font-mono text-[#859397]">{activeNote?.updated_at ? `edited ${new Date(activeNote.updated_at).toLocaleString()}` : "unsaved"}</span>
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             </motion.div>
           </div>
