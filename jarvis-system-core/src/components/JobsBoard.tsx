@@ -181,6 +181,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
   const auditResumeFileRef = useRef<HTMLInputElement>(null);
   const [activeAtsAppId, setActiveAtsAppId] = useState<number | null>(null);
   const [auditApplying, setAuditApplying] = useState(false);
+  const [selectedAuditKeywords, setSelectedAuditKeywords] = useState<string[]>([]);
 
   // Apply-to-.docx (format-preserving) flow
   const [applyOpen, setApplyOpen] = useState(false);
@@ -978,17 +979,30 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
   const applyAuditSuggestions = async () => {
     setAuditApplying(true);
     try {
-      const res = await fetch("/resume/apply-audit", { method: "POST" });
+      const res = await fetch("/resume/apply-audit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ additions: selectedAuditKeywords }),
+      });
       const data = await res.json();
       if (!res.ok || data?.ok === false) {
         throw new Error(data?.error || `HTTP ${res.status}`);
       }
       
-      const changesText = Array.isArray(data.applied) && data.applied.length > 0
+      const grammarChanges = Array.isArray(data.applied) && data.applied.length > 0
         ? data.applied.map((c: any, idx: number) => `${idx + 1}. "${c.original}"\n   → "${c.suggestion}"`).join("\n\n")
-        : "No changes applied (matching text wasn't found in your master resume file).";
+        : "None";
 
-      alert(`Applied ${data.applied_count} of ${data.total} suggestions directly to your master Word document!\n\nDetails of applied edits:\n\n${changesText}\n\nRe-auditing master resume...`);
+      const keywordsChanges = data.added_count > 0
+        ? `Added ${data.added_count} keyword(s) to the Skills section: ${selectedAuditKeywords.join(", ")}`
+        : "None";
+
+      alert(`Successfully updated your master Word document!\n\n` +
+            `🔹 Grammar & Wording Fixes applied: ${data.applied_count} of ${data.total}\n` +
+            `${grammarChanges}\n\n` +
+            `🔹 Skills section updates:\n${keywordsChanges}\n\n` +
+            `Re-auditing master resume...`);
+      setSelectedAuditKeywords([]);
       await openAudit();
     } catch (e) {
       alert(`Could not apply suggestions: ${e instanceof Error ? e.message : e}`);
@@ -1039,6 +1053,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
     setAuditOpen(true);
     setAuditError("");
     setAuditFetching(true);
+    setSelectedAuditKeywords([]);
     try {
       const res = await fetch("/resume/audit");
       const data = await res.json();
@@ -2550,11 +2565,36 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                     {/* Keywords to add */}
                     {Array.isArray(audit.keywords_to_add) && audit.keywords_to_add.length > 0 && (
                       <div>
-                        <h4 className="text-xs font-bold font-mono uppercase tracking-widest text-[#859397] mb-2">Keywords to consider adding (only if genuine)</h4>
+                        <h4 className="text-xs font-bold font-mono uppercase tracking-widest text-[#859397] mb-2 flex items-center justify-between">
+                          <span>Keywords to consider adding (click to select for injection)</span>
+                          {selectedAuditKeywords.length > 0 && (
+                            <span className="text-[#a3e635] text-[10px] lowercase font-normal">({selectedAuditKeywords.length} selected)</span>
+                          )}
+                        </h4>
                         <div className="flex flex-wrap gap-1.5">
-                          {audit.keywords_to_add.map((k: string, i: number) => (
-                            <span key={i} className="text-[11px] font-mono px-2 py-0.5 rounded bg-[#8aebff]/10 border border-[#8aebff]/20 text-[#8aebff]">{k}</span>
-                          ))}
+                          {audit.keywords_to_add.map((k: string, i: number) => {
+                            const isSelected = selectedAuditKeywords.includes(k);
+                            return (
+                              <button
+                                key={i}
+                                type="button"
+                                onClick={() => {
+                                  if (isSelected) {
+                                    setSelectedAuditKeywords(prev => prev.filter(x => x !== k));
+                                  } else {
+                                    setSelectedAuditKeywords(prev => [...prev, k]);
+                                  }
+                                }}
+                                className={`text-[11px] font-mono px-2.5 py-1 rounded transition-all cursor-pointer border ${
+                                  isSelected
+                                    ? "bg-[#a3e635]/25 border-[#a3e635] text-[#a3e635] shadow-[0_0_8px_rgba(163,230,53,0.2)]"
+                                    : "bg-[#8aebff]/10 border-[#8aebff]/20 text-[#8aebff] hover:bg-[#8aebff]/20"
+                                }`}
+                              >
+                                {k}
+                              </button>
+                            );
+                          })}
                         </div>
                       </div>
                     )}

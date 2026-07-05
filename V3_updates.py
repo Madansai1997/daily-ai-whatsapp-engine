@@ -6165,7 +6165,7 @@ async def resume_download_api():
 
 
 @app.post("/resume/apply-audit")
-async def resume_apply_audit_api():
+async def resume_apply_audit_api(request: Request):
     """Apply the suggested grammar and wording fixes from the standalone Resume Audit
     directly to the master .docx file and update the master resume template."""
     audit = await get_saved_audit()
@@ -6179,6 +6179,11 @@ async def resume_apply_audit_api():
             status_code=400,
         )
     
+    try:
+        approved_additions = (await request.json()).get("additions", []) or []
+    except Exception:
+        approved_additions = []
+    
     filename, docx_bytes = master
     grammar_items = audit.get("grammar", []) or []
     rewrites = [
@@ -6186,16 +6191,21 @@ async def resume_apply_audit_api():
         for g in grammar_items
         if (g.get("original") or "").strip() and (g.get("suggestion") or "").strip()
     ]
-    if not rewrites:
-        return JSONResponse({"ok": True, "applied": 0, "message": "No suggestions to apply."})
     
     loop = asyncio.get_running_loop()
     try:
-        from resume_editor import apply_rewrites
+        from resume_editor import apply_rewrites, append_bullet
         new_bytes, applied_list = await loop.run_in_executor(None, lambda: apply_rewrites(docx_bytes, rewrites))
         applied_count = len(applied_list)
+        added_count = 0
         
-        if applied_count > 0:
+        if approved_additions:
+            line = "Additional skills: " + ", ".join(str(x) for x in approved_additions)
+            new_bytes, ok = await loop.run_in_executor(None, lambda: append_bullet(new_bytes, "Skills", line))
+            if ok:
+                added_count = len(approved_additions)
+        
+        if applied_count > 0 or added_count > 0:
             # 1. Save the modified .docx to the database
             await save_master_docx(filename, new_bytes)
             
@@ -6214,6 +6224,7 @@ async def resume_apply_audit_api():
         "ok": True,
         "applied_count": applied_count,
         "applied": [{"original": find, "suggestion": replace} for find, replace in applied_list],
+        "added_count": added_count,
         "total": len(rewrites),
     })
 
