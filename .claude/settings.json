@@ -18,6 +18,13 @@
         "hooks": [
           {
             "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/shared_memory.py\" import-claude >/dev/null 2>&1",
+            "async": true,
+            "timeout": 30,
+            "statusMessage": "Syncing memories to Antigravity (AGENTS.md)…"
+          },
+          {
+            "type": "command",
             "command": "JARVIS_URL=https://daily-ai-whatsapp-engine.onrender.com bash \"$CLAUDE_PROJECT_DIR/scripts/push_dev_usage.sh\" >> /tmp/jarvis_dev_usage_push.log 2>&1",
             "async": true,
             "timeout": 180,
