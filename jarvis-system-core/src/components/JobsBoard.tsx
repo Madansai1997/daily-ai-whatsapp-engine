@@ -180,6 +180,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
   const resumeFileRef = useRef<HTMLInputElement>(null);
   const auditResumeFileRef = useRef<HTMLInputElement>(null);
   const [activeAtsAppId, setActiveAtsAppId] = useState<number | null>(null);
+  const [auditApplying, setAuditApplying] = useState(false);
 
   // Apply-to-.docx (format-preserving) flow
   const [applyOpen, setApplyOpen] = useState(false);
@@ -972,6 +973,23 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
     const tok = getToken();
     const url = tok ? `/resume/download?token=${encodeURIComponent(tok)}` : "/resume/download";
     window.open(url, "_blank");
+  };
+
+  const applyAuditSuggestions = async () => {
+    setAuditApplying(true);
+    try {
+      const res = await fetch("/resume/apply-audit", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      alert(`Applied ${data.applied} changes to your master resume! Re-auditing now...`);
+      await openAudit();
+    } catch (e) {
+      alert(`Could not apply suggestions: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setAuditApplying(false);
+    }
   };
 
   /* ---- Manually add a job applied elsewhere ---- */
@@ -2573,6 +2591,21 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                         className="px-4 py-2 rounded-lg text-xs font-semibold font-mono text-[#22d3ee] bg-[#22d3ee]/10 border border-[#22d3ee]/30 hover:bg-[#22d3ee]/20 transition-all cursor-pointer flex items-center gap-2"
                       >
                         <Download className="w-3.5 h-3.5" /> DOWNLOAD DOCX
+                      </button>
+                    )}
+
+                    {hasDocx && audit.grammar && audit.grammar.length > 0 && (
+                      <button
+                        onClick={applyAuditSuggestions}
+                        disabled={auditApplying || auditRunning || resumeUploading}
+                        className="px-4 py-2 rounded-lg text-xs font-semibold font-mono text-[#a3e635] bg-[#a3e635]/10 border border-[#a3e635]/30 hover:bg-[#a3e635]/20 transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                        title="Apply all suggested grammar & wording changes directly to your master Word document"
+                      >
+                        {auditApplying ? (
+                          <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> APPLYING…</>
+                        ) : (
+                          <><CheckCircle2 className="w-3.5 h-3.5" /> APPLY AI SUGGESTIONS</>
+                        )}
                       </button>
                     )}
                   </div>

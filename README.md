@@ -74,6 +74,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `bf92d81` fix(ats): fix master resume download corruption _(2026-07-05)_
 - `44297ff` fix(ats): make resume text extraction robust to invalid formats _(2026-07-05)_
 - `660b424` feat(ats): add resume download and audit upload/auto-rescan _(2026-07-05)_
 - `6dfbfd3` fix(ats): resume upload race condition and audit determinism _(2026-07-05)_
@@ -85,10 +86,9 @@ npm install && npm run build     # served by the engine at /console
 - `414c338` feat(memory): auto-sync Claude's saved memories to Antigravity on SessionEnd _(2026-07-05)_
 - `ed87c44` feat(memory): shared memory bridge between Claude Code and Antigravity _(2026-07-05)_
 - `cd984aa` feat(console): Tier-1 career agents — funnel analytics, follow-ups, email timeline, interview prep, notes _(2026-07-04)_
-- `2c9a3a2` feat(console): remove PrivaChat screen from JARVIS interface _(2026-07-04)_
 <!-- /AUTO:changelog -->
 
 ---
 
-_Last updated: 2026-07-05 · this README's inventory and changelog are auto-maintained by
+_Last updated: 2026-07-06 · this README's inventory and changelog are auto-maintained by
 `scripts/gen_readme.py` on every commit._

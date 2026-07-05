@@ -6164,6 +6164,58 @@ async def resume_download_api():
     )
 
 
+@app.post("/resume/apply-audit")
+async def resume_apply_audit_api():
+    """Apply the suggested grammar and wording fixes from the standalone Resume Audit
+    directly to the master .docx file and update the master resume template."""
+    audit = await get_saved_audit()
+    if not audit:
+        return JSONResponse({"ok": False, "error": "Run the Resume Audit first."}, status_code=400)
+    
+    master = await get_master_docx()
+    if not master:
+        return JSONResponse(
+            {"ok": False, "error": "No master .docx found. Upload your résumé as a .docx file first."},
+            status_code=400,
+        )
+    
+    filename, docx_bytes = master
+    grammar_items = audit.get("grammar", []) or []
+    rewrites = [
+        (g.get("original", ""), g.get("suggestion", ""))
+        for g in grammar_items
+        if (g.get("original") or "").strip() and (g.get("suggestion") or "").strip()
+    ]
+    if not rewrites:
+        return JSONResponse({"ok": True, "applied": 0, "message": "No suggestions to apply."})
+    
+    loop = asyncio.get_running_loop()
+    try:
+        from resume_editor import apply_rewrites
+        new_bytes, applied = await loop.run_in_executor(None, lambda: apply_rewrites(docx_bytes, rewrites))
+        
+        if applied > 0:
+            # 1. Save the modified .docx to the database
+            await save_master_docx(filename, new_bytes)
+            
+            # 2. Extract plain text and update the user_resume_templates
+            text = _extract_resume_text(filename, new_bytes)
+            if text:
+                await save_resume_template(text)
+            
+            # 3. Automatically run a fresh audit to update the audit scores and priorities
+            await audit_resume(call_llm)
+    except Exception as e:
+        print(f"❌ resume/apply-audit error: {e}")
+        return JSONResponse({"ok": False, "error": f"Failed to apply suggestions: {e}"}, status_code=500)
+        
+    return JSONResponse({
+        "ok": True,
+        "applied": applied,
+        "total": len(rewrites),
+    })
+
+
 
 @app.post("/ats/{job_ref}/apply-to-docx")
 async def ats_apply_docx_api(job_ref: str, request: Request):
