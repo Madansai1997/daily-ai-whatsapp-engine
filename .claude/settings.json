@@ -1,5 +1,18 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/shared_memory.py\" render >/dev/null 2>&1",
+            "async": true,
+            "timeout": 20,
+            "statusMessage": "Refreshing shared memory (AGENTS.md)…"
+          }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [
