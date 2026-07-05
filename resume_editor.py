@@ -54,22 +54,28 @@ def _replace_in_paragraph(paragraph, find: str, replace: str) -> bool:
     return True
 
 
-def apply_rewrites(docx_bytes: bytes, rewrites: list[tuple[str, str]]) -> tuple[bytes, int]:
+def apply_rewrites(docx_bytes: bytes, rewrites: list[tuple[str, str]]) -> tuple[bytes, list[tuple[str, str]]]:
     """Apply (find, replace) rewrites to a .docx, first occurrence each. Returns
-    (new_docx_bytes, number_applied). Formatting preserved."""
+    (new_docx_bytes, applied_list). Formatting preserved."""
     doc = Document(io.BytesIO(docx_bytes))
-    applied = 0
+    applied_list = []
     for find, replace in rewrites:
         if not find or not (find.strip()):
             continue
+        # Normalize non-breaking hyphens and non-breaking spaces
+        find_norm = find.replace("\xa0", " ").replace("\u2011", "-").strip()
         for p in _iter_paragraphs(doc):
-            if find in p.text:
-                if _replace_in_paragraph(p, find, replace):
-                    applied += 1
-                break
+            p_norm = p.text.replace("\xa0", " ").replace("\u2011", "-").strip()
+            if find_norm in p_norm:
+                # Replace matching text in paragraph by mapping it to paragraph text
+                orig_find = p.text
+                new_text = p_norm.replace(find_norm, replace)
+                if _replace_in_paragraph(p, orig_find, new_text):
+                    applied_list.append((find, replace))
+                    break
     out = io.BytesIO()
     doc.save(out)
-    return out.getvalue(), applied
+    return out.getvalue(), applied_list
 
 
 def append_bullet(docx_bytes: bytes, section_title: str, text: str) -> tuple[bytes, bool]:

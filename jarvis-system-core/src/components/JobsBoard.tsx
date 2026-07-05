@@ -983,7 +983,12 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       if (!res.ok || data?.ok === false) {
         throw new Error(data?.error || `HTTP ${res.status}`);
       }
-      alert(`Applied ${data.applied} changes to your master resume! Re-auditing now...`);
+      
+      const changesText = Array.isArray(data.applied) && data.applied.length > 0
+        ? data.applied.map((c: any, idx: number) => `${idx + 1}. "${c.original}"\n   → "${c.suggestion}"`).join("\n\n")
+        : "No changes applied (matching text wasn't found in your master resume file).";
+
+      alert(`Applied ${data.applied_count} of ${data.total} suggestions directly to your master Word document!\n\nDetails of applied edits:\n\n${changesText}\n\nRe-auditing master resume...`);
       await openAudit();
     } catch (e) {
       alert(`Could not apply suggestions: ${e instanceof Error ? e.message : e}`);

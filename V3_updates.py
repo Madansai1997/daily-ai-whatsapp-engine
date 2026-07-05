@@ -6192,9 +6192,10 @@ async def resume_apply_audit_api():
     loop = asyncio.get_running_loop()
     try:
         from resume_editor import apply_rewrites
-        new_bytes, applied = await loop.run_in_executor(None, lambda: apply_rewrites(docx_bytes, rewrites))
+        new_bytes, applied_list = await loop.run_in_executor(None, lambda: apply_rewrites(docx_bytes, rewrites))
+        applied_count = len(applied_list)
         
-        if applied > 0:
+        if applied_count > 0:
             # 1. Save the modified .docx to the database
             await save_master_docx(filename, new_bytes)
             
@@ -6211,7 +6212,8 @@ async def resume_apply_audit_api():
         
     return JSONResponse({
         "ok": True,
-        "applied": applied,
+        "applied_count": applied_count,
+        "applied": [{"original": find, "suggestion": replace} for find, replace in applied_list],
         "total": len(rewrites),
     })
 
@@ -6245,7 +6247,8 @@ async def ats_apply_docx_api(job_ref: str, request: Request):
 
     loop = asyncio.get_running_loop()
     try:
-        new_bytes, applied = await loop.run_in_executor(None, lambda: apply_rewrites(docx_bytes, rewrites))
+        new_bytes, applied_list = await loop.run_in_executor(None, lambda: apply_rewrites(docx_bytes, rewrites))
+        applied = len(applied_list)
         added = 0
         if approved_additions:
             line = "Additional skills: " + ", ".join(str(x) for x in approved_additions)

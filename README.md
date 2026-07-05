@@ -74,6 +74,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `1d6fb70` feat(ats): support applying resume audit grammar suggestions directly to docx _(2026-07-06)_
 - `bf92d81` fix(ats): fix master resume download corruption _(2026-07-05)_
 - `44297ff` fix(ats): make resume text extraction robust to invalid formats _(2026-07-05)_
 - `660b424` feat(ats): add resume download and audit upload/auto-rescan _(2026-07-05)_
@@ -85,7 +86,6 @@ npm install && npm run build     # served by the engine at /console
 - `51177bd` feat(console): Tier-2 agents — networking CRM, profile freshness, calendar shield, voice standup _(2026-07-05)_
 - `414c338` feat(memory): auto-sync Claude's saved memories to Antigravity on SessionEnd _(2026-07-05)_
 - `ed87c44` feat(memory): shared memory bridge between Claude Code and Antigravity _(2026-07-05)_
-- `cd984aa` feat(console): Tier-1 career agents — funnel analytics, follow-ups, email timeline, interview prep, notes _(2026-07-04)_
 <!-- /AUTO:changelog -->
 
 ---
