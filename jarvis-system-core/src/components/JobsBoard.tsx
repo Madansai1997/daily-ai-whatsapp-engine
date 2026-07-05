@@ -178,6 +178,8 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
   const [resumeSaving, setResumeSaving] = useState(false);
   const [resumeUploading, setResumeUploading] = useState(false);
   const resumeFileRef = useRef<HTMLInputElement>(null);
+  const auditResumeFileRef = useRef<HTMLInputElement>(null);
+  const [activeAtsAppId, setActiveAtsAppId] = useState<number | null>(null);
 
   // Apply-to-.docx (format-preserving) flow
   const [applyOpen, setApplyOpen] = useState(false);
@@ -861,6 +863,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
         return;
       }
       setAtsResult(data as AtsResult);
+      setActiveAtsAppId(id);
       if (data?.domain_mismatch?.mismatched) {
         setActiveTab("error");
       } else {
@@ -941,12 +944,34 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       }
       // Populate the editor with the extracted text (already saved server-side).
       setResumeContent(typeof data?.content === "string" ? data.content : "");
+      if (file.name.toLowerCase().endsWith(".docx")) {
+        setHasDocx(true);
+      }
+      if (auditOpen) {
+        setTimeout(() => {
+          runAudit();
+        }, 100);
+      }
+      if (activeScreen === ScreenId.AtsAnalysis && activeAtsAppId !== null) {
+        setTimeout(() => {
+          if (activeAtsAppId !== null) {
+            runAts(activeAtsAppId);
+          }
+        }, 150);
+      }
     } catch (e) {
       alert(`Could not read that file: ${e instanceof Error ? e.message : e}`);
     } finally {
       setResumeUploading(false);
       if (resumeFileRef.current) resumeFileRef.current.value = "";
+      if (auditResumeFileRef.current) auditResumeFileRef.current.value = "";
     }
+  };
+
+  const downloadMasterDocx = () => {
+    const tok = getToken();
+    const url = tok ? `/resume/download?token=${encodeURIComponent(tok)}` : "/resume/download";
+    window.open(url, "_blank");
   };
 
   /* ---- Manually add a job applied elsewhere ---- */
@@ -995,6 +1020,10 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       const res = await fetch("/resume/audit");
       const data = await res.json();
       setAudit(data?.audit || null);
+      
+      const docxRes = await fetch("/resume/docx-status");
+      const docxData = await docxRes.json();
+      setHasDocx(!!docxData?.has_docx);
     } catch {
       setAudit(null);
     } finally {
@@ -2333,13 +2362,47 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                       changes to get more interview calls.
                     </p>
                     {auditError && <p className="text-xs font-mono text-[#ffb4ab]">{auditError}</p>}
-                    <button
-                      onClick={runAudit}
-                      disabled={auditRunning}
-                      className="px-6 py-2.5 rounded-lg text-sm font-bold bg-[#a3e635] hover:bg-[#bef264] text-[#0a0e1a] transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
-                    >
-                      {auditRunning ? <><RefreshCw className="w-4 h-4 animate-spin" /> AUDITING…</> : <><Sparkles className="w-4 h-4" /> RUN AUDIT</>}
-                    </button>
+                    
+                    <div className="flex flex-wrap items-center justify-center gap-3 mt-2">
+                      <input
+                        ref={auditResumeFileRef}
+                        type="file"
+                        accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+                        className="hidden"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) uploadResumeFile(f);
+                        }}
+                      />
+                      <button
+                        onClick={() => auditResumeFileRef.current?.click()}
+                        disabled={resumeUploading || auditRunning}
+                        className="px-5 py-2.5 rounded-lg text-xs font-semibold font-mono text-[#8aebff] bg-[#8aebff]/10 border border-[#8aebff]/30 hover:bg-[#8aebff]/20 transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                      >
+                        {resumeUploading ? (
+                          <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> READING…</>
+                        ) : (
+                          <><Upload className="w-3.5 h-3.5" /> UPLOAD CV</>
+                        )}
+                      </button>
+
+                      {hasDocx && (
+                        <button
+                          onClick={downloadMasterDocx}
+                          className="px-5 py-2.5 rounded-lg text-xs font-semibold font-mono text-[#22d3ee] bg-[#22d3ee]/10 border border-[#22d3ee]/30 hover:bg-[#22d3ee]/20 transition-all cursor-pointer flex items-center gap-2"
+                        >
+                          <Download className="w-3.5 h-3.5" /> DOWNLOAD DOCX
+                        </button>
+                      )}
+
+                      <button
+                        onClick={runAudit}
+                        disabled={auditRunning || resumeUploading}
+                        className="px-6 py-2.5 rounded-lg text-sm font-bold bg-[#a3e635] hover:bg-[#bef264] text-[#0a0e1a] transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                      >
+                        {auditRunning ? <><RefreshCw className="w-4 h-4 animate-spin" /> AUDITING…</> : <><Sparkles className="w-4 h-4" /> RUN AUDIT</>}
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <>
@@ -2480,13 +2543,43 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
 
               {/* Footer */}
               {audit && !auditFetching && (
-                <div className="p-4 border-t border-white/5 flex items-center justify-between">
-                  <span className="text-[10px] font-mono text-[#859397]">
-                    {audit.created_at ? `Last run: ${new Date(audit.created_at).toLocaleString()}` : ""}
-                  </span>
+                <div className="p-4 border-t border-white/5 flex items-center justify-between flex-wrap gap-3">
+                  <div className="flex gap-2 items-center">
+                    <input
+                      ref={auditResumeFileRef}
+                      type="file"
+                      accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) uploadResumeFile(f);
+                      }}
+                    />
+                    <button
+                      onClick={() => auditResumeFileRef.current?.click()}
+                      disabled={resumeUploading || auditRunning}
+                      className="px-4 py-2 rounded-lg text-xs font-semibold font-mono text-[#8aebff] bg-[#8aebff]/10 border border-[#8aebff]/30 hover:bg-[#8aebff]/20 transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                    >
+                      {resumeUploading ? (
+                        <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> READING…</>
+                      ) : (
+                        <><Upload className="w-3.5 h-3.5" /> UPLOAD CV</>
+                      )}
+                    </button>
+
+                    {hasDocx && (
+                      <button
+                        onClick={downloadMasterDocx}
+                        className="px-4 py-2 rounded-lg text-xs font-semibold font-mono text-[#22d3ee] bg-[#22d3ee]/10 border border-[#22d3ee]/30 hover:bg-[#22d3ee]/20 transition-all cursor-pointer flex items-center gap-2"
+                      >
+                        <Download className="w-3.5 h-3.5" /> DOWNLOAD DOCX
+                      </button>
+                    )}
+                  </div>
+
                   <button
                     onClick={runAudit}
-                    disabled={auditRunning}
+                    disabled={auditRunning || resumeUploading}
                     className="px-5 py-2 rounded-lg text-xs font-bold bg-[#a3e635]/10 border border-[#a3e635]/30 text-[#a3e635] hover:bg-[#a3e635] hover:text-[#0a0e1a] transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
                   >
                     {auditRunning ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> RE-AUDITING…</> : <><RefreshCw className="w-3.5 h-3.5" /> RE-RUN AUDIT</>}

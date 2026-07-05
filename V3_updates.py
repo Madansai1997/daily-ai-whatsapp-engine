@@ -6134,6 +6134,25 @@ async def resume_docx_status_api():
     return JSONResponse({"has_docx": await has_master_docx()})
 
 
+@app.get("/resume/download")
+async def resume_download_api():
+    t = await get_master_docx()
+    if not t:
+        return JSONResponse({"error": "no master docx uploaded"}, status_code=404)
+    filename, data_b64 = t
+    import base64
+    try:
+        data = base64.b64decode(data_b64)
+    except Exception as e:
+        return JSONResponse({"error": f"failed to decode: {e}"}, status_code=500)
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+
 @app.post("/ats/{job_ref}/apply-to-docx")
 async def ats_apply_docx_api(job_ref: str, request: Request):
     """Auto-apply the rewrites to the stored master .docx (format preserved), plus any
