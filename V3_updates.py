@@ -6156,14 +6156,9 @@ async def resume_download_api():
     t = await get_master_docx()
     if not t:
         return JSONResponse({"error": "no master docx uploaded"}, status_code=404)
-    filename, data_b64 = t
-    import base64
-    try:
-        data = base64.b64decode(data_b64)
-    except Exception as e:
-        return JSONResponse({"error": f"failed to decode: {e}"}, status_code=500)
+    filename, file_bytes = t
     return Response(
-        content=data,
+        content=file_bytes,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
