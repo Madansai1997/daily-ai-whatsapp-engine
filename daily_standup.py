@@ -115,3 +115,102 @@ async def standup_briefing(call_llm_fn) -> dict:
     except Exception as e:
         return {"ok": False, "error": f"Standup failed: {e}", "facts": condensed}
     return {"ok": True, "text": (text or "").strip(), "facts": condensed}
+
+
+def _when_phrase(start_iso: str) -> str:
+    try:
+        s = datetime.fromisoformat((start_iso or "").replace("Z", "+00:00"))
+        if s.tzinfo is None:
+            s = s.replace(tzinfo=timezone.utc)
+        d = s.astimezone().date()
+        today = datetime.now().astimezone().date()
+        delta = (d - today).days
+        if delta <= 0:
+            return "today"
+        if delta == 1:
+            return "tomorrow"
+        return s.astimezone().strftime("%a %d %b")
+    except Exception:
+        return "soon"
+
+
+async def cockpit() -> dict:
+    """The Home-screen brief: a greeting, a PRIORITIZED, deep-linkable 'next steps' queue, and a
+    glanceable pipeline pulse. Reuses gather() (+ review queue and a week-momentum count) — a
+    presentation of data we already compute, no LLM, no cost. Targets like 'jobs:review' tell the
+    console which screen/modal a step opens."""
+    from application_tracker import (
+        count_review_queue, list_applications, list_application_events, _parse_iso,
+    )
+    facts = await gather()
+    now = datetime.now(timezone.utc)
+
+    apps = await _safe(list_applications(), [])
+    active = sum(1 for a in apps if a.get("status") in ("interested", "applied", "interviewing", "offer"))
+    events = await _safe(list_application_events(), [])
+    wk_cut = now - timedelta(days=7)
+    week_applied = sum(
+        1 for e in events
+        if e.get("to_status") == "applied" and (_parse_iso(e.get("at")) or now) >= wk_cut
+    )
+    review = await _safe(count_review_queue(), 0)
+
+    steps = []
+    for c in facts.get("calendar", {}).get("conflicts", []):
+        steps.append({"key": "conflict", "severity": "red", "icon": "alert",
+                      "label": f"Schedule clash — {c.get('a')} ↔ {c.get('b')}",
+                      "action": "Review", "target": "insights"})
+    for iv in facts["interviews"]:
+        who = iv.get("company") or iv.get("summary") or "interview"
+        steps.append({"key": "interview", "severity": "green", "icon": "calendar",
+                      "label": f"Interview {_when_phrase(iv.get('start'))} · {who}",
+                      "action": "Prep", "target": "jobs:interviews"})
+    if review:
+        steps.append({"key": "review", "severity": "purple", "icon": "sparkles",
+                      "label": f"{review} new match{'es' if review > 1 else ''} to review",
+                      "count": review, "action": "Review", "target": "jobs:review"})
+    fu = len(facts["followups"])
+    if fu:
+        steps.append({"key": "followups", "severity": "amber", "icon": "clock",
+                      "label": f"{fu} follow-up{'s' if fu > 1 else ''} overdue",
+                      "count": fu, "action": "Follow up", "target": "jobs:followups"})
+    for b in facts["bills"]:
+        nm = b.get("name") or "A bill"
+        steps.append({"key": "bill", "severity": "red", "icon": "wallet",
+                      "label": f"{nm} due soon", "action": "Pay", "target": "bills"})
+    cd = len(facts["contacts_due"])
+    if cd:
+        steps.append({"key": "contacts", "severity": "amber", "icon": "users",
+                      "label": f"{cd} contact{'s' if cd > 1 else ''} to reach out to",
+                      "count": cd, "action": "Network", "target": "jobs:network"})
+    stale = facts["stale_assets"]
+    if stale:
+        names = ", ".join(a.get("name") for a in stale[:3])
+        steps.append({"key": "freshness", "severity": "grey", "icon": "refresh",
+                      "label": f"{len(stale)} profile{'s' if len(stale) > 1 else ''} going stale ({names})",
+                      "action": "Refresh", "target": "insights"})
+
+    hour = now.astimezone().hour
+    greeting = "Good morning" if hour < 12 else "Good afternoon" if hour < 17 else "Good evening"
+    n = len(steps)
+    urgent = any(s["severity"] in ("red", "green") for s in steps)
+    if n == 0:
+        headline = "Clear runway today — a good day to get ahead."
+    elif urgent:
+        headline = f"{n} thing{'s' if n > 1 else ''} want your attention today."
+    else:
+        headline = f"A calm one — {n} thing{'s' if n > 1 else ''} to tidy up when you can."
+
+    return {
+        "greeting": greeting,
+        "name": "Madan",
+        "date": facts["date"],
+        "headline": headline,
+        "next_steps": steps,
+        "pulse": {
+            "active": active,
+            "response_rate": facts.get("response_rate"),
+            "week_applied": week_applied,
+            "funnel": facts.get("pipeline", []),
+        },
+    }

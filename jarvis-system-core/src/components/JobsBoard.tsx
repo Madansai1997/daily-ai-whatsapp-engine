@@ -27,11 +27,14 @@ import {
   Megaphone,
   Volume2,
   Square,
+  Wrench,
 } from "lucide-react";
 
 interface JobsBoardProps {
   activeScreen: ScreenId;
-  onNavigate: (screen: ScreenId) => void;
+  onNavigate: (screen: ScreenId, intent?: string) => void;
+  intent?: string | null;
+  onIntentHandled?: () => void;
 }
 
 /* ---- Inline types describing the real backend payloads ---- */
@@ -48,6 +51,8 @@ interface Application {
   status: string;
   ats_score?: number | null;
   ats_scored_at?: string | null;
+  applied_at?: string | null;
+  updated_at?: string | null;
 }
 
 interface ApplicationsResponse {
@@ -141,7 +146,19 @@ function renderMarkdown(md: string): React.ReactNode {
   });
 }
 
-export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) {
+// Whole days since an ISO timestamp (normalizes naive UTC); null if unparseable.
+function daysSince(ts?: string | null): number | null {
+  if (!ts) return null;
+  let s = ts.trim();
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}/.test(s) && !/([zZ]|[+-]\d{2}:?\d{2})$/.test(s)) {
+    s = s.replace(" ", "T") + "Z";
+  }
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return null;
+  return Math.floor((Date.now() - d.getTime()) / 86400000);
+}
+
+export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHandled }: JobsBoardProps) {
   const [applications, setApplications] = useState<Application[]>([]);
   const [statuses, setStatuses] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -276,6 +293,9 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
   const [previewing, setPreviewing] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
+  // Toolbar overflow — collapses the agent tools into one dropdown
+  const [toolsOpen, setToolsOpen] = useState(false);
+
   /* ---- Data loading ---- */
 
   const loadApplications = useCallback(async () => {
@@ -335,6 +355,18 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
     loadReviewCount();
     loadFollowCount();
   }, [loadApplications, loadPending, loadReviewCount, loadFollowCount]);
+
+  // Deep-link: when arriving from the Home cockpit with an intent, open the matching tool.
+  useEffect(() => {
+    if (!intent) return;
+    const map: Record<string, () => void> = {
+      review: openReview, followups: openFollowups, interviews: openPrep,
+      network: openNetwork, notes: openNotes, add: openAdd, standup: openStandup,
+    };
+    map[intent]?.();
+    onIntentHandled?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [intent]);
 
   /* ---- Recruiter follow-ups ---- */
 
@@ -1097,15 +1129,6 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
           </div>
 
           <div className="flex items-center gap-3 font-mono">
-            <button
-              onClick={scanNow}
-              disabled={scanning}
-              className="flex items-center gap-2 px-5 py-2 bg-white/5 border border-white/10 rounded-lg text-xs font-semibold hover:bg-white/10 hover:border-[#a3e635]/30 transition-all text-[#a3e635] cursor-pointer disabled:opacity-50"
-              title="Read your email now and update the board (application confirmations, interviews, offers, rejections)"
-            >
-              <Mail className={`w-4 h-4 ${scanning ? "animate-pulse" : ""}`} />
-              {scanning ? "SCANNING…" : "SCAN EMAILS"}
-            </button>
             {reviewCount > 0 && (
               <button
                 onClick={openReview}
@@ -1117,46 +1140,6 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
               </button>
             )}
             <button
-              onClick={openFollowups}
-              className="flex items-center gap-2 px-5 py-2 bg-[#ffd6a3]/10 border border-[#ffd6a3]/30 rounded-lg text-xs font-semibold hover:bg-[#ffd6a3]/20 transition-all text-[#ffd6a3] cursor-pointer"
-              title="Cards sitting in Applied with no reply — draft & send a follow-up"
-            >
-              <Clock className="w-4 h-4" />
-              FOLLOW-UPS{followCount > 0 ? ` (${followCount})` : ""}
-            </button>
-            <button
-              onClick={openPrep}
-              className="flex items-center gap-2 px-5 py-2 bg-[#5eead4]/10 border border-[#5eead4]/30 rounded-lg text-xs font-semibold hover:bg-[#5eead4]/20 transition-all text-[#5eead4] cursor-pointer"
-              title="Upcoming interviews from your calendar — build a prep brief"
-            >
-              <CalendarClock className="w-4 h-4" />
-              INTERVIEWS
-            </button>
-            <button
-              onClick={openStandup}
-              className="flex items-center gap-2 px-5 py-2 bg-[#8aebff]/10 border border-[#8aebff]/30 rounded-lg text-xs font-semibold hover:bg-[#8aebff]/20 transition-all text-[#8aebff] cursor-pointer"
-              title="Voice daily standup — JARVIS reads your day's job-search briefing aloud"
-            >
-              <Megaphone className="w-4 h-4" />
-              STANDUP
-            </button>
-            <button
-              onClick={openNetwork}
-              className="flex items-center gap-2 px-5 py-2 bg-white/5 border border-white/10 rounded-lg text-xs font-semibold hover:bg-white/10 hover:border-[#ffd6a3]/30 transition-all text-[#ffd6a3] cursor-pointer"
-              title="Networking CRM — recruiters, referrers, follow-up cadence"
-            >
-              <Users className="w-4 h-4" />
-              NETWORK
-            </button>
-            <button
-              onClick={openNotes}
-              className="flex items-center gap-2 px-5 py-2 bg-white/5 border border-white/10 rounded-lg text-xs font-semibold hover:bg-white/10 hover:border-[#c084fc]/30 transition-all text-[#c084fc] cursor-pointer"
-              title="Workspace notes & scratchpad"
-            >
-              <StickyNote className="w-4 h-4" />
-              NOTES
-            </button>
-            <button
               onClick={openAdd}
               className="flex items-center gap-2 px-5 py-2 bg-[#8aebff]/10 border border-[#8aebff]/30 rounded-lg text-xs font-semibold hover:bg-[#8aebff]/20 transition-all text-[#8aebff] cursor-pointer"
               title="Track a job you applied to elsewhere (LinkedIn, Naukri, careers page…)"
@@ -1164,21 +1147,64 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
               <Plus className="w-4 h-4" />
               ADD JOB
             </button>
-            <button
-              onClick={openResume}
-              className="flex items-center gap-2 px-5 py-2 bg-white/5 border border-white/10 rounded-lg text-xs font-semibold hover:bg-white/10 hover:border-[#8aebff]/30 transition-all text-[#8aebff] cursor-pointer"
-            >
-              <FileText className="w-4 h-4" />
-              RÉSUMÉ
-            </button>
-            <button
-              onClick={openAudit}
-              className="flex items-center gap-2 px-5 py-2 bg-[#a3e635]/10 border border-[#a3e635]/30 rounded-lg text-xs font-semibold hover:bg-[#a3e635]/20 transition-all text-[#a3e635] cursor-pointer"
-              title="General résumé health check — not tied to any job"
-            >
-              <ClipboardCheck className="w-4 h-4" />
-              RÉSUMÉ AUDIT
-            </button>
+
+            {/* Tools dropdown — collapses scan/follow-ups/interviews/standup/network/notes/résumé */}
+            <div className="relative">
+              <button
+                onClick={() => setToolsOpen((v) => !v)}
+                className={`relative flex items-center gap-2 px-5 py-2 border rounded-lg text-xs font-semibold transition-all cursor-pointer ${toolsOpen ? "bg-white/10 border-[#8aebff]/40 text-[#8aebff]" : "bg-white/5 border-white/10 text-[#bbc9cd] hover:bg-white/10"}`}
+                title="Tools — scan, follow-ups, interviews, standup, network, notes, résumé"
+              >
+                <Wrench className="w-4 h-4" />
+                TOOLS
+                <ChevronDown className={`w-3.5 h-3.5 transition-transform ${toolsOpen ? "rotate-180" : ""}`} />
+                {followCount > 0 && !toolsOpen && (
+                  <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-[#ffd6a3] text-[#0a0e1a] text-[9px] font-bold flex items-center justify-center">{followCount}</span>
+                )}
+              </button>
+              {toolsOpen && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setToolsOpen(false)} />
+                  <div className="absolute right-0 top-full mt-2 w-60 z-50 glass-panel rounded-xl border border-white/10 shadow-2xl p-1.5">
+                    {/* Ordered by the job-search lifecycle: Prepare → Track → Follow-up → Interview */}
+                    {([
+                      { label: "Prepare", items: [
+                        { fn: openResume, icon: FileText, label: "Résumé", tint: "#8aebff" },
+                        { fn: openAudit, icon: ClipboardCheck, label: "Résumé audit", tint: "#a3e635" },
+                      ] },
+                      { label: "Track", items: [
+                        { fn: scanNow, icon: Mail, label: scanning ? "Scanning…" : "Scan emails", tint: "#a3e635", spin: scanning },
+                      ] },
+                      { label: "Follow up", items: [
+                        { fn: openFollowups, icon: Clock, label: "Follow-ups", tint: "#ffd6a3", badge: followCount || undefined },
+                        { fn: openNetwork, icon: Users, label: "Network", tint: "#ffd6a3" },
+                      ] },
+                      { label: "Interview", items: [
+                        { fn: openPrep, icon: CalendarClock, label: "Interviews", tint: "#5eead4" },
+                      ] },
+                      { label: "Workspace", items: [
+                        { fn: openNotes, icon: StickyNote, label: "Notes", tint: "#c084fc" },
+                        { fn: openStandup, icon: Megaphone, label: "Standup", tint: "#8aebff" },
+                      ] },
+                    ] as { label: string; items: { fn: () => void; icon: React.ElementType; label: string; tint: string; spin?: boolean; badge?: number }[] }[]).map((group, gi) => (
+                      <div key={group.label}>
+                        {gi > 0 && <div className="my-1 border-t border-white/5" />}
+                        <div className="px-2 pt-1 pb-0.5 text-[9px] font-mono uppercase tracking-widest text-[#5c6a6d]">{group.label}</div>
+                        {group.items.map((it) => (
+                          <button key={it.label} onClick={() => { setToolsOpen(false); it.fn(); }}
+                            className="w-full flex items-center gap-2.5 px-2 py-2 rounded-lg text-xs font-semibold text-[#bbc9cd] hover:bg-white/5 transition-all cursor-pointer">
+                            <it.icon className={`w-4 h-4 shrink-0 ${it.spin ? "animate-pulse" : ""}`} style={{ color: it.tint }} />
+                            <span className="flex-1 text-left">{it.label}</span>
+                            {it.badge ? <span className="text-[10px] px-1.5 rounded-full bg-[#ffd6a3]/15 text-[#ffd6a3]">{it.badge}</span> : null}
+                          </button>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+
             <button
               onClick={loadApplications}
               aria-label="Refresh applications"
@@ -1341,7 +1367,7 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
                             {card.source ? ` • ${card.source}` : ""}
                           </p>
 
-                          {/* Status selector + tags */}
+                          {/* Status selector + tags + inline next-step cues */}
                           <div className="flex items-center flex-wrap gap-2 mb-4">
                             {isClosed && (
                               <span className="text-[10px] font-bold font-mono text-[#859397] uppercase tracking-wider">
@@ -1352,6 +1378,26 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
                               <span className="text-[10px] font-bold font-mono text-[#ffd6a3] px-2.5 py-0.5 bg-[#ffd6a3]/10 rounded border border-[#ffd6a3]/20 uppercase">
                                 Action Required
                               </span>
+                            )}
+                            {/* Guided cue: stale in "applied" → nudge a follow-up */}
+                            {card.status === "applied" && (daysSince(card.applied_at || card.updated_at) ?? 0) >= 7 && (
+                              <button
+                                onClick={openFollowups}
+                                title={`No reply in ${daysSince(card.applied_at || card.updated_at)} days — draft a follow-up`}
+                                className="text-[10px] font-bold font-mono text-[#ffd6a3] px-2.5 py-0.5 bg-[#ffd6a3]/10 rounded border border-[#ffd6a3]/30 hover:bg-[#ffd6a3]/20 transition-all cursor-pointer flex items-center gap-1"
+                              >
+                                <Clock className="w-3 h-3" /> Follow up →
+                              </button>
+                            )}
+                            {/* Guided cue: interviewing → jump to prep */}
+                            {card.status === "interviewing" && (
+                              <button
+                                onClick={openPrep}
+                                title="Build your interview prep brief"
+                                className="text-[10px] font-bold font-mono text-[#5eead4] px-2.5 py-0.5 bg-[#5eead4]/10 rounded border border-[#5eead4]/30 hover:bg-[#5eead4]/20 transition-all cursor-pointer flex items-center gap-1"
+                              >
+                                <CalendarClock className="w-3 h-3" /> Prep →
+                              </button>
                             )}
                           </div>
 

@@ -97,92 +97,29 @@ export default function Header({
               </span>
             </div>
           </div>
+          {/* Ordered by daily use: Home first, power tools last */}
           <nav className="hidden md:flex items-center gap-8">
-            <a
-              href="#"
-              onClick={(e) => {
-                e.preventDefault();
-                onNavigate(ScreenId.Core);
-              }}
-              className={`transition-colors duration-200 font-medium tracking-wide uppercase text-sm ${
-                activeScreen === ScreenId.Core
-                  ? "text-[#8aebff] font-bold border-b-2 border-[#8aebff] pb-1 nav-active-glow"
-                  : "text-[#bbc9cd] hover:text-[#8aebff]"
-              }`}
-            >
-              CORE
-            </a>
-            <a
-              href="#"
-              onClick={(e) => {
-                e.preventDefault();
-                onNavigate(ScreenId.Assistant);
-              }}
-              className={`transition-colors duration-200 font-medium tracking-wide uppercase text-sm ${
-                activeScreen === ScreenId.Assistant
-                  ? "text-[#8aebff] font-bold border-b-2 border-[#8aebff] pb-1 nav-active-glow"
-                  : "text-[#bbc9cd] hover:text-[#8aebff]"
-              }`}
-            >
-              JARVIS
-            </a>
-
-            <a
-              href="#"
-              onClick={(e) => {
-                e.preventDefault();
-                onNavigate(ScreenId.Terminal);
-              }}
-              className={`transition-colors duration-200 font-medium tracking-wide uppercase text-sm ${
-                activeScreen === ScreenId.Terminal
-                  ? "text-[#8aebff] font-bold border-b-2 border-[#8aebff] pb-1 nav-active-glow"
-                  : "text-[#bbc9cd] hover:text-[#8aebff]"
-              }`}
-            >
-              TERMINAL
-            </a>
-            <a
-              href="#"
-              onClick={(e) => {
-                e.preventDefault();
-                onNavigate(ScreenId.Jobs);
-              }}
-              className={`transition-colors duration-200 font-medium tracking-wide uppercase text-sm ${
-                activeScreen === ScreenId.Jobs || activeScreen === ScreenId.AtsAnalysis
-                  ? "text-[#8aebff] font-bold border-b-2 border-[#8aebff] pb-1 nav-active-glow"
-                  : "text-[#bbc9cd] hover:text-[#8aebff]"
-              }`}
-            >
-              JOBS
-            </a>
-            <a
-              href="#"
-              onClick={(e) => {
-                e.preventDefault();
-                onNavigate(ScreenId.Insights);
-              }}
-              className={`transition-colors duration-200 font-medium tracking-wide uppercase text-sm ${
-                activeScreen === ScreenId.Insights
-                  ? "text-[#8aebff] font-bold border-b-2 border-[#8aebff] pb-1 nav-active-glow"
-                  : "text-[#bbc9cd] hover:text-[#8aebff]"
-              }`}
-            >
-              INSIGHTS
-            </a>
-            <a
-              href="#"
-              onClick={(e) => {
-                e.preventDefault();
-                onNavigate(ScreenId.Bills);
-              }}
-              className={`transition-colors duration-200 font-medium tracking-wide uppercase text-sm ${
-                activeScreen === ScreenId.Bills
-                  ? "text-[#8aebff] font-bold border-b-2 border-[#8aebff] pb-1 nav-active-glow"
-                  : "text-[#bbc9cd] hover:text-[#8aebff]"
-              }`}
-            >
-              BILLS
-            </a>
+            {[
+              { screen: ScreenId.Core, label: "HOME", active: activeScreen === ScreenId.Core },
+              { screen: ScreenId.Jobs, label: "JOBS", active: activeScreen === ScreenId.Jobs || activeScreen === ScreenId.AtsAnalysis },
+              { screen: ScreenId.Insights, label: "INSIGHTS", active: activeScreen === ScreenId.Insights },
+              { screen: ScreenId.Bills, label: "BILLS", active: activeScreen === ScreenId.Bills },
+              { screen: ScreenId.Assistant, label: "JARVIS", active: activeScreen === ScreenId.Assistant },
+              { screen: ScreenId.Terminal, label: "TERMINAL", active: activeScreen === ScreenId.Terminal },
+            ].map((item) => (
+              <a
+                key={item.label}
+                href="#"
+                onClick={(e) => { e.preventDefault(); onNavigate(item.screen); }}
+                className={`transition-colors duration-200 font-medium tracking-wide uppercase text-sm ${
+                  item.active
+                    ? "text-[#8aebff] font-bold border-b-2 border-[#8aebff] pb-1 nav-active-glow"
+                    : "text-[#bbc9cd] hover:text-[#8aebff]"
+                }`}
+              >
+                {item.label}
+              </a>
+            ))}
           </nav>
         </div>
 

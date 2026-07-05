@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { ScreenId } from "./types";
 import Header from "./components/Header";
 import Footer from "./components/Footer";
-import CoreInterface from "./components/CoreInterface";
+import HomeCockpit from "./components/HomeCockpit";
 import SecureChat from "./components/SecureChat";
 import JobsBoard from "./components/JobsBoard";
 import Insights from "./components/Insights";
@@ -19,6 +19,9 @@ import { LayoutGrid, Bot, Lock, Terminal as TerminalIcon, Briefcase, BarChart3, 
 export default function App() {
   const [activeScreen, setActiveScreen] = useState<ScreenId>(ScreenId.Core);
   const [prevScreen, setPrevScreen] = useState<ScreenId>(ScreenId.Core);
+  // Navigation intent: lets one screen (e.g. Home cockpit) deep-link into a specific tool/modal
+  // on another (e.g. open the Jobs review modal). Consumed + cleared by the target screen.
+  const [navIntent, setNavIntent] = useState<string | null>(null);
 
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -44,9 +47,10 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  const handleNavigate = (targetScreen: ScreenId) => {
+  const handleNavigate = (targetScreen: ScreenId, intent?: string) => {
     setPrevScreen(activeScreen);
     setActiveScreen(targetScreen);
+    setNavIntent(intent ?? null);
   };
 
   // Automated direction solver to adhere perfectly to spec's push/push_back/slide_up directives
@@ -58,8 +62,8 @@ export default function App() {
       return "backward"; // push_back
     }
 
-    // Nav order index to determine forward vs backward push
-    const screenOrder = [ScreenId.Core, ScreenId.Assistant, ScreenId.Terminal, ScreenId.Jobs, ScreenId.Insights, ScreenId.Bills];
+    // Nav order index to determine forward vs backward push (matches the header order)
+    const screenOrder = [ScreenId.Core, ScreenId.Jobs, ScreenId.Insights, ScreenId.Bills, ScreenId.Assistant, ScreenId.Terminal];
     const fromIndex = screenOrder.indexOf(from);
     const toIndex = screenOrder.indexOf(to);
 
@@ -124,13 +128,13 @@ export default function App() {
             className="w-full flex-1 flex flex-col justify-start"
           >
             {activeScreen === ScreenId.Core && (
-              <CoreInterface onNavigate={handleNavigate} onOpenNotifications={() => setIsNotificationsOpen(true)} />
+              <HomeCockpit onNavigate={handleNavigate} />
             )}
             {activeScreen === ScreenId.Assistant && (
               <SecureChat />
             )}
             {(activeScreen === ScreenId.Jobs || activeScreen === ScreenId.AtsAnalysis) && (
-              <JobsBoard activeScreen={activeScreen} onNavigate={handleNavigate} />
+              <JobsBoard activeScreen={activeScreen} onNavigate={handleNavigate} intent={navIntent} onIntentHandled={() => setNavIntent(null)} />
             )}
             {activeScreen === ScreenId.Terminal && (
               <SystemTerminal />
@@ -145,63 +149,25 @@ export default function App() {
         </AnimatePresence>
       </main>
 
-      {/* Mobile Bottom Navigation Bar */}
+      {/* Mobile Bottom Navigation Bar — same order as the header */}
       <nav className="fixed bottom-0 left-0 w-full md:hidden bg-[#0f131f]/90 backdrop-blur-md border-t border-white/10 z-40 flex justify-around items-center h-16 pb-safe">
-        <button
-          onClick={() => handleNavigate(ScreenId.Core)}
-          className={`flex flex-col items-center justify-center flex-1 h-full cursor-pointer transition-colors ${
-            activeScreen === ScreenId.Core ? "text-[#8aebff] nav-active-glow" : "text-[#bbc9cd]"
-          }`}
-        >
-          <LayoutGrid className="w-5.5 h-5.5" />
-          <span className="text-[10px] font-mono mt-1 font-bold">CORE</span>
-        </button>
-        <button
-          onClick={() => handleNavigate(ScreenId.Assistant)}
-          className={`flex flex-col items-center justify-center flex-1 h-full cursor-pointer transition-colors ${
-            activeScreen === ScreenId.Assistant ? "text-[#8aebff] nav-active-glow" : "text-[#bbc9cd]"
-          }`}
-        >
-          <Bot className="w-5.5 h-5.5" />
-          <span className="text-[10px] font-mono mt-1 font-bold">JARVIS</span>
-        </button>
-
-        <button
-          onClick={() => handleNavigate(ScreenId.Terminal)}
-          className={`flex flex-col items-center justify-center flex-1 h-full cursor-pointer transition-colors ${
-            activeScreen === ScreenId.Terminal ? "text-[#8aebff] nav-active-glow" : "text-[#bbc9cd]"
-          }`}
-        >
-          <TerminalIcon className="w-5.5 h-5.5" />
-          <span className="text-[10px] font-mono mt-1 font-bold">TERM</span>
-        </button>
-        <button
-          onClick={() => handleNavigate(ScreenId.Jobs)}
-          className={`flex flex-col items-center justify-center flex-1 h-full cursor-pointer transition-colors ${
-            activeScreen === ScreenId.Jobs || activeScreen === ScreenId.AtsAnalysis ? "text-[#8aebff] nav-active-glow" : "text-[#bbc9cd]"
-          }`}
-        >
-          <Briefcase className="w-5.5 h-5.5" />
-          <span className="text-[10px] font-mono mt-1 font-bold">JOBS</span>
-        </button>
-        <button
-          onClick={() => handleNavigate(ScreenId.Insights)}
-          className={`flex flex-col items-center justify-center flex-1 h-full cursor-pointer transition-colors ${
-            activeScreen === ScreenId.Insights ? "text-[#8aebff] nav-active-glow" : "text-[#bbc9cd]"
-          }`}
-        >
-          <BarChart3 className="w-5.5 h-5.5" />
-          <span className="text-[10px] font-mono mt-1 font-bold">STATS</span>
-        </button>
-        <button
-          onClick={() => handleNavigate(ScreenId.Bills)}
-          className={`flex flex-col items-center justify-center flex-1 h-full cursor-pointer transition-colors ${
-            activeScreen === ScreenId.Bills ? "text-[#8aebff] nav-active-glow" : "text-[#bbc9cd]"
-          }`}
-        >
-          <Wallet className="w-5.5 h-5.5" />
-          <span className="text-[10px] font-mono mt-1 font-bold">BILLS</span>
-        </button>
+        {[
+          { screen: ScreenId.Core, label: "HOME", Icon: LayoutGrid, active: activeScreen === ScreenId.Core },
+          { screen: ScreenId.Jobs, label: "JOBS", Icon: Briefcase, active: activeScreen === ScreenId.Jobs || activeScreen === ScreenId.AtsAnalysis },
+          { screen: ScreenId.Insights, label: "STATS", Icon: BarChart3, active: activeScreen === ScreenId.Insights },
+          { screen: ScreenId.Bills, label: "BILLS", Icon: Wallet, active: activeScreen === ScreenId.Bills },
+          { screen: ScreenId.Assistant, label: "JARVIS", Icon: Bot, active: activeScreen === ScreenId.Assistant },
+          { screen: ScreenId.Terminal, label: "TERM", Icon: TerminalIcon, active: activeScreen === ScreenId.Terminal },
+        ].map(({ screen, label, Icon, active }) => (
+          <button
+            key={label}
+            onClick={() => handleNavigate(screen)}
+            className={`flex flex-col items-center justify-center flex-1 h-full cursor-pointer transition-colors ${active ? "text-[#8aebff] nav-active-glow" : "text-[#bbc9cd]"}`}
+          >
+            <Icon className="w-5.5 h-5.5" />
+            <span className="text-[10px] font-mono mt-1 font-bold">{label}</span>
+          </button>
+        ))}
       </nav>
 
       {/* Unified Footer details */}

@@ -161,7 +161,7 @@ from profile_freshness import (
     delete_asset as delete_profile_asset,
 )
 from calendar_shield import analyze as calendar_shield_analyze
-from daily_standup import standup_briefing
+from daily_standup import standup_briefing, cockpit as cockpit_brief
 from gemini_tts import (
     synthesize as gemini_synthesize,
     tts_available as gemini_tts_available,
@@ -5745,6 +5745,12 @@ async def api_profile_freshness_delete(asset_id: int):
 @app.get("/api/calendar-shield")
 async def api_calendar_shield():
     return JSONResponse(await calendar_shield_analyze())
+
+
+# ── Home cockpit — greeting + prioritized next-steps + pipeline pulse (no LLM) ──
+@app.get("/api/cockpit")
+async def api_cockpit():
+    return JSONResponse(await cockpit_brief())
 
 
 # ── Voice Daily Standup ──
