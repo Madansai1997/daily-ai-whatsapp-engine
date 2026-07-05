@@ -143,6 +143,31 @@ from interview_prep import (
     list_interview_events,
     prep_brief,
 )
+from networking_crm import (
+    init_networking_crm_tables,
+    list_contacts,
+    add_contact,
+    update_contact,
+    mark_contacted,
+    delete_contact,
+    RELATIONSHIPS as CONTACT_RELATIONSHIPS,
+)
+from profile_freshness import (
+    init_profile_freshness_tables,
+    list_assets as list_profile_assets,
+    mark_updated as mark_asset_updated,
+    update_asset as update_profile_asset,
+    add_asset as add_profile_asset,
+    delete_asset as delete_profile_asset,
+)
+from calendar_shield import analyze as calendar_shield_analyze
+from daily_standup import standup_briefing
+from gemini_tts import (
+    synthesize as gemini_synthesize,
+    tts_available as gemini_tts_available,
+    VOICES as GEMINI_VOICES,
+    GEMINI_TTS_VOICE as GEMINI_DEFAULT_VOICE,
+)
 from application_email_tracker import (
     init_application_email_tracker_tables,
     scan_and_sync as scan_application_emails,
@@ -716,6 +741,8 @@ init_application_email_tracker_tables()
 init_bill_watcher_tables()
 init_resume_ats_tables()
 init_workspace_notes_tables()
+init_networking_crm_tables()
+init_profile_freshness_tables()
 
 
 # ==========================================
@@ -5651,6 +5678,104 @@ async def api_notes_update(note_id: int, request: Request):
 async def api_notes_delete(note_id: int):
     await delete_note(note_id)
     return JSONResponse({"ok": True})
+
+
+# ── Networking CRM (contacts + follow-up cadence) ──
+@app.get("/api/contacts")
+async def api_contacts_list():
+    return JSONResponse({"contacts": await list_contacts(), "relationships": CONTACT_RELATIONSHIPS})
+
+
+@app.post("/api/contacts")
+async def api_contacts_add(request: Request):
+    return JSONResponse({"ok": True, "contact": await add_contact(await request.json())})
+
+
+@app.post("/api/contacts/{cid}")
+async def api_contacts_update(cid: int, request: Request):
+    return JSONResponse({"ok": True, "contact": await update_contact(cid, await request.json())})
+
+
+@app.post("/api/contacts/{cid}/contacted")
+async def api_contacts_contacted(cid: int):
+    return JSONResponse({"ok": True, "contact": await mark_contacted(cid)})
+
+
+@app.post("/api/contacts/{cid}/delete")
+async def api_contacts_delete(cid: int):
+    await delete_contact(cid)
+    return JSONResponse({"ok": True})
+
+
+# ── Profile-Freshness ──
+@app.get("/api/profile-freshness")
+async def api_profile_freshness():
+    return JSONResponse({"assets": await list_profile_assets()})
+
+
+@app.post("/api/profile-freshness")
+async def api_profile_freshness_add(request: Request):
+    body = await request.json()
+    await add_profile_asset(body.get("name", ""), body.get("url", ""),
+                            body.get("interval_days", 30))
+    return JSONResponse({"ok": True, "assets": await list_profile_assets()})
+
+
+@app.post("/api/profile-freshness/{asset_id}/updated")
+async def api_profile_freshness_mark(asset_id: int):
+    await mark_asset_updated(asset_id)
+    return JSONResponse({"ok": True, "assets": await list_profile_assets()})
+
+
+@app.post("/api/profile-freshness/{asset_id}")
+async def api_profile_freshness_update(asset_id: int, request: Request):
+    body = await request.json()
+    await update_profile_asset(asset_id, url=body.get("url"),
+                               interval_days=body.get("interval_days"))
+    return JSONResponse({"ok": True, "assets": await list_profile_assets()})
+
+
+@app.post("/api/profile-freshness/{asset_id}/delete")
+async def api_profile_freshness_delete(asset_id: int):
+    await delete_profile_asset(asset_id)
+    return JSONResponse({"ok": True, "assets": await list_profile_assets()})
+
+
+# ── Calendar Shield ──
+@app.get("/api/calendar-shield")
+async def api_calendar_shield():
+    return JSONResponse(await calendar_shield_analyze())
+
+
+# ── Voice Daily Standup ──
+@app.get("/api/standup")
+async def api_standup():
+    return JSONResponse(await standup_briefing(call_llm))
+
+
+@app.get("/api/tts/available")
+async def api_tts_available():
+    """Tells the console whether the natural (Gemini) voice can be offered, plus the voice list."""
+    return JSONResponse({
+        "available": gemini_tts_available(),
+        "default": GEMINI_DEFAULT_VOICE,
+        "voices": [{"name": n, "style": s} for n, s in GEMINI_VOICES],
+    })
+
+
+@app.post("/api/tts")
+async def api_tts(request: Request):
+    """Synthesize text to a natural voice via Gemini TTS. Opt-in only (the console calls this
+    when the user enables the natural voice). Returns WAV audio, or 204 so the console falls
+    back to the free browser voice on any failure/quota — never an error the user sees."""
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        return Response(status_code=204)
+    audio = await gemini_synthesize(text, voice=body.get("voice"))
+    if not audio:
+        return Response(status_code=204)  # signal: fall back to browser TTS
+    return Response(content=audio, media_type="audio/wav")
 
 
 @app.post("/api/job-scout/review/{app_id}/decide")

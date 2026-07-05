@@ -23,6 +23,10 @@ import {
   CalendarClock,
   StickyNote,
   Pin,
+  Users,
+  Megaphone,
+  Volume2,
+  Square,
 } from "lucide-react";
 
 interface JobsBoardProps {
@@ -245,6 +249,32 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
   const [activeNote, setActiveNote] = useState<any | null>(null);
   const [noteDraft, setNoteDraft] = useState({ title: "", body: "" });
   const [notesSaving, setNotesSaving] = useState(false);
+
+  // Networking CRM (contacts + follow-up cadence)
+  const emptyContact = { name: "", role: "", company: "", email: "", linkedin: "", relationship: "recruiter", follow_up_days: 14, notes: "" };
+  const [networkOpen, setNetworkOpen] = useState(false);
+  const [contacts, setContacts] = useState<any[]>([]);
+  const [contactRels, setContactRels] = useState<string[]>(["recruiter", "referrer", "hiring_manager", "peer", "mentor", "other"]);
+  const [contactsLoading, setContactsLoading] = useState(false);
+  const [activeContact, setActiveContact] = useState<any | null>(null); // null=list, {id:null}=new, obj=edit
+  const [contactDraft, setContactDraft] = useState({ ...emptyContact });
+  const [contactSaving, setContactSaving] = useState(false);
+
+  // Voice daily standup (LLM briefing + browser TTS, optional Gemini natural voice)
+  const [standupOpen, setStandupOpen] = useState(false);
+  const [standupLoading, setStandupLoading] = useState(false);
+  const [standupText, setStandupText] = useState("");
+  const [speaking, setSpeaking] = useState(false);
+  const [ttsAvailable, setTtsAvailable] = useState(false);
+  const [naturalVoice, setNaturalVoice] = useState<boolean>(() => {
+    try { return localStorage.getItem("jarvis_natural_voice") === "1"; } catch { return false; }
+  });
+  const [voices, setVoices] = useState<{ name: string; style: string }[]>([]);
+  const [voice, setVoice] = useState<string>(() => {
+    try { return localStorage.getItem("jarvis_tts_voice") || ""; } catch { return ""; }
+  });
+  const [previewing, setPreviewing] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   /* ---- Data loading ---- */
 
@@ -481,6 +511,144 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
       setNotes(Array.isArray(list?.notes) ? list.notes : []);
     } catch { /* ignore */ }
   };
+
+  /* ---- Networking CRM ---- */
+
+  const loadContacts = async () => {
+    const data = await fetch("/api/contacts").then((r) => r.json());
+    setContacts(Array.isArray(data?.contacts) ? data.contacts : []);
+    if (Array.isArray(data?.relationships)) setContactRels(data.relationships);
+  };
+
+  const openNetwork = async () => {
+    setNetworkOpen(true);
+    setActiveContact(null);
+    setContactsLoading(true);
+    try { await loadContacts(); } catch { setContacts([]); } finally { setContactsLoading(false); }
+  };
+
+  const editContact = (c: any) => {
+    setActiveContact(c);
+    setContactDraft({ name: c.name || "", role: c.role || "", company: c.company || "", email: c.email || "", linkedin: c.linkedin || "", relationship: c.relationship || "recruiter", follow_up_days: c.follow_up_days || 14, notes: c.notes || "" });
+  };
+  const newContact = () => { setActiveContact({ id: null }); setContactDraft({ ...emptyContact }); };
+
+  const saveContact = async () => {
+    setContactSaving(true);
+    try {
+      const isNew = !activeContact?.id;
+      const url = isNew ? "/api/contacts" : `/api/contacts/${activeContact.id}`;
+      await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(contactDraft) });
+      await loadContacts();
+      setActiveContact(null);
+    } catch { /* ignore */ } finally { setContactSaving(false); }
+  };
+
+  const markContacted = async (c: any) => {
+    try { await fetch(`/api/contacts/${c.id}/contacted`, { method: "POST" }); await loadContacts(); } catch { /* ignore */ }
+  };
+  const deleteContact = async (c: any) => {
+    if (!confirm(`Delete ${c.name}?`)) return;
+    try { await fetch(`/api/contacts/${c.id}/delete`, { method: "POST" }); if (activeContact?.id === c.id) setActiveContact(null); await loadContacts(); } catch { /* ignore */ }
+  };
+
+  /* ---- Voice daily standup ---- */
+
+  const browserSpeak = (text: string) => {
+    try {
+      const synth = window.speechSynthesis;
+      if (!synth) return;
+      synth.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.02; u.pitch = 1.0;
+      u.onend = () => setSpeaking(false);
+      u.onerror = () => setSpeaking(false);
+      setSpeaking(true);
+      synth.speak(u);
+    } catch { setSpeaking(false); }
+  };
+
+  const stopPlayback = () => {
+    try { window.speechSynthesis?.cancel(); } catch { /* */ }
+    if (audioRef.current) { try { audioRef.current.pause(); } catch { /* */ } audioRef.current = null; }
+    setSpeaking(false);
+  };
+
+  // Play WAV bytes from /api/tts; returns true if it played, false to fall back.
+  const playGeminiAudio = async (text: string, v: string, onEnd?: () => void): Promise<boolean> => {
+    try {
+      const res = await fetch("/api/tts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, voice: v || undefined }) });
+      if (res.status !== 200) return false;
+      const url = URL.createObjectURL(await res.blob());
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audio.onended = () => { URL.revokeObjectURL(url); audioRef.current = null; onEnd?.(); };
+      audio.onerror = () => { URL.revokeObjectURL(url); onEnd?.(); };
+      await audio.play();
+      return true;
+    } catch { return false; }
+  };
+
+  // Natural (Gemini) voice when enabled+available; browser voice otherwise or on any failure.
+  const playStandup = async (text: string) => {
+    if (!text) return;
+    stopPlayback();
+    if (naturalVoice && ttsAvailable) {
+      setSpeaking(true);
+      const ok = await playGeminiAudio(text, voice, () => setSpeaking(false));
+      if (ok) return;
+      // fell through → browser voice
+    }
+    browserSpeak(text);
+  };
+
+  const previewVoice = async (v: string) => {
+    stopPlayback();
+    setPreviewing(true);
+    const line = "Good morning, Madan. This is how I'll sound reading your standup.";
+    const ok = await playGeminiAudio(line, v, () => setPreviewing(false));
+    if (!ok) { setPreviewing(false); browserSpeak(line); }
+  };
+
+  const chooseVoice = (v: string) => {
+    setVoice(v);
+    try { localStorage.setItem("jarvis_tts_voice", v); } catch { /* */ }
+  };
+
+  const toggleNaturalVoice = () => {
+    const next = !naturalVoice;
+    setNaturalVoice(next);
+    try { localStorage.setItem("jarvis_natural_voice", next ? "1" : "0"); } catch { /* */ }
+  };
+
+  const loadTtsMeta = async () => {
+    try {
+      const d = await fetch("/api/tts/available").then((r) => r.json());
+      setTtsAvailable(!!d?.available);
+      if (Array.isArray(d?.voices)) setVoices(d.voices);
+      if (!voice && d?.default) chooseVoice(d.default);
+    } catch { /* ignore */ }
+  };
+
+  const openStandup = async () => {
+    setStandupOpen(true);
+    setStandupText("");
+    setStandupLoading(true);
+    try {
+      const [data] = await Promise.all([
+        fetch("/api/standup").then((r) => r.json()),
+        voices.length ? Promise.resolve(null) : loadTtsMeta(),
+      ]);
+      const text = data?.ok ? data.text : (data?.error || "Couldn't assemble the standup.");
+      setStandupText(text);
+      if (data?.ok && text) playStandup(text);
+    } catch (e) {
+      setStandupText(`Standup failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setStandupLoading(false);
+    }
+  };
+  const closeStandup = () => { stopPlayback(); setStandupOpen(false); };
 
   /* ---- Job Scout review queue ---- */
 
@@ -963,6 +1131,22 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
             >
               <CalendarClock className="w-4 h-4" />
               INTERVIEWS
+            </button>
+            <button
+              onClick={openStandup}
+              className="flex items-center gap-2 px-5 py-2 bg-[#8aebff]/10 border border-[#8aebff]/30 rounded-lg text-xs font-semibold hover:bg-[#8aebff]/20 transition-all text-[#8aebff] cursor-pointer"
+              title="Voice daily standup — JARVIS reads your day's job-search briefing aloud"
+            >
+              <Megaphone className="w-4 h-4" />
+              STANDUP
+            </button>
+            <button
+              onClick={openNetwork}
+              className="flex items-center gap-2 px-5 py-2 bg-white/5 border border-white/10 rounded-lg text-xs font-semibold hover:bg-white/10 hover:border-[#ffd6a3]/30 transition-all text-[#ffd6a3] cursor-pointer"
+              title="Networking CRM — recruiters, referrers, follow-up cadence"
+            >
+              <Users className="w-4 h-4" />
+              NETWORK
             </button>
             <button
               onClick={openNotes}
@@ -2549,6 +2733,155 @@ export default function JobsBoard({ activeScreen, onNavigate }: JobsBoardProps) 
                     </>
                   )}
                 </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Networking CRM modal ── */}
+      <AnimatePresence>
+        {networkOpen && (
+          <div className="fixed inset-0 bg-[#0a0e1a]/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+            <motion.div initial={{ y: 30, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 30, opacity: 0 }}
+              className="w-full max-w-4xl glass-panel rounded-2xl overflow-hidden shadow-2xl border border-[#ffd6a3]/25 h-[82vh] flex flex-col">
+              <div className="p-5 border-b border-[#3c494c]/50 bg-[#161e2e]/80 flex justify-between items-center">
+                <div>
+                  <h2 className="text-lg font-extrabold text-[#dfe2f3] tracking-wide uppercase font-mono flex items-center gap-2">
+                    <Users className="w-5 h-5 text-[#ffd6a3]" /> Networking
+                  </h2>
+                  <p className="text-xs font-mono text-[#859397] mt-1">Recruiters, referrers & contacts · follow-up cadence</p>
+                </div>
+                <button onClick={() => setNetworkOpen(false)} aria-label="Close" className="p-2 hover:bg-white/5 text-[#bbc9cd] hover:text-[#ffd6a3] rounded-full border border-white/5 cursor-pointer"><X className="w-5 h-5" /></button>
+              </div>
+              <div className="flex-1 flex min-h-0">
+                {/* list */}
+                <div className="w-72 shrink-0 border-r border-white/5 flex flex-col">
+                  <button onClick={newContact} className="m-3 px-3 py-2 rounded-lg text-[11px] font-bold font-mono bg-[#ffd6a3]/10 border border-[#ffd6a3]/30 text-[#ffd6a3] hover:bg-[#ffd6a3]/20 cursor-pointer flex items-center justify-center gap-1"><Plus className="w-3.5 h-3.5" /> ADD CONTACT</button>
+                  <div className="overflow-y-auto px-3 pb-3 space-y-1">
+                    {contactsLoading ? <div className="text-center text-[#859397] font-mono text-xs py-6">Loading…</div> :
+                      contacts.length === 0 ? <div className="text-center text-[#859397] font-mono text-xs py-6">No contacts yet.</div> :
+                        contacts.map((c) => (
+                          <div key={c.id} onClick={() => editContact(c)}
+                            className={`group rounded-lg px-3 py-2 cursor-pointer border ${activeContact?.id === c.id ? "bg-[#ffd6a3]/10 border-[#ffd6a3]/30" : "border-transparent hover:bg-white/5"}`}>
+                            <div className="flex items-center gap-1.5">
+                              {c.due && <span className="w-2 h-2 rounded-full bg-[#ffd6a3] shrink-0" title="Follow-up due" />}
+                              <span className="text-sm text-[#dfe2f3] truncate flex-1">{c.name}</span>
+                            </div>
+                            <div className="text-[10px] font-mono text-[#859397] truncate">{c.role}{c.company ? ` · ${c.company}` : ""}</div>
+                            <div className="text-[9px] font-mono mt-0.5 flex items-center gap-2">
+                              <span className="text-[#ffd6a3]/80 uppercase">{(c.relationship || "").replace("_", " ")}</span>
+                              <span className={c.due ? "text-[#ffd6a3]" : "text-[#859397]"}>{c.days_since_contact === null ? "never contacted" : `${c.days_since_contact}d ago`}</span>
+                            </div>
+                          </div>
+                        ))}
+                  </div>
+                </div>
+                {/* editor */}
+                <div className="flex-1 flex flex-col min-w-0 p-4 overflow-y-auto">
+                  {!activeContact ? (
+                    <div className="flex-1 flex items-center justify-center text-[#859397] font-mono text-sm">Select a contact or add one.</div>
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-3">
+                        {[["name", "Name"], ["role", "Role"], ["company", "Company"], ["email", "Email"]].map(([k, label]) => (
+                          <div key={k}>
+                            <label className="text-[10px] font-mono uppercase tracking-widest text-[#859397]">{label}</label>
+                            <input value={(contactDraft as any)[k]} onChange={(e) => setContactDraft({ ...contactDraft, [k]: e.target.value })}
+                              className="w-full mt-1 bg-white/5 border border-white/10 rounded px-3 py-2 text-sm text-[#dfe2f3] focus:outline-none focus:border-[#ffd6a3]/40" />
+                          </div>
+                        ))}
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-mono uppercase tracking-widest text-[#859397]">LinkedIn / URL</label>
+                        <input value={contactDraft.linkedin} onChange={(e) => setContactDraft({ ...contactDraft, linkedin: e.target.value })}
+                          className="w-full mt-1 bg-white/5 border border-white/10 rounded px-3 py-2 text-sm text-[#dfe2f3] focus:outline-none focus:border-[#ffd6a3]/40" />
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-[10px] font-mono uppercase tracking-widest text-[#859397]">Relationship</label>
+                          <select value={contactDraft.relationship} onChange={(e) => setContactDraft({ ...contactDraft, relationship: e.target.value })}
+                            className="w-full mt-1 bg-white/5 border border-white/10 rounded px-3 py-2 text-sm text-[#bbc9cd] focus:outline-none focus:border-[#ffd6a3]/40">
+                            {contactRels.map((r) => <option key={r} value={r} className="bg-[#0a0e1a]">{r.replace("_", " ")}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="text-[10px] font-mono uppercase tracking-widest text-[#859397]">Follow-up every (days)</label>
+                          <input type="number" value={contactDraft.follow_up_days} onChange={(e) => setContactDraft({ ...contactDraft, follow_up_days: Number(e.target.value) })}
+                            className="w-full mt-1 bg-white/5 border border-white/10 rounded px-3 py-2 text-sm text-[#dfe2f3] focus:outline-none focus:border-[#ffd6a3]/40" />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-[10px] font-mono uppercase tracking-widest text-[#859397]">Notes</label>
+                        <textarea value={contactDraft.notes} onChange={(e) => setContactDraft({ ...contactDraft, notes: e.target.value })} rows={4}
+                          className="w-full mt-1 bg-white/5 border border-white/10 rounded px-3 py-2 text-sm text-[#dfe2f3] resize-none focus:outline-none focus:border-[#ffd6a3]/40" />
+                      </div>
+                      <div className="flex items-center gap-2 pt-1">
+                        <button onClick={saveContact} disabled={contactSaving} className="px-4 py-2 rounded-lg text-sm font-bold bg-[#ffd6a3] hover:bg-[#ffe0b8] text-[#0a0e1a] cursor-pointer disabled:opacity-50">{contactSaving ? "SAVING…" : "SAVE"}</button>
+                        {activeContact?.id && <button onClick={() => markContacted(activeContact)} className="px-4 py-2 rounded-lg text-sm font-bold bg-[#5eead4]/10 border border-[#5eead4]/30 text-[#5eead4] hover:bg-[#5eead4]/20 cursor-pointer">Mark contacted today</button>}
+                        {activeContact?.id && <button onClick={() => deleteContact(activeContact)} className="ml-auto px-3 py-2 rounded-lg text-sm text-[#859397] hover:text-[#ffb4ab] cursor-pointer">Delete</button>}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Voice daily standup modal ── */}
+      <AnimatePresence>
+        {standupOpen && (
+          <div className="fixed inset-0 bg-[#0a0e1a]/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+            <motion.div initial={{ y: 30, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 30, opacity: 0 }}
+              className="w-full max-w-lg glass-panel rounded-2xl overflow-hidden shadow-2xl border border-[#8aebff]/25 flex flex-col">
+              <div className="p-5 border-b border-[#3c494c]/50 bg-[#161e2e]/80 flex justify-between items-center">
+                <h2 className="text-lg font-extrabold text-[#dfe2f3] tracking-wide uppercase font-mono flex items-center gap-2">
+                  <Megaphone className="w-5 h-5 text-[#8aebff]" /> Daily Standup
+                </h2>
+                <button onClick={closeStandup} aria-label="Close" className="p-2 hover:bg-white/5 text-[#bbc9cd] hover:text-[#8aebff] rounded-full border border-white/5 cursor-pointer"><X className="w-5 h-5" /></button>
+              </div>
+              <div className="p-6">
+                {standupLoading ? (
+                  <div className="text-center text-[#859397] font-mono text-sm py-8 flex items-center justify-center gap-2"><RefreshCw className="w-4 h-4 animate-spin" /> Assembling your briefing…</div>
+                ) : (
+                  <>
+                    <p className="text-[15px] text-[#dfe2f3] leading-relaxed whitespace-pre-wrap">{standupText}</p>
+                    <div className="flex items-center gap-2 mt-5 flex-wrap">
+                      {speaking ? (
+                        <button onClick={stopPlayback} className="px-4 py-2 rounded-lg text-sm font-bold bg-[#ffb4ab]/10 border border-[#ffb4ab]/30 text-[#ffb4ab] hover:bg-[#ffb4ab]/20 cursor-pointer flex items-center gap-2"><Square className="w-4 h-4" /> Stop</button>
+                      ) : (
+                        <button onClick={() => playStandup(standupText)} disabled={!standupText} className="px-4 py-2 rounded-lg text-sm font-bold bg-[#8aebff]/10 border border-[#8aebff]/30 text-[#8aebff] hover:bg-[#8aebff]/20 cursor-pointer disabled:opacity-40 flex items-center gap-2"><Volume2 className="w-4 h-4" /> Play again</button>
+                      )}
+                      <button onClick={openStandup} className="px-4 py-2 rounded-lg text-sm font-bold bg-white/5 border border-white/10 text-[#bbc9cd] hover:bg-white/10 cursor-pointer flex items-center gap-2"><RefreshCw className="w-4 h-4" /> Refresh</button>
+                      {ttsAvailable && (
+                        <button onClick={toggleNaturalVoice} title="Use Gemini's natural voice (free tier) instead of the browser voice"
+                          className={`ml-auto px-3 py-2 rounded-lg text-[11px] font-mono border cursor-pointer transition-all ${naturalVoice ? "bg-[#c084fc]/15 border-[#c084fc]/40 text-[#c084fc]" : "bg-white/5 border-white/10 text-[#859397] hover:text-[#c084fc]"}`}>
+                          {naturalVoice ? "✓ Natural voice" : "Natural voice"}
+                        </button>
+                      )}
+                    </div>
+                    {naturalVoice && ttsAvailable && (
+                      <div className="mt-3 rounded-lg border border-[#c084fc]/20 bg-[#c084fc]/[0.04] p-3">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-mono uppercase tracking-widest text-[#859397] shrink-0">Voice</span>
+                          <select value={voice} onChange={(e) => chooseVoice(e.target.value)}
+                            className="flex-1 min-w-0 bg-white/5 border border-white/10 rounded px-2 py-1.5 text-xs text-[#dfe2f3] font-mono cursor-pointer focus:outline-none focus:border-[#c084fc]/40">
+                            {voices.map((v) => (
+                              <option key={v.name} value={v.name} className="bg-[#0a0e1a]">{v.name} — {v.style}</option>
+                            ))}
+                          </select>
+                          <button onClick={() => previewVoice(voice)} disabled={previewing}
+                            className="shrink-0 px-3 py-1.5 rounded text-[11px] font-bold font-mono bg-[#c084fc]/10 border border-[#c084fc]/30 text-[#c084fc] hover:bg-[#c084fc]/20 cursor-pointer disabled:opacity-50 flex items-center gap-1">
+                            <Volume2 className="w-3.5 h-3.5" /> {previewing ? "…" : "Preview"}
+                          </button>
+                        </div>
+                        <p className="text-[10px] font-mono text-[#859397] mt-2">{voices.length} Gemini voices · falls back to the browser voice if the free quota is unavailable.</p>
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             </motion.div>
           </div>

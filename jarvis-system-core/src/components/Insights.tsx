@@ -76,6 +76,8 @@ export default function Insights() {
   const [metrics, setMetrics] = useState<Metrics | null>(null);
   const [skillGap, setSkillGap] = useState<{ analyzed_jobs: number; skills: { skill: string; demand: number; have: number; gap: number; coverage: number }[]; top_gaps: { skill: string; demand: number; gap: number }[] } | null>(null);
   const [funnel, setFunnel] = useState<{ funnel: { stage: string; count: number }[]; rejected: number; applied_total: number; response_rate: number; responded_total: number; avg_response_days: number | null; ghost_rate: number; ghosted: number; ghost_days: number; sources: { source: string; applied: number; responded: number; yield: number }[] } | null>(null);
+  const [freshness, setFreshness] = useState<{ id: number; name: string; url?: string; days_since: number | null; interval_days: number; status: string; auto: boolean }[] | null>(null);
+  const [shield, setShield] = useState<{ checked: number; clear: boolean; buffer_min: number; conflicts: { a: string; b: string; when: string; interview_involved: boolean }[]; unbuffered: { summary: string; when: string; issues: string[] }[] } | null>(null);
   const [loading, setLoading] = useState(true);
   const [logOpen, setLogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -105,19 +107,31 @@ export default function Insights() {
     }
   };
 
+  const markFresh = async (assetId: number) => {
+    try {
+      const res = await fetch(`/api/profile-freshness/${assetId}/updated`, { method: "POST" });
+      const data = await res.json();
+      if (data?.assets) setFreshness(data.assets);
+    } catch { /* ignore */ }
+  };
+
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      const [a, m, sg, fn] = await Promise.all([
+      const [a, m, sg, fn, pf, cs] = await Promise.all([
         fetch("/api/analytics", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
         fetch("/api/system-metrics", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
         fetch("/api/skill-gap", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
         fetch("/api/response-analytics", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
+        fetch("/api/profile-freshness", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
+        fetch("/api/calendar-shield", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
       ]);
       if (a) setData(a);
       if (m) setMetrics(m);
       if (sg) setSkillGap(sg);
       if (fn) setFunnel(fn);
+      if (pf?.assets) setFreshness(pf.assets);
+      if (cs) setShield(cs);
     } catch { /* keep last */ } finally {
       if (!silent) setLoading(false);
     }
@@ -495,6 +509,81 @@ export default function Insights() {
                 ))}
               </div>
             </>
+          )}
+        </Panel>
+      </section>
+
+      <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Calendar Shield */}
+        <Panel title="Calendar shield — schedule guard" icon={<ShieldCheck className="w-4 h-4" />}>
+          {!shield ? (
+            <div className="text-[11px] font-mono text-[#859397] py-6 text-center">Connect Google Calendar to guard your schedule.</div>
+          ) : shield.clear ? (
+            <div className="flex flex-col items-center justify-center h-[120px] text-center gap-2">
+              <ShieldCheck className="w-8 h-8 text-[#5eead4]/60" />
+              <p className="text-sm text-[#dfe2f3]">All clear.</p>
+              <p className="text-[11px] font-mono text-[#859397]">Checked {shield.checked} upcoming events — no conflicts, no tight interviews.</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {shield.conflicts.length > 0 && (
+                <div>
+                  <div className="text-[10px] font-mono text-[#ffb4ab] uppercase tracking-widest mb-1.5">Double-booked</div>
+                  <div className="space-y-1.5">
+                    {shield.conflicts.map((c, i) => (
+                      <div key={i} className="rounded-lg border border-[#ffb4ab]/20 bg-[#ffb4ab]/[0.04] p-2.5">
+                        <div className="text-[12px] text-[#dfe2f3] flex items-center gap-1.5">
+                          {c.interview_involved && <AlertTriangle className="w-3.5 h-3.5 text-[#ffb4ab] shrink-0" />}
+                          <span className="truncate">“{c.a}” ↔ “{c.b}”</span>
+                        </div>
+                        <div className="text-[10px] font-mono text-[#859397] mt-0.5">{c.when}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {shield.unbuffered.length > 0 && (
+                <div>
+                  <div className="text-[10px] font-mono text-[#ffd6a3] uppercase tracking-widest mb-1.5">Interviews with no buffer ({shield.buffer_min}m)</div>
+                  <div className="space-y-1.5">
+                    {shield.unbuffered.map((u, i) => (
+                      <div key={i} className="rounded-lg border border-[#ffd6a3]/20 bg-[#ffd6a3]/[0.04] p-2.5">
+                        <div className="text-[12px] text-[#dfe2f3] truncate">{u.summary}</div>
+                        <div className="text-[10px] font-mono text-[#859397] mt-0.5">{u.when} · {u.issues.join("; ")}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </Panel>
+
+        {/* Profile freshness */}
+        <Panel title="Profile freshness" icon={<Clock className="w-4 h-4" />}>
+          {!freshness ? (
+            <div className="text-[11px] font-mono text-[#859397] py-6 text-center">Loading…</div>
+          ) : (
+            <div className="space-y-2">
+              {freshness.map((a) => {
+                const tone = a.status === "stale" || a.status === "unknown" ? RED : a.status === "aging" ? AMBER : GREEN;
+                const pct = a.days_since == null ? 100 : Math.min(100, Math.round((a.days_since / a.interval_days) * 100));
+                return (
+                  <div key={a.id} className="flex items-center gap-3">
+                    <span className="w-24 shrink-0 text-xs font-mono text-[#dfe2f3] truncate" title={a.name}>{a.name}{a.auto ? " ·auto" : ""}</span>
+                    <div className="flex-1 h-2.5 bg-white/5 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full" style={{ width: `${pct}%`, background: tone }} />
+                    </div>
+                    <span className="w-24 shrink-0 text-right text-[10px] font-mono" style={{ color: tone }}>
+                      {a.days_since == null ? "never" : `${a.days_since}d`} / {a.interval_days}d
+                    </span>
+                    <button onClick={() => markFresh(a.id)} title="Mark updated today"
+                      className="shrink-0 text-[10px] font-mono px-2 py-1 rounded border border-white/10 text-[#859397] hover:text-[#5eead4] hover:border-[#5eead4]/30 cursor-pointer">✓</button>
+                  </div>
+                );
+              })}
+              <p className="text-[10px] font-mono text-[#859397] pt-1">Résumé freshness tracks your résumé template automatically; mark the rest when you refresh them.</p>
+            </div>
           )}
         </Panel>
       </section>
