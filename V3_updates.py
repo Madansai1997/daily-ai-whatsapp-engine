@@ -481,7 +481,7 @@ def _log_llm_call(provider: str, model: str, ok: bool = True):
         pass
 
 
-async def _complete_with_fallback(messages: list, max_tokens: int) -> str:
+async def _complete_with_fallback(messages: list, max_tokens: int, temperature: float = None) -> str:
     """Run a chat completion across the model chain, returning the first non-empty answer.
 
     GPT-OSS models on Groq spend tokens on hidden reasoning before the visible answer —
@@ -494,12 +494,15 @@ async def _complete_with_fallback(messages: list, max_tokens: int) -> str:
     for client, model in _model_chain():
         try:
             extra_body = {"reasoning_effort": "low"} if "gpt-oss" in model else {}
-            response = await client.chat.completions.create(
-                model=model,
-                max_tokens=max_tokens,
-                extra_body=extra_body,
-                messages=messages,
-            )
+            kwargs = {
+                "model": model,
+                "max_tokens": max_tokens,
+                "extra_body": extra_body,
+                "messages": messages,
+            }
+            if temperature is not None:
+                kwargs["temperature"] = temperature
+            response = await client.chat.completions.create(**kwargs)
             content = response.choices[0].message.content
             if content and content.strip():
                 _log_llm_call("gemini" if model == GEMINI_MODEL else "groq", model, True)
@@ -512,7 +515,7 @@ async def _complete_with_fallback(messages: list, max_tokens: int) -> str:
     raise Exception(f"All models failed (last error: {last_err})")
 
 
-async def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 1000) -> str:
+async def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 1000, temperature: float = None) -> str:
     """Call LLM with automatic fallback through the Groq free models, then Gemini."""
     return await _complete_with_fallback(
         [
@@ -520,6 +523,7 @@ async def call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 1000)
             {"role": "user", "content": user_prompt},
         ],
         max_tokens,
+        temperature=temperature
     )
 
 

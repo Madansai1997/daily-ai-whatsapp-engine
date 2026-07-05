@@ -1896,10 +1896,11 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                   </div>
                 ) : (
                   <textarea
+                    disabled={resumeLoading || resumeUploading}
                     value={resumeContent}
                     onChange={(e) => setResumeContent(e.target.value)}
                     placeholder="Paste your master résumé text here — or use “Upload PDF / DOC” below to import a file…"
-                    className="w-full min-h-[320px] bg-[#0a0e1a]/60 border border-white/10 rounded-lg p-4 font-mono text-xs text-[#dfe2f3] leading-relaxed focus:outline-none focus:border-[#8aebff]/40 resize-y"
+                    className="w-full min-h-[320px] bg-[#0a0e1a]/60 border border-white/10 rounded-lg p-4 font-mono text-xs text-[#dfe2f3] leading-relaxed focus:outline-none focus:border-[#8aebff]/40 resize-y disabled:opacity-50"
                   />
                 )}
               </div>
@@ -1937,7 +1938,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                 </button>
                 <button
                   onClick={saveResume}
-                  disabled={resumeSaving || resumeLoading}
+                  disabled={resumeSaving || resumeLoading || resumeUploading}
                   className="px-6 py-2.5 rounded-lg text-xs font-bold font-mono bg-[#22d3ee] hover:bg-[#8aebff] text-[#00363e] transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
                 >
                   {resumeSaving ? (

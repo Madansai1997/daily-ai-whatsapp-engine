@@ -243,7 +243,7 @@ async def analyze(job: dict, call_llm_fn, domain: str = DEFAULT_DOMAIN) -> dict:
     user = (f"MASTER RESUME:\n{resume}\n\n"
             f"TARGET JOB — {job.get('title','')} @ {job.get('company','')} ({job.get('location','')}):\n{jd[:4000]}")
     try:
-        raw = await call_llm_fn(RESUME_ATS_PROMPT, user, max_tokens=2600)
+        raw = await call_llm_fn(RESUME_ATS_PROMPT, user, max_tokens=2600, temperature=0.0)
         analysis = _parse_json_object(raw)
     except Exception as e:
         print(f"⚠️ [resume_ats] analysis failed: {e}")
@@ -421,7 +421,7 @@ async def audit_resume(call_llm_fn) -> dict:
     if not (resume or "").strip():
         return {"error": "No master résumé saved yet. Upload or paste your résumé first."}
     try:
-        raw = await call_llm_fn(RESUME_AUDIT_PROMPT, f"RÉSUMÉ:\n{resume[:8000]}", max_tokens=3000)
+        raw = await call_llm_fn(RESUME_AUDIT_PROMPT, f"RÉSUMÉ:\n{resume[:8000]}", max_tokens=3000, temperature=0.0)
         audit = _parse_json_object(raw)
     except Exception as e:
         print(f"⚠️ [resume_ats] audit failed: {e}")

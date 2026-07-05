@@ -74,6 +74,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `540049d` feat(ats): domain alignment check and safety auto-apply override _(2026-07-05)_
 - `5a0d04e` feat(job-scout): auto follow-ups, crm updates and auth query parameter fix _(2026-07-05)_
 - `d95a6a0` docs: add auto-maintained README + pre-commit refresh hook _(2026-07-05)_
 - `51d2bb3` feat(console): guided-flow reorg — Home cockpit, lifecycle Tools, ordered nav, inline card cues _(2026-07-05)_
@@ -85,7 +86,6 @@ npm install && npm run build     # served by the engine at /console
 - `223bebc` feat(job-scout): job review queue and manual add with ATS analysis _(2026-07-04)_
 - `22c0a14` feat(job-scout): apply desk — tailor resume, draft cover note, approval-gated auto-apply _(2026-07-04)_
 - `cef3541` feat(insights): auto-track Antigravity + Claude Code dev usage _(2026-07-04)_
-- `6b53c5a` fix(console): render JARVIS chat history times in correct local timezone _(2026-07-04)_
 <!-- /AUTO:changelog -->
 
 ---
