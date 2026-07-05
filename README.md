@@ -74,6 +74,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `660b424` feat(ats): add resume download and audit upload/auto-rescan _(2026-07-05)_
 - `6dfbfd3` fix(ats): resume upload race condition and audit determinism _(2026-07-05)_
 - `540049d` feat(ats): domain alignment check and safety auto-apply override _(2026-07-05)_
 - `5a0d04e` feat(job-scout): auto follow-ups, crm updates and auth query parameter fix _(2026-07-05)_
@@ -85,7 +86,6 @@ npm install && npm run build     # served by the engine at /console
 - `cd984aa` feat(console): Tier-1 career agents — funnel analytics, follow-ups, email timeline, interview prep, notes _(2026-07-04)_
 - `2c9a3a2` feat(console): remove PrivaChat screen from JARVIS interface _(2026-07-04)_
 - `223bebc` feat(job-scout): job review queue and manual add with ATS analysis _(2026-07-04)_
-- `22c0a14` feat(job-scout): apply desk — tailor resume, draft cover note, approval-gated auto-apply _(2026-07-04)_
 <!-- /AUTO:changelog -->
 
 ---

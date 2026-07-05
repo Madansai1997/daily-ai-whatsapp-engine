@@ -5976,13 +5976,30 @@ async def resume_upload_api(request: Request):
 
 
 def _extract_resume_text(filename: str, data: bytes) -> str:
-    """Extract plain text from an uploaded résumé — PDF, DOCX, or TXT."""
+    """Extract plain text from an uploaded résumé — PDF, DOCX, or TXT.
+    Detects formats defensively via magic bytes to prevent BadZipFile crashes."""
+    # 1. Inspect file header magic bytes
+    if data.startswith(b"%PDF-"):
+        return extract_pdf_text(data) or ""
+    if data.startswith(b"PK\x03\x04"):
+        import docx2txt, io
+        try:
+            return (docx2txt.process(io.BytesIO(data)) or "").strip()
+        except Exception:
+            pass # fall back to extension matching if it fails
+    if data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        raise ValueError("This is an older Word Document (.doc) format. Please 'Save As' modern Word Document (.docx) or PDF and try again.")
+
+    # 2. Fall back to extension matching
     name = (filename or "").lower()
     if name.endswith(".pdf"):
         return extract_pdf_text(data) or ""
     if name.endswith(".docx"):
         import docx2txt, io
-        return (docx2txt.process(io.BytesIO(data)) or "").strip()
+        try:
+            return (docx2txt.process(io.BytesIO(data)) or "").strip()
+        except Exception as e:
+            raise ValueError(f"File is not a valid modern Word Document (.docx). Details: {e}")
     if name.endswith(".txt"):
         return data.decode("utf-8", errors="ignore").strip()
     return ""
