@@ -30,11 +30,15 @@ RESUME_ATS_PROMPT = (
     "Return a STRICT JSON object only — no markdown, no prose before or after — with EXACTLY "
     "this shape:\n"
     "{\n"
-    '  "ats_score": <int 0-100: how well the CURRENT resume matches this JD on keywords+relevance>,\n'
+    '  "ats_score": <int 0-100: how well the CURRENT resume matches this JD>,\n'
     '  "keyword_matrix": {\n'
     '    "required": [<hard skills/tools/keywords the JD explicitly requires>],\n'
     '    "present":  [<of those required, the ones already in the resume>],\n'
     '    "missing":  [<of those required, the ones absent from the resume>]\n'
+    "  },\n"
+    '  "domain_mismatch": {\n'
+    '    "mismatched": <boolean: true if the target job is in a completely different domain (like Cybersecurity, Web Dev, DevOps, HR, Marketing) and NOT suitable/aligned for a Data Analyst profile>,\n'
+    '    "reason": "<string: brief explanation if mismatched is true, else empty string>"\n'
     "  },\n"
     '  "star_xyz_breakdown": [\n'
     '    {"section_name": "<company or project + which bullet>",\n'
@@ -43,6 +47,8 @@ RESUME_ATS_PROMPT = (
     '     "issue": "<short: what was weak, e.g. no quantifiable result / missing tool keyword>"}\n'
     "  ]\n"
     "}\n\n"
+    "DOMAIN ALIGNMENT RULE:\n"
+    "- Check if the target job is in a completely different domain than Data Analysis (such as Cybersecurity, QA, DevOps, SysAdmin, Sales, Marketing, etc.). If it is a domain mismatch, you MUST set 'domain_mismatch.mismatched' to true, explain the reason in 'domain_mismatch.reason', set 'ats_score' to 0, and leave 'star_xyz_breakdown' completely empty []. Do NOT try to invent/fake domain-specific experience (e.g. security log analysis, brute force detection) under Data Analyst project titles.\n\n"
     "REWRITING FRAMEWORKS:\n"
     "- EXPERIENCE bullets → Google XYZ: 'Accomplished [X], as measured by [Y], by doing [Z]'. "
     "If a bullet lacks a quantifiable [Y], INSERT a realistic data-analyst metric (query runtime "
@@ -91,8 +97,15 @@ def init_resume_ats_tables():
         star_xyz_breakdown TEXT,
         downloadable_txt_content TEXT,
         viewed INTEGER DEFAULT 0,
-        created_at TEXT
+        created_at TEXT,
+        domain_mismatch TEXT
     )''')
+    try:
+        cols = [r[1] for r in cur.execute("PRAGMA table_info(ats_analysis_cache)").fetchall()]
+        if "domain_mismatch" not in cols:
+            cur.execute("ALTER TABLE ats_analysis_cache ADD COLUMN domain_mismatch TEXT")
+    except Exception:
+        pass
     # Standalone résumé health audit (NOT tied to any job) — single latest row.
     cur.execute('''CREATE TABLE IF NOT EXISTS resume_audit (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -243,17 +256,18 @@ async def analyze(job: dict, call_llm_fn, domain: str = DEFAULT_DOMAIN) -> dict:
         await db.execute(
             """INSERT INTO ats_analysis_cache
                (job_ref, job_title, company, location, ats_score, keyword_matrix,
-                star_xyz_breakdown, downloadable_txt_content, viewed, created_at)
-               VALUES (?,?,?,?,?,?,?,?,0,?)
+                star_xyz_breakdown, downloadable_txt_content, viewed, created_at, domain_mismatch)
+               VALUES (?,?,?,?,?,?,?,?,0,?,?)
                ON CONFLICT(job_ref) DO UPDATE SET
                  job_title=excluded.job_title, company=excluded.company, location=excluded.location,
                  ats_score=excluded.ats_score, keyword_matrix=excluded.keyword_matrix,
                  star_xyz_breakdown=excluded.star_xyz_breakdown,
                  downloadable_txt_content=excluded.downloadable_txt_content, viewed=0,
-                 created_at=excluded.created_at""",
+                 created_at=excluded.created_at, domain_mismatch=excluded.domain_mismatch""",
             (job_ref, job.get("title"), job.get("company"), job.get("location"),
              int(analysis.get("ats_score", 0)), json.dumps(analysis.get("keyword_matrix", {})),
-             json.dumps(analysis.get("star_xyz_breakdown", [])), txt, now))
+             json.dumps(analysis.get("star_xyz_breakdown", [])), txt, now,
+             json.dumps(analysis.get("domain_mismatch", {}))))
         await db.commit()
     return await get_analysis(job_ref)
 
@@ -268,6 +282,7 @@ async def get_analysis(job_ref: str) -> dict:
     a = dict(row)
     a["keyword_matrix"] = json.loads(a.get("keyword_matrix") or "{}")
     a["star_xyz_breakdown"] = json.loads(a.get("star_xyz_breakdown") or "[]")
+    a["domain_mismatch"] = json.loads(a.get("domain_mismatch") or "{}")
     return a
 
 

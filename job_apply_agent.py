@@ -68,8 +68,15 @@ def init_job_apply_tables():
                 resume_txt TEXT,
                 cover_note TEXT,
                 status TEXT DEFAULT 'ready',  -- 'ready' | 'pending_confirm' | 'applied' | 'cancelled'
-                created_at TEXT, updated_at TEXT)"""
+                created_at TEXT, updated_at TEXT,
+                domain_mismatch TEXT)"""
         )
+        try:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(job_application_prep)").fetchall()]
+            if "domain_mismatch" not in cols:
+                conn.execute("ALTER TABLE job_application_prep ADD COLUMN domain_mismatch TEXT")
+        except Exception:
+            pass
         conn.commit()
     finally:
         conn.close()
@@ -251,7 +258,14 @@ async def prepare_one(job: dict, call_llm_fn) -> dict | None:
             resume_txt = await resume_ats_agent.get_resume_template() or ""
         except Exception:
             resume_txt = ""
-    cover_note = await _draft_cover_note(job, analysis if isinstance(analysis, dict) else {}, call_llm_fn)
+    domain_mismatch = analysis.get("domain_mismatch") or {} if isinstance(analysis, dict) else {}
+    is_mismatched = bool(domain_mismatch.get("mismatched"))
+    status = "blocked" if is_mismatched else "ready"
+    mismatch_str = json.dumps(domain_mismatch)
+
+    cover_note = ""
+    if not is_mismatched:
+        cover_note = await _draft_cover_note(job, analysis if isinstance(analysis, dict) else {}, call_llm_fn)
 
     apply_email = _find_apply_email(job)
     method = "email" if apply_email else "link"
@@ -260,20 +274,22 @@ async def prepare_one(job: dict, call_llm_fn) -> dict | None:
         await db.execute(
             """INSERT INTO job_application_prep
                (job_key, title, company, location, url, method, apply_email, ats_score,
-                resume_txt, cover_note, status, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?, 'ready', ?, ?)
+                resume_txt, cover_note, status, created_at, updated_at, domain_mismatch)
+               VALUES (?,?,?,?,?,?,?,?,?,?, ?, ?, ?, ?)
                ON CONFLICT(job_key) DO UPDATE SET
                  method=excluded.method, apply_email=excluded.apply_email,
                  ats_score=excluded.ats_score, resume_txt=excluded.resume_txt,
-                 cover_note=excluded.cover_note, updated_at=excluded.updated_at""",
+                 cover_note=excluded.cover_note, status=excluded.status,
+                 updated_at=excluded.updated_at, domain_mismatch=excluded.domain_mismatch""",
             (job_key, job.get("title"), job.get("company"), job.get("location"), job.get("url"),
-             method, apply_email, ats_score, resume_txt, cover_note, now, now),
+             method, apply_email, ats_score, resume_txt, cover_note, status, now, now, mismatch_str),
         )
         await db.commit()
     return {
         "job_key": job_key, "title": job.get("title"), "company": job.get("company"),
         "url": job.get("url"), "method": method, "apply_email": apply_email,
         "ats_score": ats_score, "cover_note": cover_note, "resume_txt": resume_txt,
+        "status": status, "domain_mismatch": domain_mismatch,
     }
 
 

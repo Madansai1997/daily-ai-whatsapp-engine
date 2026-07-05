@@ -92,6 +92,7 @@ interface AtsResult {
   ats_score: number;
   keyword_matrix: KeywordMatrix;
   star_xyz_breakdown: StarXyzItem[];
+  domain_mismatch?: { mismatched: boolean; reason: string };
 }
 
 interface AtsErrorResult {
@@ -165,7 +166,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [activeTab, setActiveTab] = useState<"keyword" | "star">("keyword");
+  const [activeTab, setActiveTab] = useState<"keyword" | "star" | "error">("keyword");
   const [atsResult, setAtsResult] = useState<AtsResult | null>(null);
   const [atsLoadingId, setAtsLoadingId] = useState<number | null>(null);
   const [docLoading, setDocLoading] = useState(false);
@@ -860,7 +861,11 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
         return;
       }
       setAtsResult(data as AtsResult);
-      setActiveTab("keyword");
+      if (data?.domain_mismatch?.mismatched) {
+        setActiveTab("error");
+      } else {
+        setActiveTab("keyword");
+      }
       onNavigate(ScreenId.AtsAnalysis);
       loadApplications(); // refresh so the score badge shows on the card behind the modal
     } catch (e) {
@@ -1648,7 +1653,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                   <div className="relative w-44 h-44 flex items-center justify-center">
                     <svg className="w-full h-full -rotate-90">
                       <circle
-                        className="text-[#8aebff]/10"
+                        className={atsResult.domain_mismatch?.mismatched ? "text-[#ffb4ab]/10" : "text-[#8aebff]/10"}
                         cx="88"
                         cy="88"
                         fill="transparent"
@@ -1657,7 +1662,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                         strokeWidth="3"
                       ></circle>
                       <circle
-                        className="text-[#8aebff] glow-cyan"
+                        className={atsResult.domain_mismatch?.mismatched ? "text-[#ffb4ab]" : "text-[#8aebff] glow-cyan"}
                         cx="88"
                         cy="88"
                         fill="transparent"
@@ -1670,7 +1675,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                       ></circle>
                     </svg>
                     <div className="absolute flex flex-col items-center">
-                      <span className="text-4xl font-extrabold text-[#dfe2f3] font-mono glow-cyan leading-none">
+                      <span className={`text-4xl font-extrabold font-mono leading-none ${atsResult.domain_mismatch?.mismatched ? "text-[#ffb4ab]" : "text-[#dfe2f3] glow-cyan"}`}>
                         {score}
                       </span>
                       <span className="text-[10px] font-mono text-[#859397] uppercase tracking-widest mt-1">
@@ -1702,9 +1707,21 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                   >
                     STAR/XYZ PLAN
                   </button>
+                  {atsResult.domain_mismatch?.mismatched && (
+                    <button
+                      onClick={() => setActiveTab("error")}
+                      className={`px-6 py-2.5 border-b-2 font-semibold transition-all cursor-pointer ${
+                        activeTab === "error"
+                          ? "border-[#ffb4ab] text-[#ffb4ab]"
+                          : "border-transparent text-[#ffb4ab]/60 hover:text-[#ffb4ab]"
+                      }`}
+                    >
+                      ALIGNMENT ALERT 🚨
+                    </button>
+                  )}
                 </div>
 
-                {activeTab === "keyword" ? (
+                {activeTab === "keyword" && (
                   <div className="space-y-4 font-mono text-xs">
                     <div className="flex items-center justify-between text-[#859397] uppercase tracking-wider border-b border-white/5 pb-2">
                       <span>CORE COMPETENCY</span>
@@ -1745,7 +1762,9 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                       terms absent from your master résumé, not suggestions to fabricate experience.
                     </p>
                   </div>
-                ) : (
+                )}
+
+                {activeTab === "star" && (
                   <div className="space-y-3 font-mono text-xs">
                     {atsResult.star_xyz_breakdown.length === 0 ? (
                       <p className="text-[#859397] py-2">No STAR/XYZ suggestions available.</p>
@@ -1784,22 +1803,38 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                     )}
                   </div>
                 )}
+
+                {activeTab === "error" && atsResult.domain_mismatch && (
+                  <div className="p-5 rounded-xl bg-[#ffb4ab]/10 border border-[#ffb4ab]/30 text-[#ffb4ab] space-y-3 font-mono text-xs">
+                    <div className="flex items-center gap-2 border-b border-[#ffb4ab]/20 pb-2">
+                      <AlertCircle className="w-5 h-5 flex-shrink-0" />
+                      <span className="font-bold uppercase tracking-wide text-sm">Domain Alignment Violation</span>
+                    </div>
+                    <p className="text-xs text-[#dfe2f3]/90 leading-relaxed">
+                      {atsResult.domain_mismatch.reason}
+                    </p>
+                    <div className="p-3 bg-[#0a0e1a]/50 rounded-lg border border-white/5 text-[10px] text-[#859397] leading-relaxed">
+                      💡 **Security Guardrail Active**: Auto-apply and resume tailoring have been disabled for this job because attempting to rewrite Data Analyst projects to match Cybersecurity requirements would result in fabricated skill descriptions.
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Modal footer actions */}
               <div className="p-6 bg-white/5 border-t border-white/5 flex flex-col sm:flex-row gap-3">
                 <button
+                  disabled={atsResult.domain_mismatch?.mismatched}
                   onClick={() => openApply(atsResult.job_ref, atsResult.keyword_matrix.missing)}
-                  className="flex-1 bg-[#a3e635]/10 border border-[#a3e635]/40 text-[#a3e635] hover:bg-[#a3e635] hover:text-[#0a0e1a] py-3 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer"
-                  title="Apply the changes to your uploaded .docx, keeping its exact format"
+                  className="flex-1 bg-[#a3e635]/10 border border-[#a3e635]/40 text-[#a3e635] hover:bg-[#a3e635] hover:text-[#0a0e1a] py-3 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-[#a3e635]/10 disabled:hover:text-[#a3e635]"
+                  title={atsResult.domain_mismatch?.mismatched ? "Apply disabled due to domain mismatch" : "Apply the changes to your uploaded .docx, keeping its exact format"}
                 >
                   <ClipboardCheck className="w-4.5 h-4.5" /> APPLY TO MY .DOCX
                 </button>
                 <button
                   onClick={() => openInGoogleDoc(atsResult.job_ref)}
-                  disabled={docLoading}
-                  className="flex-1 bg-[#8aebff]/10 border border-[#8aebff]/40 text-[#8aebff] hover:bg-[#8aebff] hover:text-[#00363e] py-3 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-50"
-                  title="Create a Google Doc with your résumé + the changes to make"
+                  disabled={docLoading || atsResult.domain_mismatch?.mismatched}
+                  className="flex-1 bg-[#8aebff]/10 border border-[#8aebff]/40 text-[#8aebff] hover:bg-[#8aebff] hover:text-[#00363e] py-3 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-[#8aebff]/10 disabled:hover:text-[#8aebff]"
+                  title={atsResult.domain_mismatch?.mismatched ? "Google Doc creation disabled due to domain mismatch" : "Create a Google Doc with your résumé + the changes to make"}
                 >
                   {docLoading ? (
                     <><RefreshCw className="w-4.5 h-4.5 animate-spin" /> CREATING DOC…</>
