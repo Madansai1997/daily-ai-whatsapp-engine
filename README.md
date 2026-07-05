@@ -74,6 +74,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `675e482` feat(ats): add rebuild_resume.py master cv restructuring script _(2026-07-06)_
 - `658cc96` feat(ats): support interactive keyword selection and injection in resume audit _(2026-07-06)_
 - `d88175a` feat(ats): upgrade apply_rewrites matching robustness and add changes details dialog _(2026-07-06)_
 - `1d6fb70` feat(ats): support applying resume audit grammar suggestions directly to docx _(2026-07-06)_
@@ -85,7 +86,6 @@ npm install && npm run build     # served by the engine at /console
 - `5a0d04e` feat(job-scout): auto follow-ups, crm updates and auth query parameter fix _(2026-07-05)_
 - `d95a6a0` docs: add auto-maintained README + pre-commit refresh hook _(2026-07-05)_
 - `51d2bb3` feat(console): guided-flow reorg — Home cockpit, lifecycle Tools, ordered nav, inline card cues _(2026-07-05)_
-- `51177bd` feat(console): Tier-2 agents — networking CRM, profile freshness, calendar shield, voice standup _(2026-07-05)_
 <!-- /AUTO:changelog -->
 
 ---

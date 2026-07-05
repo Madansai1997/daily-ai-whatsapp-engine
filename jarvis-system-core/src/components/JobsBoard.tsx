@@ -182,6 +182,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
   const [activeAtsAppId, setActiveAtsAppId] = useState<number | null>(null);
   const [auditApplying, setAuditApplying] = useState(false);
   const [selectedAuditKeywords, setSelectedAuditKeywords] = useState<string[]>([]);
+  const [selectedGrammar, setSelectedGrammar] = useState<any[]>([]);
 
   // Apply-to-.docx (format-preserving) flow
   const [applyOpen, setApplyOpen] = useState(false);
@@ -982,7 +983,10 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       const res = await fetch("/resume/apply-audit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ additions: selectedAuditKeywords }),
+        body: JSON.stringify({
+          additions: selectedAuditKeywords,
+          rewrites: selectedGrammar
+        }),
       });
       const data = await res.json();
       if (!res.ok || data?.ok === false) {
@@ -1003,6 +1007,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
             `🔹 Skills section updates:\n${keywordsChanges}\n\n` +
             `Re-auditing master resume...`);
       setSelectedAuditKeywords([]);
+      setSelectedGrammar([]);
       await openAudit();
     } catch (e) {
       alert(`Could not apply suggestions: ${e instanceof Error ? e.message : e}`);
@@ -1054,10 +1059,20 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
     setAuditError("");
     setAuditFetching(true);
     setSelectedAuditKeywords([]);
+    setSelectedGrammar([]);
     try {
       const res = await fetch("/resume/audit");
       const data = await res.json();
-      setAudit(data?.audit || null);
+      const auditData = data?.audit || null;
+      setAudit(auditData);
+      
+      if (auditData?.grammar) {
+        const dateRegex = /\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|20\d\d|\d{1,2}[\/\-]\d{2,4})\b/i;
+        const nonDate = auditData.grammar.filter((g: any) =>
+          !dateRegex.test(g.original || "") && !dateRegex.test(g.suggestion || "")
+        );
+        setSelectedGrammar(nonDate);
+      }
       
       const docxRes = await fetch("/resume/docx-status");
       const docxData = await docxRes.json();
@@ -1077,6 +1092,14 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       const data = await res.json();
       if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
       setAudit(data.audit);
+      
+      if (data.audit?.grammar) {
+        const dateRegex = /\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|20\d\d|\d{1,2}[\/\-]\d{2,4})\b/i;
+        const nonDate = data.audit.grammar.filter((g: any) =>
+          !dateRegex.test(g.original || "") && !dateRegex.test(g.suggestion || "")
+        );
+        setSelectedGrammar(nonDate);
+      }
     } catch (e) {
       setAuditError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -2549,15 +2572,66 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                     {/* Grammar */}
                     {Array.isArray(audit.grammar) && audit.grammar.length > 0 && (
                       <div>
-                        <h4 className="text-xs font-bold font-mono uppercase tracking-widest text-[#859397] mb-2">Grammar & wording</h4>
+                        <h4 className="text-xs font-bold font-mono uppercase tracking-widest text-[#859397] mb-2 flex items-center justify-between">
+                          <span>Grammar & wording corrections (click to toggle)</span>
+                          {selectedGrammar.length > 0 && (
+                            <span className="text-[#5eead4] text-[10px] lowercase font-normal">({selectedGrammar.length} selected)</span>
+                          )}
+                        </h4>
                         <div className="space-y-2">
-                          {audit.grammar.map((g: any, i: number) => (
-                            <div key={i} className="text-[12px] font-mono">
-                              <span className="text-[#ffb4ab] line-through">{g.original}</span>{" "}
-                              <span className="text-[#5eead4]">→ {g.suggestion}</span>
-                              {g.type && <span className="text-[9px] text-[#859397] ml-2">({g.type})</span>}
-                            </div>
-                          ))}
+                          {audit.grammar.map((g: any, i: number) => {
+                            const dateRegex = /\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|20\d\d|\d{1,2}[\/\-]\d{2,4})\b/i;
+                            const isDate = dateRegex.test(g.original || "") || dateRegex.test(g.suggestion || "");
+                            
+                            const isChecked = selectedGrammar.some((item: any) =>
+                              item.original === g.original && item.suggestion === g.suggestion
+                            );
+                            
+                            const handleToggle = () => {
+                              if (isChecked) {
+                                setSelectedGrammar(prev => prev.filter(x => !(x.original === g.original && x.suggestion === g.suggestion)));
+                              } else {
+                                if (isDate) {
+                                  const confirmChange = window.confirm(
+                                    `⚠️ DATE CHANGE CONFIRMATION:\n\n` +
+                                    `Are you sure you want to change this date range in your resume?\n\n` +
+                                    `From: "${g.original}"\n` +
+                                    `To: "${g.suggestion}"`
+                                  );
+                                  if (!confirmChange) return;
+                                }
+                                setSelectedGrammar(prev => [...prev, g]);
+                              }
+                            };
+
+                            return (
+                              <button
+                                key={i}
+                                type="button"
+                                onClick={handleToggle}
+                                className={`w-full text-left p-2 rounded text-[12px] font-mono border transition-all cursor-pointer block ${
+                                  isChecked
+                                    ? "bg-[#5eead4]/5 border-[#5eead4]/30 text-[#dfe2f3]"
+                                    : "bg-transparent border-white/5 text-[#859397] hover:bg-white/5"
+                                }`}
+                              >
+                                <div className="flex items-start gap-2">
+                                  <input
+                                    type="checkbox"
+                                    checked={isChecked}
+                                    onChange={() => {}}
+                                    className="mt-0.5 pointer-events-none accent-[#5eead4]"
+                                  />
+                                  <div className="flex-1">
+                                    <span className="line-through opacity-75">{g.original}</span>{" "}
+                                    <span className="text-[#5eead4]">→ {g.suggestion}</span>
+                                    {g.type && <span className="text-[9px] text-[#859397] ml-2 bg-white/5 px-1 py-0.5 rounded">({g.type})</span>}
+                                    {isDate && <span className="text-[9px] text-[#f43f5e] ml-2 font-bold bg-[#f43f5e]/10 px-1 py-0.5 rounded">📅 Date Range</span>}
+                                  </div>
+                                </div>
+                              </button>
+                            );
+                          })}
                         </div>
                       </div>
                     )}

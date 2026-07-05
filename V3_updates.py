@@ -6180,17 +6180,28 @@ async def resume_apply_audit_api(request: Request):
         )
     
     try:
-        approved_additions = (await request.json()).get("additions", []) or []
+        body = await request.json()
+        approved_additions = body.get("additions", []) or []
+        approved_rewrites = body.get("rewrites", []) or []
     except Exception:
         approved_additions = []
+        approved_rewrites = []
     
     filename, docx_bytes = master
-    grammar_items = audit.get("grammar", []) or []
-    rewrites = [
-        (g.get("original", ""), g.get("suggestion", ""))
-        for g in grammar_items
-        if (g.get("original") or "").strip() and (g.get("suggestion") or "").strip()
-    ]
+    
+    if approved_rewrites:
+        rewrites = [
+            (r.get("original", ""), r.get("suggestion", ""))
+            for r in approved_rewrites
+            if (r.get("original") or "").strip() and (r.get("suggestion") or "").strip()
+        ]
+    else:
+        grammar_items = audit.get("grammar", []) or []
+        rewrites = [
+            (g.get("original", ""), g.get("suggestion", ""))
+            for g in grammar_items
+            if (g.get("original") or "").strip() and (g.get("suggestion") or "").strip()
+        ]
     
     loop = asyncio.get_running_loop()
     try:
