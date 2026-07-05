@@ -29,6 +29,7 @@ import {
   Square,
   Wrench,
 } from "lucide-react";
+import { getToken } from "../lib/auth";
 
 interface JobsBoardProps {
   activeScreen: ScreenId;
@@ -409,7 +410,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       const res = await fetch("/api/followups/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to: followDraft.recipient, subject: followDraft.subject, body: followDraft.body }),
+        body: JSON.stringify({ to: followDraft.recipient, subject: followDraft.subject, body: followDraft.body, app_id: followDraft.id }),
       });
       const data = await res.json();
       if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP ${res.status}`);
@@ -1044,7 +1045,11 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       const data = await res.json();
       if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
       setApplyResult(data);
-      if (data?.download) window.open(data.download, "_blank"); // download the edited .docx
+      if (data?.download) {
+        const tok = getToken();
+        const dUrl = tok ? `${data.download}?token=${encodeURIComponent(tok)}` : data.download;
+        window.open(dUrl, "_blank"); // download the edited .docx
+      }
     } catch (e) {
       setApplyError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1803,12 +1808,12 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                   )}
                 </button>
                 <button
-                  onClick={() =>
-                    window.open(
-                      `/ats/${encodeURIComponent(atsResult.job_ref)}/download`,
-                      "_blank"
-                    )
-                  }
+                  onClick={() => {
+                    const tok = getToken();
+                    const path = `/ats/${encodeURIComponent(atsResult.job_ref)}/download`;
+                    const url = tok ? `${path}?token=${encodeURIComponent(tok)}` : path;
+                    window.open(url, "_blank");
+                  }}
                   className="flex-1 bg-[#22d3ee] hover:bg-[#8aebff] text-[#00363e] py-3 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-lg hover:scale-[1.01]"
                 >
                   <Download className="w-4.5 h-4.5" />
@@ -2509,7 +2514,11 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                       into Google Drive to review it as a Google Doc — your format is preserved.
                     </p>
                     <button
-                      onClick={() => window.open(applyResult.download, "_blank")}
+                      onClick={() => {
+                        const tok = getToken();
+                        const url = tok ? `${applyResult.download}?token=${encodeURIComponent(tok)}` : applyResult.download;
+                        window.open(url, "_blank");
+                      }}
                       className="mt-1 px-5 py-2 rounded-lg text-xs font-bold bg-[#a3e635]/10 border border-[#a3e635]/30 text-[#a3e635] hover:bg-[#a3e635] hover:text-[#0a0e1a] transition-all cursor-pointer inline-flex items-center gap-2"
                     >
                       <Download className="w-3.5 h-3.5" /> DOWNLOAD AGAIN
@@ -2617,7 +2626,10 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                   followCands.map((c) => (
                     <div key={c.id} className="rounded-lg border border-white/5 bg-white/[0.02] p-4 flex items-center justify-between gap-3">
                       <div className="min-w-0">
-                        <div className="text-sm font-bold text-[#dfe2f3] truncate">{c.title}</div>
+                        <div className="text-sm font-bold text-[#dfe2f3] truncate flex items-center gap-2">
+                          {c.title}
+                          {c.ready && <span className="shrink-0 text-[9px] font-mono px-1.5 py-0.5 rounded-full bg-[#5eead4]/15 text-[#5eead4] border border-[#5eead4]/25 uppercase tracking-wider">Draft ready</span>}
+                        </div>
                         <div className="text-[11px] font-mono text-[#859397] truncate">{c.company}{c.location ? ` • ${c.location}` : ""}</div>
                         <div className="text-[10px] font-mono mt-1 flex items-center gap-2">
                           <span className="text-[#ffd6a3]">{c.days_since_applied}d silent</span>
@@ -2625,8 +2637,8 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                         </div>
                       </div>
                       <button onClick={() => draftFollowup(c)} disabled={followBusyId === c.id}
-                        className="shrink-0 px-3 py-2 rounded-lg text-[11px] font-bold font-mono bg-[#ffd6a3]/10 border border-[#ffd6a3]/30 text-[#ffd6a3] hover:bg-[#ffd6a3]/20 cursor-pointer disabled:opacity-50">
-                        {followBusyId === c.id ? "DRAFTING…" : "DRAFT FOLLOW-UP"}
+                        className={`shrink-0 px-3 py-2 rounded-lg text-[11px] font-bold font-mono border cursor-pointer disabled:opacity-50 ${c.ready ? "bg-[#5eead4]/10 border-[#5eead4]/30 text-[#5eead4] hover:bg-[#5eead4]/20" : "bg-[#ffd6a3]/10 border-[#ffd6a3]/30 text-[#ffd6a3] hover:bg-[#ffd6a3]/20"}`}>
+                        {followBusyId === c.id ? "OPENING…" : c.ready ? "REVIEW & SEND" : "DRAFT FOLLOW-UP"}
                       </button>
                     </div>
                   ))

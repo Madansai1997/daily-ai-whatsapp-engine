@@ -74,6 +74,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `d95a6a0` docs: add auto-maintained README + pre-commit refresh hook _(2026-07-05)_
 - `51d2bb3` feat(console): guided-flow reorg — Home cockpit, lifecycle Tools, ordered nav, inline card cues _(2026-07-05)_
 - `51177bd` feat(console): Tier-2 agents — networking CRM, profile freshness, calendar shield, voice standup _(2026-07-05)_
 - `414c338` feat(memory): auto-sync Claude's saved memories to Antigravity on SessionEnd _(2026-07-05)_
@@ -85,7 +86,6 @@ npm install && npm run build     # served by the engine at /console
 - `cef3541` feat(insights): auto-track Antigravity + Claude Code dev usage _(2026-07-04)_
 - `6b53c5a` fix(console): render JARVIS chat history times in correct local timezone _(2026-07-04)_
 - `26e02f4` chore(dev): version SQLite/Turso MCP server + dev requirements _(2026-07-03)_
-- `a17f433` feat(job-scout): include JSearch in daily cron sources to search LinkedIn/Indeed/Glassdoor automatically _(2026-07-03)_
 <!-- /AUTO:changelog -->
 
 ---

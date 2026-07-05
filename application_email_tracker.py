@@ -32,6 +32,23 @@ from application_tracker import (
     get_application,
     VALID_STATUSES,
 )
+# Auto-capture the people behind these emails into the networking CRM (no manual typing).
+from networking_crm import upsert_contact_by_email
+
+_EMAIL_RE = re.compile(r"[\w.\-+]+@[\w.\-]+\.\w+")
+# Automated senders that aren't real networking contacts.
+_NOREPLY_RE = re.compile(
+    r"(no[-_.]?reply|do[-_.]?not[-_.]?reply|donotreply|notifications?|mailer|automated|bounce|"
+    r"postmaster|updates?@|alerts?@)", re.I)
+
+
+def _first_email(raw: str) -> str:
+    m = _EMAIL_RE.search(raw or "")
+    return m.group(0).lower() if m else ""
+
+
+def _is_noreply(email: str) -> bool:
+    return bool(_NOREPLY_RE.search(email or ""))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "agent_memory.db"))
@@ -223,7 +240,8 @@ async def scan_and_sync(call_llm_fn, notify_fn=None, max_emails: int = 40) -> di
             except Exception as e:
                 print(f"⚠️ [app-email] notify failed: {e}")
 
-    summary = {"scanned": 0, "moved": 0, "added": 0, "pending": 0, "skipped": 0, "error": None}
+    summary = {"scanned": 0, "moved": 0, "added": 0, "pending": 0, "contacts": 0,
+               "skipped": 0, "error": None}
 
     try:
         service = _get_gmail_service()
@@ -307,6 +325,20 @@ async def scan_and_sync(call_llm_fn, notify_fn=None, max_emails: int = 40) -> di
         role = (c.get("role") or "").strip()
         confidence = (c.get("confidence") or "low").lower()
 
+        # Auto-capture the sender as a networking contact (real people only — skip no-reply
+        # addresses). Keyed by e-mail so re-seeing them updates rather than duplicates.
+        sender_email = _first_email(e.get("from_raw"))
+        if company and sender_email and not _is_noreply(sender_email):
+            try:
+                _, created = await upsert_contact_by_email(
+                    sender_email, name=e.get("sender"), company=company, role=role or None,
+                    relationship="recruiter", touch=True,
+                    note=f"Auto-added from email: {e['subject'][:80]}")
+                if created:
+                    summary["contacts"] += 1
+            except Exception as ex:
+                print(f"⚠️ [app-email] contact capture failed: {ex}")
+
         apps = await list_applications()
         kind, matches = _match_application(apps, company, role)
 
@@ -381,6 +413,13 @@ async def scan_and_sync(call_llm_fn, notify_fn=None, max_emails: int = 40) -> di
                     f"to your board at *{stage.upper()}* (from an email — {e['sender']}).",
                     "jobs",
                 )
+
+    if summary["contacts"]:
+        _notify(
+            f"👥 Added {summary['contacts']} new contact"
+            f"{'s' if summary['contacts'] > 1 else ''} to your network from recent emails.",
+            "jobs",
+        )
 
     await _meta_set("last_scan_at", datetime.now(timezone.utc).isoformat())
     print(f"📬 [app-email] scan done: {summary}")

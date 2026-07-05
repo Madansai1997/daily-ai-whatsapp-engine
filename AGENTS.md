@@ -8,7 +8,7 @@
 > ```
 > List / remove: `python3 shared_memory.py list` · `python3 shared_memory.py rm <key>`
 
-_12 shared memories · last rendered 2026-07-05 05:57 UTC_
+_14 shared memories · last rendered 2026-07-05 11:42 UTC_
 
 ## Feedback — how to work
 
@@ -56,6 +56,9 @@ All user-facing JARVIS responses across this project (WhatsApp replies, web chat
 
 ## Project — ongoing work & constraints
 
+### console-guided-flow-plan _(via claude-code)_
+PLAN — reorganize the whole JARVIS console into a proper guided, ordered flow (approved 2026-07-05). Reference model = job-search lifecycle: (1) Discover (2) Assess (3) Apply (4) Track (5) Follow-up (6) Interview (7) Reflect. Everything's layout + 'next step' logic obeys this spine. Execution steps, in order: Step 2 = HOME COCKPIT (make Core the default landing screen: greeting + JARVIS voice, a prioritized clickable 'Next steps' queue that deep-links into each tool, a Pipeline pulse with week-momentum folded in, and an 'Ask JARVIS' footer that opens chat). Reuses daily_standup.gather() data — cheap, free-tier. Needs a small 'navigation intents' mechanism so a Home button can open a specific modal on the Jobs screen. Step 3 = reorder Jobs Tools dropdown into lifecycle groups (Discover/Assess/Apply/Follow-up/Interview; Standup moves to Home; Notes=Workspace). Step 4 = reorder top nav HOME→JOBS→INSIGHTS→BILLS→JARVIS→TERMINAL, rename Core→HOME (fixes the two-JARVIS-screens redundancy; chat stays in the Assistant screen). Step 5 = inline next-step cues on kanban cards (Applied>7d shows 'Follow up', interview-matched shows 'Prep'). Each step ships alone, tested under SAFE_MODE, no commit until user says. Started with Step 2.
+
 ### project_whatsapp_engine_oom _(via claude-code)_
 "WhatsApp engine OOM on Render — root cause is glibc malloc-arena ratcheting, not a single spike"
 
@@ -70,6 +73,19 @@ A single PDF is NOT the killer — even a 52MB scanned PDF only peaks ~190MB (sc
 **Verify deploy:** startup log should show "✅ malloc arenas capped at 2"; watch `GET /health/mem` stays flat over a day instead of ratcheting.
 
 **Diagnostic probe added (uncommitted):** `_rss_mb()`/`_mem_probe()` helpers + `GET /health/mem` endpoint + MEM[...] log lines around upload_pdf, run_morning_digest, and the privachat proxy. Keep to verify the fix — idle /health/mem should stay flat. See [[feedback_local_test_before_render]] and [[feedback_no_commit_without_explicit_go]].
+
+### project_shared_memory_bridge _(via claude-code)_
+How Claude Code and Antigravity share memory in this repo (shared_memory.py + AGENTS.md)
+
+Claude Code and Antigravity share one memory store in this repo (built + committed `ed87c44`, 2026-07-05).
+
+**Mechanism:** `shared_memory.py` keeps a `shared_memory` table in the LOCAL `agent_memory.db` and renders `AGENTS.md`. Antigravity reads `AGENTS.md` natively; Claude Code reads it via `CLAUDE.md`'s `@AGENTS.md` import. A SessionStart hook re-renders it each session.
+
+**Key gotcha:** the two SQLite MCP servers are NOT a shared channel — Claude's `mcp_sqlite_server.py` does `load_dotenv()` → hits prod Turso, while Antigravity's `server-sqlite` reads the local file. The shared channel is the `AGENTS.md` FILE, not the DB.
+
+**How to apply:** when the user asks to remember something for both tools (or just says "remember this" while working across both IDEs), run:
+`python3 shared_memory.py add --key <slug> --category <user|feedback|project|reference|decision> --source claude-code "the fact"`
+This upserts and regenerates AGENTS.md. Use `list`/`rm <key>` to review/forget. See [[feedback_safe_mode_for_local_tests]] for why local == agent_memory.db here.
 
 ### project_repo_skills _(via claude-code)_
 The repo has Claude Code skills under .claude/skills/ encoding project workflows — mention/use them when relevant

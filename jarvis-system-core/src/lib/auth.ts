@@ -61,3 +61,7 @@ export function installFetchInterceptor() {
     return res;
   };
 }
+
+export function getToken(): string | null {
+  return token;
+}

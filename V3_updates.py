@@ -128,9 +128,15 @@ from application_tracker import (
     VALID_STATUSES as APPLICATION_STATUSES,
 )
 from followup_agent import (
+    init_followup_tables,
     list_followup_candidates,
     draft_followup,
     send_followup,
+    run_auto_followups,
+    list_followup_drafts,
+    get_open_draft,
+    store_followup_draft,
+    mark_draft_status,
 )
 from workspace_notes import (
     init_workspace_notes_tables,
@@ -743,6 +749,7 @@ init_resume_ats_tables()
 init_workspace_notes_tables()
 init_networking_crm_tables()
 init_profile_freshness_tables()
+init_followup_tables()
 
 
 # ==========================================
@@ -794,6 +801,15 @@ async def dispatch_automation(action_type: str, payload: dict):
             send_whatsapp_chunked("📅 *Upcoming on your calendar:*\n\n" + "\n".join(lines))
     else:
         print(f"⚠️ [dispatch_automation] Unknown action_type: {action_type}")
+
+
+async def _auto_followups_job():
+    """Scheduler/cron entry: draft follow-ups for stale applications (never sends)."""
+    try:
+        prof = await get_job_profile()
+    except Exception:
+        prof = None
+    return await run_auto_followups(call_llm, profile=prof, notify_fn=_store_notification)
 
 
 # ==========================================
@@ -856,6 +872,8 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(scan_application_emails, "cron", hour=21, minute=0, args=[call_llm, _store_notification])
         # Daily bill/deadline check (morning) — warns about anything due within its notify window.
         scheduler.add_job(check_bills_and_notify, "cron", hour=8, minute=0, args=[_store_notification])
+        # Daily auto-draft of follow-ups for stale applications (never sends — just readies them).
+        scheduler.add_job(_auto_followups_job, "cron", hour=9, minute=0)
         scheduler.start()
         restored = await register_all_active_reminders(scheduler, send_whatsapp_chunked)
         automations_restored = await register_all_active_automations(scheduler, dispatch_automation)
@@ -908,7 +926,8 @@ async def _auth_gate(request: Request, call_next):
     if AUTH_REQUIRED:
         path = request.url.path
         if any(path.startswith(p) for p in _PROTECTED_PREFIXES):
-            if not _verify_token(request.headers.get("X-Jarvis-Token", "")):
+            token = request.headers.get("X-Jarvis-Token") or request.query_params.get("token") or ""
+            if not _verify_token(token):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
     return await call_next(request)
 
@@ -3391,6 +3410,16 @@ async def cron_bills(token: str = ""):
     return JSONResponse({"status": "bills checked", "alerts": sent}, status_code=202)
 
 
+@app.post("/cron/followups")
+async def cron_followups(token: str = ""):
+    """Daily: auto-draft follow-ups for stale applications (never sends — readies for review)."""
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    res = await _auto_followups_job()
+    await _log_job("auto-followups", "completed", f"drafted {res.get('drafted', 0)}")
+    return JSONResponse({"status": "followups drafted", **res}, status_code=202)
+
+
 @app.post("/cron/learn-patterns")
 async def cron_learn_patterns(token: str = ""):
     """Recompute all learned-pattern categories from current history. Independently callable
@@ -5594,16 +5623,35 @@ async def api_response_analytics():
 # ── Recruiter follow-up (stale 'applied' cards → drafted follow-up → 1-tap Gmail send) ──
 @app.get("/api/followups")
 async def api_followups():
-    return JSONResponse({"candidates": await list_followup_candidates()})
+    """Stale candidates, each tagged `ready` if a follow-up has already been auto-drafted for it."""
+    cands = await list_followup_candidates()
+    ready = {d["app_id"] for d in await list_followup_drafts()}
+    for c in cands:
+        c["ready"] = c["id"] in ready
+    return JSONResponse({"candidates": cands})
 
 
 @app.post("/api/followups/{app_id}/draft")
 async def api_followup_draft(app_id: int):
+    """Return the auto-drafted follow-up if one is waiting (instant); otherwise draft it now
+    and store it so it's reusable."""
+    existing = await get_open_draft(app_id)
+    if existing:
+        card = await get_application(app_id)
+        return JSONResponse({
+            "ok": True, "subject": existing["subject"], "body": existing["body"],
+            "recipient": existing["recipient"],
+            "card": {"id": app_id, "title": (card or {}).get("title"),
+                     "company": (card or {}).get("company")},
+        })
     try:
         prof = await get_job_profile()
     except Exception:
         prof = None
-    return JSONResponse(await draft_followup(app_id, call_llm, profile=prof))
+    res = await draft_followup(app_id, call_llm, profile=prof)
+    if res.get("ok"):
+        await store_followup_draft(app_id, res.get("recipient"), res.get("subject"), res.get("body"))
+    return JSONResponse(res)
 
 
 @app.post("/api/followups/send")
@@ -5613,13 +5661,19 @@ async def api_followup_send(request: Request):
     to = (body.get("to") or "").strip()
     subject = (body.get("subject") or "").strip()
     text = body.get("body") or ""
+    app_id = body.get("app_id")
     if SAFE_MODE:
+        if app_id:
+            await mark_draft_status(int(app_id), "sent")
         return JSONResponse({"ok": True, "message": f"[SAFE_MODE] Would send to {to}."})
 
     async def _send(to_addr, subj, b):
         return await send_composed_email(to_addr, subj, b)
 
-    return JSONResponse(await send_followup(to, subject, text, _send))
+    res = await send_followup(to, subject, text, _send)
+    if res.get("ok") and app_id:
+        await mark_draft_status(int(app_id), "sent")
+    return JSONResponse(res)
 
 
 @app.get("/api/applications/{app_id}/emails")

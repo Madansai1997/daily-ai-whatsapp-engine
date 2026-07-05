@@ -123,6 +123,50 @@ async def update_contact(cid: int, data: dict) -> dict:
     return await get_contact(cid)
 
 
+async def upsert_contact_by_email(email: str, name: str = None, company: str = None,
+                                  role: str = None, relationship: str = "recruiter",
+                                  touch: bool = False, note: str = None) -> tuple:
+    """Insert or update a contact keyed by e-mail (case-insensitive) — the entry point for
+    auto-captured contacts from the inbox scan, so re-seeing the same person never duplicates.
+    Only fills blank fields on an existing row (never clobbers what the user typed).
+    Returns (contact_id, created: bool)."""
+    email = (email or "").strip().lower()
+    if not email:
+        return None, False
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM contacts WHERE lower(email) = ?", (email,))
+        row = await cur.fetchone()
+        if row:
+            row = dict(row)
+            sets, args = [], []
+            if name and (not row.get("name") or row["name"] == "Unnamed"):
+                sets.append("name = ?"); args.append(name.strip())
+            if company and not (row.get("company") or "").strip():
+                sets.append("company = ?"); args.append(company.strip())
+            if role and not (row.get("role") or "").strip():
+                sets.append("role = ?"); args.append(role.strip())
+            if touch:
+                sets.append("last_contacted = ?"); args.append(now)
+            if note and note not in (row.get("notes") or ""):
+                merged = ((row.get("notes") or "") + ("\n" if row.get("notes") else "") + note).strip()
+                sets.append("notes = ?"); args.append(merged)
+            if sets:
+                sets.append("updated_at = ?"); args.append(now)
+                args.append(row["id"])
+                await db.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id = ?", args)
+                await db.commit()
+            return row["id"], False
+        cur = await db.execute(
+            """INSERT INTO contacts (name, role, company, email, relationship, follow_up_days,
+               last_contacted, notes, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            ((name or "Unnamed").strip(), (role or "").strip(), (company or "").strip(),
+             email, relationship, 14, now if touch else None, (note or "").strip(), now, now))
+        await db.commit()
+        return cur.lastrowid, True
+
+
 async def mark_contacted(cid: int) -> dict:
     """Stamp last_contacted = now (resets the follow-up clock)."""
     now = datetime.now(timezone.utc).isoformat()
