@@ -206,6 +206,7 @@ from resume_ats_agent import (
     save_resume_template,
     get_resume_template,
     audit_resume,
+    auto_fix_resume,
     get_saved_audit,
     save_master_docx,
     get_master_docx,
@@ -6145,6 +6146,14 @@ async def resume_audit_run_api():
     return JSONResponse({"ok": True, "audit": result})
 
 
+@app.post("/resume/auto-fix")
+async def resume_auto_fix_api():
+    """One-tap: apply the deterministic ATS fixes (single-column + SUMMARY heading) to the master
+    résumé text and re-audit. Quantification is never auto-invented — it's returned as a count of
+    bullets that still need real numbers from the user."""
+    return JSONResponse(await auto_fix_resume(call_llm))
+
+
 # ── Apply ATS changes to the original .docx (format-preserving, Option A) ─────
 @app.get("/resume/docx-status")
 async def resume_docx_status_api():
@@ -8343,3 +8352,4 @@ if __name__ == "__main__":
             #await db.execute("DELETE FROM sent_history WHERE timestamp LIKE ?", (f"{today}%",))
             #await db.commit()
         #return {"status": f"All data for {today} cleared successfully"}
+        

@@ -483,11 +483,17 @@ def _score(text: str) -> dict:
     else:
         date_pts = 12
 
-    # 4) Quantification / metrics (26) — the biggest lever
+    # 4) Quantification / metrics (26) — the biggest lever. Trust explicit • bullets whenever
+    # ANY exist; only fall back to the indented-line heuristic for tab-bulleted résumés with none.
     bullets = [l.strip() for l in lines if _R_BULLET.match(l)]
-    if len(bullets) < 3:
-        bullets = [l.strip() for l in lines if l.strip() and len(l.split()) >= 6
-                   and not _is_heading(l) and not _R_EMAIL.search(l)]
+    if not bullets:
+        # Résumés that indent bullets with tabs (no • char): a real achievement bullet is an
+        # INDENTED long sentence — this excludes col-0 lines (summary, skills, headings, contact),
+        # "Category: …" skills lines, and "Title | tech-stack" project headers.
+        bullets = [l.strip() for l in lines
+                   if re.match(r"^\s+\S", l) and len(l.split()) >= 6
+                   and not _is_heading(l) and "|" not in l
+                   and not re.match(r"^\s*[\w&/ ]{2,24}:\s", l)]
     total_b = len(bullets)
     with_m = sum(1 for b in bullets if re.search(r"\d", b))
     ratio_m = (with_m / total_b) if total_b else 0.0
@@ -521,8 +527,10 @@ def _score(text: str) -> dict:
 
     # 7) ATS parse-safety (14)
     # A single " | "-separated line (common contact line) is ATS-safe — only treat pipes as a
-    # table when they span multiple rows.
-    col = sum(1 for l in lines if l.count("\t") >= 2 or re.search(r"\S {3,}\S.* {3,}\S", l))
+    # table when they span multiple rows. Leading indentation (tabs/spaces at line start) is fine;
+    # only tabs/large gaps BETWEEN content (real columns, e.g. "University⇥Date") count.
+    col = sum(1 for l in lines
+              if "\t" in l.lstrip() or re.search(r"\S {3,}\S.* {3,}\S", l.lstrip()))
     box_lines = sum(1 for l in lines if "│" in l or "┃" in l)
     pipe_lines = sum(1 for l in lines if l.count("|") >= 2)
     bad = col + box_lines + (pipe_lines if pipe_lines >= 2 else 0)
@@ -623,6 +631,80 @@ async def get_saved_audit() -> dict:
         return a
     except Exception:
         return None
+
+
+# ── One-tap auto-fix for the deterministic ATS points ───────────────────────
+_SUMMARY_HEAD_RE = re.compile(r"^\s*(professional\s+summary|summary|profile|objective|about me)\s*$", re.I | re.M)
+_SECTION_HEAD_RE = re.compile(r"^\s*(skills|professional experience|experience|employment|education|projects?)\s*:?\s*$", re.I)
+
+
+def auto_fix_text(resume: str) -> tuple:
+    """Apply the deterministic, no-fabrication fixes to the résumé TEXT and report what changed:
+      • single-column — inline internal tab 'columns' (e.g. University⇥Date) and convert
+        tab-indented bullets to '• ' bullets, dedent headers (ATS parse-safety points).
+      • add a 'SUMMARY' heading above the profile paragraph if one is missing (sections points).
+    Quantification is NOT touched — real numbers can't be invented. Returns (new_text, changes)."""
+    changes = []
+    out = []
+    col_fixed = bullet_fixed = dedented = 0
+    for raw in resume.split("\n"):
+        lead = re.match(r"^[\t ]*", raw).group(0)
+        body = raw[len(lead):]
+        if "\t" in body:                       # internal tab = a column → inline it
+            body = re.sub(r"[\t]+ *", " — ", body).rstrip()
+            col_fixed += 1
+        if lead.count("\t") == 1 and body and body[:1].isupper() and len(body.split()) >= 5 \
+                and not body.rstrip().endswith(":") and "|" not in body:
+            out.append("• " + body)            # single-tab achievement → real bullet
+            bullet_fixed += 1
+        elif lead.count("\t") >= 1 and body:
+            out.append(body)                   # dedent headers / titles (drop leading tabs)
+            dedented += 1
+        elif "\t" in raw:                       # any residual tab elsewhere
+            out.append(body if body else raw.replace("\t", " "))
+        else:
+            out.append(raw)
+    text = "\n".join(out)
+    if col_fixed:
+        changes.append(f"Inlined {col_fixed} tab-column line(s) into a single column.")
+    if bullet_fixed:
+        changes.append(f"Converted {bullet_fixed} tab-indented line(s) to • bullets.")
+    if dedented and not bullet_fixed:
+        changes.append(f"Removed tab indentation from {dedented} line(s).")
+
+    # SUMMARY heading — insert above the first long profile paragraph if there's no heading.
+    if not _SUMMARY_HEAD_RE.search(text):
+        lines = text.split("\n")
+        insert_at = None
+        for i, l in enumerate(lines):
+            s = l.strip()
+            if _SECTION_HEAD_RE.match(s):
+                break
+            if len(s.split()) >= 20 and "@" not in s and "|" not in s:
+                insert_at = i
+                break
+        if insert_at is not None:
+            lines[insert_at:insert_at] = ["SUMMARY", ""]
+            text = "\n".join(lines)
+            changes.append("Added a 'SUMMARY' heading above your profile paragraph.")
+
+    return text, changes
+
+
+async def auto_fix_resume(call_llm_fn) -> dict:
+    """Apply auto_fix_text to the master résumé, save it, and re-audit. Returns the new audit +
+    what changed + how many bullets still need numbers (which only the user can supply)."""
+    resume = await get_resume_template()
+    if not (resume or "").strip():
+        return {"ok": False, "error": "No master résumé saved yet."}
+    new_text, changes = auto_fix_text(resume)
+    if changes:
+        await save_resume_template(new_text)
+    audit = await audit_resume(call_llm_fn)
+    q = audit.get("quantification", {}) if isinstance(audit, dict) else {}
+    still_unquantified = max(0, (q.get("total_bullets", 0) or 0) - (q.get("bullets_with_metrics", 0) or 0))
+    return {"ok": True, "changes": changes, "audit": audit,
+            "unquantified_bullets": still_unquantified}
 
 
 # ── Original / tailored .docx storage (base64 in Turso) ─────────────────────

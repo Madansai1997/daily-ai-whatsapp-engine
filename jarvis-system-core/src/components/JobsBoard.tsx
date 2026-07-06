@@ -181,6 +181,8 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
   const auditResumeFileRef = useRef<HTMLInputElement>(null);
   const [activeAtsAppId, setActiveAtsAppId] = useState<number | null>(null);
   const [auditApplying, setAuditApplying] = useState(false);
+  const [autoFixing, setAutoFixing] = useState(false);
+  const [autoFixMsg, setAutoFixMsg] = useState("");
   const [selectedAuditKeywords, setSelectedAuditKeywords] = useState<string[]>([]);
   const [selectedGrammar, setSelectedGrammar] = useState<any[]>([]);
 
@@ -1081,6 +1083,27 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       setAudit(null);
     } finally {
       setAuditFetching(false);
+    }
+  };
+
+  const autoFixResume = async () => {
+    setAutoFixing(true);
+    setAuditError("");
+    setAutoFixMsg("");
+    try {
+      const res = await fetch("/resume/auto-fix", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      if (data.audit) setAudit(data.audit);
+      const parts: string[] = [];
+      if (Array.isArray(data.changes) && data.changes.length) parts.push(data.changes.join(" "));
+      else parts.push("Formatting already clean — nothing to auto-fix.");
+      if (data.unquantified_bullets > 0) parts.push(`${data.unquantified_bullets} bullet(s) still need real numbers — only you can add those.`);
+      setAutoFixMsg(parts.join(" "));
+    } catch (e) {
+      setAuditError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAutoFixing(false);
     }
   };
 
@@ -2750,6 +2773,20 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                         )}
                       </button>
                     )}
+
+                    {/* Always-visible one-tap fix for the deterministic points */}
+                    <button
+                      onClick={autoFixResume}
+                      disabled={autoFixing || auditRunning || resumeUploading}
+                      className="px-4 py-2 rounded-lg text-xs font-bold font-mono text-[#0a0e1a] bg-[#a3e635] hover:bg-[#bef264] transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                      title="Auto-apply the fixable ATS items: single-column layout + a SUMMARY heading, then re-score"
+                    >
+                      {autoFixing ? (
+                        <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> AUTO-FIXING…</>
+                      ) : (
+                        <><Sparkles className="w-3.5 h-3.5" /> AUTO-FIX</>
+                      )}
+                    </button>
                   </div>
 
                   <button
@@ -2759,6 +2796,11 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                   >
                     {auditRunning ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> RE-AUDITING…</> : <><RefreshCw className="w-3.5 h-3.5" /> RE-RUN AUDIT</>}
                   </button>
+                  {autoFixMsg && (
+                    <div className="w-full text-[11px] font-mono text-[#a3e635] bg-[#a3e635]/5 border border-[#a3e635]/15 rounded-lg px-3 py-2">
+                      ✨ {autoFixMsg}
+                    </div>
+                  )}
                 </div>
               )}
             </motion.div>
