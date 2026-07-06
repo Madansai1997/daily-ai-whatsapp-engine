@@ -205,6 +205,7 @@ from resume_ats_agent import (
     count_unviewed as count_ats_unviewed,
     save_resume_template,
     get_resume_template,
+    delete_resume_template,
     audit_resume,
     auto_fix_resume,
     get_saved_audit,
@@ -5976,6 +5977,13 @@ async def resume_upload_api(request: Request):
         return JSONResponse({"ok": False, "error": "empty resume"}, status_code=400)
     await save_resume_template(content)
     return JSONResponse({"ok": True})
+
+
+@app.post("/resume/delete")
+async def resume_delete_api():
+    """Wipe the stored master résumé (text + original .docx + cached audit) for a clean
+    re-upload. Per-job ATS analyses are kept. The console guards this behind a confirm."""
+    return JSONResponse(await delete_resume_template())
 
 
 def _extract_resume_text(filename: str, data: bytes) -> str:

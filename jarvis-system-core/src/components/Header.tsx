@@ -106,6 +106,7 @@ export default function Header({
               { screen: ScreenId.Bills, label: "BILLS", active: activeScreen === ScreenId.Bills },
               { screen: ScreenId.Assistant, label: "JARVIS", active: activeScreen === ScreenId.Assistant },
               { screen: ScreenId.Terminal, label: "TERMINAL", active: activeScreen === ScreenId.Terminal },
+              { screen: ScreenId.Help, label: "HELP", active: activeScreen === ScreenId.Help },
             ].map((item) => (
               <a
                 key={item.label}

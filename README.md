@@ -74,6 +74,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `f3cc0e1` feat(ats): recruiter-read feedback panel + deterministic per-JD score _(2026-07-06)_
 - `fddc490` feat(ats): one-tap AUTO-FIX for the deterministic résumé points + fairer scorer _(2026-07-06)_
 - `cfc9738` fix(ats): deterministic rule-based résumé score (ends the audit thrash) _(2026-07-06)_
 - `6c30c53` feat(ats): support checkable grammar list with date-change confirmation popups _(2026-07-06)_
@@ -85,7 +86,6 @@ npm install && npm run build     # served by the engine at /console
 - `44297ff` fix(ats): make resume text extraction robust to invalid formats _(2026-07-05)_
 - `660b424` feat(ats): add resume download and audit upload/auto-rescan _(2026-07-05)_
 - `6dfbfd3` fix(ats): resume upload race condition and audit determinism _(2026-07-05)_
-- `540049d` feat(ats): domain alignment check and safety auto-apply override _(2026-07-05)_
 <!-- /AUTO:changelog -->
 
 ---

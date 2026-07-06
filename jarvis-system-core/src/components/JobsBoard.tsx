@@ -206,6 +206,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
   const [auditApplying, setAuditApplying] = useState(false);
   const [autoFixing, setAutoFixing] = useState(false);
   const [autoFixMsg, setAutoFixMsg] = useState("");
+  const [deletingResume, setDeletingResume] = useState(false);
   const [selectedAuditKeywords, setSelectedAuditKeywords] = useState<string[]>([]);
   const [selectedGrammar, setSelectedGrammar] = useState<any[]>([]);
 
@@ -1169,6 +1170,27 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       setAuditError(e instanceof Error ? e.message : String(e));
     } finally {
       setAutoFixing(false);
+    }
+  };
+
+  const deleteResume = async () => {
+    if (!window.confirm(
+      "Delete your stored master résumé?\n\nThis wipes the saved text, the original .docx and the cached audit so you can upload a fresh version. Your tracked applications and per-job ATS analyses are NOT affected.\n\nContinue?"
+    )) return;
+    setDeletingResume(true);
+    setAuditError("");
+    setAutoFixMsg("");
+    try {
+      const res = await fetch("/resume/delete", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      setAudit(null);
+      setHasDocx(false);
+      setResumeContent("");
+    } catch (e) {
+      setAuditError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDeletingResume(false);
     }
   };
 
@@ -3005,6 +3027,19 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                         <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> AUTO-FIXING…</>
                       ) : (
                         <><Sparkles className="w-3.5 h-3.5" /> AUTO-FIX</>
+                      )}
+                    </button>
+
+                    <button
+                      onClick={deleteResume}
+                      disabled={deletingResume || auditRunning || resumeUploading || autoFixing}
+                      className="px-4 py-2 rounded-lg text-xs font-semibold font-mono text-[#ffb4ab] bg-[#ffb4ab]/10 border border-[#ffb4ab]/30 hover:bg-[#ffb4ab]/20 transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                      title="Delete the stored master résumé (text + .docx + cached audit) so you can upload a fresh version. Applications and per-job ATS analyses are kept."
+                    >
+                      {deletingResume ? (
+                        <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> DELETING…</>
+                      ) : (
+                        <><Trash2 className="w-3.5 h-3.5" /> DELETE RÉSUMÉ</>
                       )}
                     </button>
                   </div>

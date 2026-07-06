@@ -166,6 +166,28 @@ async def get_resume_template(domain: str = DEFAULT_DOMAIN) -> str:
     return row["content"] if row else ""
 
 
+async def delete_resume_template(domain: str = DEFAULT_DOMAIN) -> dict:
+    """Wipe the stored master résumé for a clean re-upload: the text template, the original
+    .docx, and the cached standalone audit. Per-job ATS analyses are left intact (they're tied
+    to individual jobs). Returns what was removed."""
+    removed = {"template": False, "docx": False, "audit": False}
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM user_resume_templates WHERE domain = ?", (domain,))
+        removed["template"] = bool(getattr(cur, "rowcount", 0))
+        try:
+            cur = await db.execute("DELETE FROM resume_docx WHERE id = 1")
+            removed["docx"] = bool(getattr(cur, "rowcount", 0))
+        except Exception:
+            pass
+        try:
+            cur = await db.execute("DELETE FROM resume_audit WHERE id = 1")
+            removed["audit"] = bool(getattr(cur, "rowcount", 0))
+        except Exception:
+            pass
+        await db.commit()
+    return {"ok": True, "removed": removed}
+
+
 # ── Analysis ──────────────────────────────────────────────────────────────
 def _parse_json_object(raw: str) -> dict:
     """Extract the first JSON object from an LLM response, tolerating fences/prose."""
@@ -727,7 +749,14 @@ async def audit_resume(call_llm_fn) -> dict:
                                 max_tokens=1200, temperature=0.0)
         sug = _parse_json_object(raw) or {}
         if isinstance(sug.get("grammar"), list):
-            audit["grammar"] = sug["grammar"][:8]
+            # Drop no-op "corrections" where the LLM's suggestion is identical to the original
+            # (ignoring whitespace) — they pad the list and make a clean résumé look broken.
+            def _norm(s):
+                return " ".join(str(s or "").split())
+            real = [g for g in sug["grammar"]
+                    if isinstance(g, dict) and _norm(g.get("original")) != _norm(g.get("suggestion"))
+                    and _norm(g.get("original")) and _norm(g.get("suggestion"))]
+            audit["grammar"] = real[:8]
         if isinstance(sug.get("keywords_to_add"), list):
             audit["keywords_to_add"] = sug["keywords_to_add"][:10]
     except Exception as e:
