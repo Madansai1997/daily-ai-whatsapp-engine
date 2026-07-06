@@ -213,6 +213,8 @@ from resume_ats_agent import (
     has_master_docx,
     save_tailored_docx,
     get_tailored_docx,
+    recruiter_review as run_recruiter_review,
+    get_recruiter_review,
 )
 try:
     from resume_editor import apply_rewrites, append_bullet
@@ -6087,6 +6089,47 @@ async def ats_get_api(job_ref: str):
         return JSONResponse({"error": "no analysis"}, status_code=404)
     await mark_ats_viewed(job_ref)
     return JSONResponse(a)
+
+
+@app.post("/applications/{app_id}/recruiter-review")
+async def application_recruiter_review_api(app_id: int, request: Request):
+    """Run (or refresh) the recruiter's-eye feedback for one application — a separate on-demand
+    LLM call from the ATS scorer (six-second test, strengths, red flags, learning roadmap).
+    Same JD-needed handling as the ATS endpoint."""
+    app_row = await get_application(app_id)
+    if not app_row:
+        return JSONResponse({"error": "application not found"}, status_code=404)
+    pasted_jd = ""
+    try:
+        body = await request.json()
+        pasted_jd = (body.get("job_description") or "").strip()
+    except Exception:
+        pasted_jd = ""
+    if pasted_jd:
+        await update_application_description(app_id, pasted_jd)
+    description = pasted_jd or (app_row.get("description") or "").strip()
+    if not description:
+        return JSONResponse({
+            "needs_jd": True,
+            "title": app_row.get("title"),
+            "company": app_row.get("company"),
+            "message": "This job has no description saved. Paste the job posting so I can give recruiter feedback.",
+        })
+    job = {"key": app_row.get("job_key") or f"app:{app_id}", "title": app_row.get("title"),
+           "company": app_row.get("company"), "location": app_row.get("location"),
+           "description": description}
+    result = await run_recruiter_review(job, call_llm)
+    if result.get("error"):
+        return JSONResponse({"error": result["error"]}, status_code=400)
+    return JSONResponse(result)
+
+
+@app.get("/ats/{job_ref}/recruiter-review")
+async def recruiter_review_get_api(job_ref: str):
+    r = await get_recruiter_review(job_ref)
+    if not r:
+        return JSONResponse({"error": "no review"}, status_code=404)
+    return JSONResponse(r)
 
 
 @app.get("/ats/{job_ref}/download")

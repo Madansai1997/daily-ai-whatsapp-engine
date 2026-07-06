@@ -99,6 +99,25 @@ interface AtsErrorResult {
   error: string;
 }
 
+interface RecruiterReview {
+  role_fit_score: number;
+  verdict: string;
+  six_second_test: {
+    role_clear: boolean;
+    skills_clear: boolean;
+    impact_clear: boolean;
+    note: string;
+  };
+  strengths: string[];
+  red_flags: string[];
+  learning_roadmap: {
+    skill: string;
+    importance: "high" | "medium" | "low";
+    reason: string;
+    est_time: string;
+  }[];
+}
+
 /* ---- Visual config per status (preserves original HUD styling) ---- */
 
 const STATUS_CONFIG: Record<
@@ -166,10 +185,14 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [activeTab, setActiveTab] = useState<"keyword" | "star" | "error">("keyword");
+  const [activeTab, setActiveTab] = useState<"keyword" | "star" | "recruiter" | "error">("keyword");
   const [atsResult, setAtsResult] = useState<AtsResult | null>(null);
   const [atsLoadingId, setAtsLoadingId] = useState<number | null>(null);
   const [docLoading, setDocLoading] = useState(false);
+  // Recruiter feedback — separate on-demand LLM call, lazy-loaded when its tab opens.
+  const [recruiterReview, setRecruiterReview] = useState<RecruiterReview | null>(null);
+  const [recruiterLoading, setRecruiterLoading] = useState(false);
+  const [recruiterError, setRecruiterError] = useState<string | null>(null);
 
   // Résumé modal
   const [resumeOpen, setResumeOpen] = useState(false);
@@ -869,6 +892,9 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       }
       setAtsResult(data as AtsResult);
       setActiveAtsAppId(id);
+      // New analysis → clear any recruiter feedback from the previous job.
+      setRecruiterReview(null);
+      setRecruiterError(null);
       if (data?.domain_mismatch?.mismatched) {
         setActiveTab("error");
       } else {
@@ -880,6 +906,45 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       alert(`ATS analysis failed: ${e instanceof Error ? e.message : e}`);
     } finally {
       setAtsLoadingId(null);
+    }
+  };
+
+  /* ---- Recruiter feedback (separate on-demand call, lazy-loaded on its tab) ---- */
+  const openRecruiterTab = () => {
+    setActiveTab("recruiter");
+    if (recruiterReview || recruiterLoading || activeAtsAppId == null) return;
+    // Try the cached review first; if none, run a fresh one.
+    void loadRecruiterReview(activeAtsAppId, false);
+  };
+
+  const loadRecruiterReview = async (id: number, force: boolean) => {
+    setRecruiterLoading(true);
+    setRecruiterError(null);
+    try {
+      if (!force && atsResult) {
+        const cached = await fetch(`/ats/${encodeURIComponent(atsResult.job_ref)}/recruiter-review`);
+        if (cached.ok) {
+          setRecruiterReview((await cached.json()) as RecruiterReview);
+          return;
+        }
+      }
+      const res = await fetch(`/applications/${id}/recruiter-review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data: any = await res.json();
+      if (!res.ok || "error" in data || data?.needs_jd) {
+        setRecruiterError(
+          data?.message || data?.error || `Recruiter review failed (HTTP ${res.status})`
+        );
+        return;
+      }
+      setRecruiterReview(data as RecruiterReview);
+    } catch (e) {
+      setRecruiterError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRecruiterLoading(false);
     }
   };
 
@@ -1820,6 +1885,16 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                   >
                     STAR/XYZ PLAN
                   </button>
+                  <button
+                    onClick={openRecruiterTab}
+                    className={`px-6 py-2.5 border-b-2 font-semibold transition-all cursor-pointer ${
+                      activeTab === "recruiter"
+                        ? "border-[#8aebff] text-[#8aebff]"
+                        : "border-transparent text-[#859397] hover:text-[#dfe2f3]"
+                    }`}
+                  >
+                    RECRUITER READ
+                  </button>
                   {atsResult.domain_mismatch?.mismatched && (
                     <button
                       onClick={() => setActiveTab("error")}
@@ -1913,6 +1988,151 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                           </p>
                         </div>
                       ))
+                    )}
+                  </div>
+                )}
+
+                {activeTab === "recruiter" && (
+                  <div className="space-y-4 font-mono text-xs">
+                    {recruiterLoading && (
+                      <div className="flex items-center gap-2 text-[#8aebff] py-6 justify-center">
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        <span>Reading your résumé like a recruiter…</span>
+                      </div>
+                    )}
+                    {!recruiterLoading && recruiterError && (
+                      <div className="p-4 rounded-lg bg-[#ffb4ab]/10 border border-[#ffb4ab]/30 text-[#ffb4ab] space-y-3">
+                        <p>{recruiterError}</p>
+                        {activeAtsAppId != null && (
+                          <button
+                            onClick={() => loadRecruiterReview(activeAtsAppId, true)}
+                            className="px-3 py-1.5 rounded border border-[#ffb4ab]/40 hover:bg-[#ffb4ab]/10 transition-all cursor-pointer"
+                          >
+                            Retry
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {!recruiterLoading && !recruiterError && recruiterReview && (
+                      <>
+                        {/* Verdict + fit score */}
+                        <div className="p-4 bg-white/5 rounded-lg border border-white/5 flex items-start gap-4">
+                          <div className="flex flex-col items-center flex-shrink-0">
+                            <span className="text-3xl font-extrabold text-[#8aebff] leading-none">
+                              {recruiterReview.role_fit_score}
+                            </span>
+                            <span className="text-[9px] text-[#859397] uppercase tracking-widest mt-1">
+                              Fit
+                            </span>
+                          </div>
+                          <p className="text-[#dfe2f3] leading-relaxed self-center">
+                            {recruiterReview.verdict}
+                          </p>
+                        </div>
+
+                        {/* Six-second test */}
+                        <div className="p-4 bg-white/5 rounded-lg border border-white/5 space-y-2">
+                          <span className="text-[10px] uppercase tracking-wider text-[#859397]">
+                            6-Second Test
+                          </span>
+                          <div className="flex flex-wrap gap-3 pt-1">
+                            {([
+                              ["Role clear", recruiterReview.six_second_test?.role_clear],
+                              ["Skills clear", recruiterReview.six_second_test?.skills_clear],
+                              ["Impact clear", recruiterReview.six_second_test?.impact_clear],
+                            ] as [string, boolean][]).map(([label, ok]) => (
+                              <div key={label} className="flex items-center gap-1.5">
+                                {ok ? (
+                                  <CheckCircle2 className="w-4 h-4 text-[#8aebff]" />
+                                ) : (
+                                  <AlertCircle className="w-4 h-4 text-[#ffb4ab]" />
+                                )}
+                                <span className={ok ? "text-[#dfe2f3]" : "text-[#ffb4ab]"}>{label}</span>
+                              </div>
+                            ))}
+                          </div>
+                          {recruiterReview.six_second_test?.note && (
+                            <p className="text-[10px] text-[#859397] italic pt-1 leading-relaxed">
+                              {recruiterReview.six_second_test.note}
+                            </p>
+                          )}
+                        </div>
+
+                        {/* Strengths */}
+                        {recruiterReview.strengths?.length > 0 && (
+                          <div className="p-4 bg-[#8aebff]/5 rounded-lg border border-[#8aebff]/15 space-y-2">
+                            <span className="text-[10px] uppercase tracking-wider text-[#8aebff]">
+                              What stands out
+                            </span>
+                            <ul className="space-y-1.5">
+                              {recruiterReview.strengths.map((s, i) => (
+                                <li key={i} className="flex items-start gap-2 text-[#dfe2f3] leading-relaxed">
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-[#8aebff] mt-0.5 flex-shrink-0" />
+                                  {s}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {/* Red flags */}
+                        {recruiterReview.red_flags?.length > 0 && (
+                          <div className="p-4 bg-[#ffd6a3]/5 rounded-lg border border-[#ffd6a3]/15 space-y-2">
+                            <span className="text-[10px] uppercase tracking-wider text-[#ffd6a3]">
+                              What makes a recruiter hesitate
+                            </span>
+                            <ul className="space-y-1.5">
+                              {recruiterReview.red_flags.map((s, i) => (
+                                <li key={i} className="flex items-start gap-2 text-[#dfe2f3] leading-relaxed">
+                                  <AlertCircle className="w-3.5 h-3.5 text-[#ffd6a3] mt-0.5 flex-shrink-0" />
+                                  {s}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {/* Learning roadmap */}
+                        {recruiterReview.learning_roadmap?.length > 0 && (
+                          <div className="space-y-2">
+                            <span className="text-[10px] uppercase tracking-wider text-[#859397]">
+                              Skills to close the gap
+                            </span>
+                            {recruiterReview.learning_roadmap.map((r, i) => (
+                              <div
+                                key={i}
+                                className="p-3 bg-white/5 rounded-lg border border-white/5 flex items-start justify-between gap-3"
+                              >
+                                <div className="space-y-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[#dfe2f3] font-semibold">{r.skill}</span>
+                                    <span
+                                      className={`text-[9px] px-1.5 py-0.5 rounded uppercase border ${
+                                        r.importance === "high"
+                                          ? "text-[#ffb4ab] border-[#ffb4ab]/30 bg-[#ffb4ab]/10"
+                                          : r.importance === "medium"
+                                          ? "text-[#ffd6a3] border-[#ffd6a3]/30 bg-[#ffd6a3]/10"
+                                          : "text-[#859397] border-white/10 bg-white/5"
+                                      }`}
+                                    >
+                                      {r.importance}
+                                    </span>
+                                  </div>
+                                  <p className="text-[10px] text-[#859397] leading-relaxed">{r.reason}</p>
+                                </div>
+                                <span className="text-[10px] text-[#8aebff] whitespace-nowrap flex-shrink-0">
+                                  {r.est_time}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        <p className="text-[10px] text-[#859397] italic pt-1 leading-relaxed">
+                          Coaching only — this reads your résumé as a recruiter would. It never
+                          suggests fabricating experience.
+                        </p>
+                      </>
                     )}
                   </div>
                 )}

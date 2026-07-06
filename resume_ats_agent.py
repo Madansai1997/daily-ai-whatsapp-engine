@@ -25,37 +25,49 @@ DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "agent_memory.db"))
 DEFAULT_DOMAIN = "data_analyst"
 
 RESUME_ATS_PROMPT = (
-    "You are an ATS (Applicant Tracking System) optimization engine for a MID-LEVEL DATA "
+    "You are a senior technical recruiter and ATS parsing engine evaluating a MID-LEVEL DATA "
     "ANALYST. You are given the candidate's MASTER RESUME and a target JOB DESCRIPTION. "
-    "Return a STRICT JSON object only — no markdown, no prose before or after — with EXACTLY "
-    "this shape:\n"
+    "Return a STRICT JSON object only — no markdown, no prose before or after — EXACTLY this "
+    "shape (do NOT output any score field; the score is computed separately from your matrix):\n"
     "{\n"
-    '  "ats_score": <int 0-100: how well the CURRENT resume matches this JD>,\n'
     '  "keyword_matrix": {\n'
-    '    "required": [<hard skills/tools/keywords the JD explicitly requires>],\n'
-    '    "present":  [<of those required, the ones already in the resume>],\n'
-    '    "missing":  [<of those required, the ones absent from the resume>]\n'
+    '    "required": [<every hard skill/tool/keyword the JD explicitly asks for — languages, '
+    'databases, BI/viz tools, ETL, statistics, cloud, domain terms; deduped, canonical casing; '
+    "do NOT pad with skills the JD does not state>],\n"
+    '    "present":  [<of \'required\', the ones GENUINELY EVIDENCED in the resume — count a '
+    "skill present only if the resume shows it was actually USED in real work, not merely listed "
+    "in a skills line>],\n"
+    '    "missing":  [<of \'required\', the ones with no evidence in the resume>]\n'
     "  },\n"
     '  "domain_mismatch": {\n'
-    '    "mismatched": <boolean: true if the target job is in a completely different domain (like Cybersecurity, Web Dev, DevOps, HR, Marketing) and NOT suitable/aligned for a Data Analyst profile>,\n'
-    '    "reason": "<string: brief explanation if mismatched is true, else empty string>"\n'
+    '    "mismatched": <boolean: true ONLY if the JD is a different career track (Cybersecurity, '
+    "DevOps, QA, Web/Mobile Dev, HR, Sales, Marketing, SysAdmin) not aligned to a Data Analyst>,\n"
+    '    "reason": "<string: one line if mismatched is true, else empty string>"\n'
     "  },\n"
     '  "star_xyz_breakdown": [\n'
     '    {"section_name": "<company or project + which bullet>",\n'
-    '     "current_text": "<the exact existing bullet copied from the resume>",\n'
+    '     "current_text": "<the existing bullet copied VERBATIM from the resume>",\n'
     '     "optimized_text": "<the rewritten bullet>",\n'
-    '     "issue": "<short: what was weak, e.g. no quantifiable result / missing tool keyword>"}\n'
+    '     "issue": "<the weakness: \'no quantified result\' | \'weak action verb\' | \'JD keyword '
+    "the candidate genuinely used but didn't name' | 'buries the impact'>\"}\n"
     "  ]\n"
     "}\n\n"
     "DOMAIN ALIGNMENT RULE:\n"
-    "- Check if the target job is in a completely different domain than Data Analysis (such as Cybersecurity, QA, DevOps, SysAdmin, Sales, Marketing, etc.). If it is a domain mismatch, you MUST set 'domain_mismatch.mismatched' to true, explain the reason in 'domain_mismatch.reason', set 'ats_score' to 0, and leave 'star_xyz_breakdown' completely empty []. Do NOT try to invent/fake domain-specific experience (e.g. security log analysis, brute force detection) under Data Analyst project titles.\n\n"
+    "- If the target job is a different career track than Data Analysis (Cybersecurity, QA, "
+    "DevOps, SysAdmin, Sales, Marketing, etc.), set 'domain_mismatch.mismatched' to true, explain "
+    "in 'domain_mismatch.reason', still fill keyword_matrix.required/present/missing normally, and "
+    "leave 'star_xyz_breakdown' completely empty []. NEVER invent/fake domain-specific experience "
+    "(e.g. security log analysis, brute-force detection) under Data Analyst project titles.\n\n"
     "REWRITING FRAMEWORKS:\n"
     "- EXPERIENCE bullets → Google XYZ: 'Accomplished [X], as measured by [Y], by doing [Z]'. "
-    "If a bullet lacks a quantifiable [Y], INSERT a realistic data-analyst metric (query runtime "
-    "reduction, dashboard adoption/usage, rows/records processed, data accuracy %, hours saved, "
-    "report cycle-time cut). Weave in JD keywords the candidate genuinely used.\n"
-    "- PROJECT blocks → STAR order (Situation, Task, Action, Result) and explicitly name the tech "
-    "stack applied (SQL, Python, Power BI, Tableau, Snowflake, BigQuery).\n\n"
+    "If a real bullet lacks a quantifiable [Y], INSERT ONE realistic data-analyst metric "
+    "consistent with its own scale (query runtime reduction, dashboard adoption/usage, "
+    "rows/records processed, data accuracy %, hours saved, report cycle-time cut). Lead with the "
+    "impact, then the how. Weave in JD keywords the candidate genuinely used.\n"
+    "- PROJECT blocks → STAR order (Situation, Task, Action, Result) and explicitly name the real "
+    "tech stack applied (SQL, Python, Power BI, Tableau, Snowflake, BigQuery).\n"
+    "- Replace weak verbs (helped, worked on, responsible for) with strong ones (built, "
+    "automated, reduced, delivered) — ONLY where it stays truthful.\n\n"
     "STRICT GUARDRAILS — violating these is failure:\n"
     "- CONSERVATIVE REWRITING ONLY. NEVER add a tool, technology, platform, or domain the "
     "candidate has NOT used (e.g. do not insert Oracle, SAP, stored procedures, or an industry "
@@ -121,6 +133,14 @@ def init_resume_ats_tables():
     cur.execute('''CREATE TABLE IF NOT EXISTS tailored_docx (
         job_ref TEXT PRIMARY KEY,
         filename TEXT, data_b64 TEXT, created_at TEXT
+    )''')
+    # Per-job recruiter feedback (six-second test + strengths/flags + learning roadmap).
+    # Separate on-demand LLM call from the ATS scorer — kept out of the hot path so the
+    # deterministic scorer stays lean; one cached JSON blob per job_ref.
+    cur.execute('''CREATE TABLE IF NOT EXISTS recruiter_review_cache (
+        job_ref TEXT PRIMARY KEY,
+        data TEXT,
+        created_at TEXT
     )''')
     conn.commit()
     conn.close()
@@ -228,6 +248,25 @@ def _reconcile_keyword_matrix(analysis: dict, resume: str) -> dict:
     return analysis
 
 
+def _score_from_matrix(analysis: dict) -> dict:
+    """Compute ats_score DETERMINISTICALLY from the reconciled keyword matrix instead of trusting
+    the LLM's free-floating number (which thrashed run-to-run). Score = % of the JD's required
+    keywords the résumé genuinely covers — same input always yields the same, explainable number.
+    Domain mismatch pins it to 0 (the role isn't a fit regardless of keyword overlap)."""
+    dm = analysis.get("domain_mismatch") or {}
+    if dm.get("mismatched"):
+        analysis["ats_score"] = 0
+        return analysis
+    km = analysis.get("keyword_matrix") or {}
+    required = km.get("required") or []
+    present = km.get("present") or []
+    if not required:
+        analysis["ats_score"] = 0  # no extractable JD requirements → nothing to match against
+        return analysis
+    analysis["ats_score"] = round(100 * len(present) / len(required))
+    return analysis
+
+
 async def analyze(job: dict, call_llm_fn, domain: str = DEFAULT_DOMAIN) -> dict:
     """Run the ATS analysis for one job against the master resume, cache it, and return the
     cache row (dict). `job` needs: job_key/id, title, company, location, description.
@@ -250,6 +289,7 @@ async def analyze(job: dict, call_llm_fn, domain: str = DEFAULT_DOMAIN) -> dict:
         return {"error": "Analysis failed — try again in a moment."}
 
     analysis = _reconcile_keyword_matrix(analysis, resume)
+    analysis = _score_from_matrix(analysis)
     txt = compile_txt(job, analysis)
     now = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
@@ -284,6 +324,92 @@ async def get_analysis(job_ref: str) -> dict:
     a["star_xyz_breakdown"] = json.loads(a.get("star_xyz_breakdown") or "[]")
     a["domain_mismatch"] = json.loads(a.get("domain_mismatch") or "{}")
     return a
+
+
+# ── Recruiter feedback (separate on-demand call, its own clean JSON) ─────────
+RECRUITER_PROMPT = (
+    "You are a seasoned technical recruiter and hiring manager for DATA ANALYST roles doing a "
+    "fast human read of a candidate's résumé against a target job description — the read a real "
+    "recruiter does in the first minute. Give honest, constructive coaching. Return a STRICT JSON "
+    "object ONLY — no markdown, no prose before or after — EXACTLY this shape:\n"
+    "{\n"
+    '  "role_fit_score": <int 0-100: your gut sense of how strong a candidate this résumé is for '
+    "THIS specific role, as a recruiter deciding whether to advance them>,\n"
+    '  "verdict": "<one honest sentence: would you advance this candidate, and why/why not>",\n'
+    '  "six_second_test": {\n'
+    '    "role_clear": <bool: within ~6 seconds, is the target role/level obvious>,\n'
+    '    "skills_clear": <bool: are the top relevant skills obvious at a glance>,\n'
+    '    "impact_clear": <bool: is quantified impact visible without hunting>,\n'
+    '    "note": "<one line on what the recruiter\'s eye lands on first, good or bad>"\n'
+    "  },\n"
+    '  "strengths": [<3-5 short phrases: what genuinely stands out FOR this JD>],\n'
+    '  "red_flags": [<0-5 short phrases: what would make a recruiter hesitate — vague bullets, no '
+    "metrics, keyword stuffing, gaps, buried impact; [] if none>],\n"
+    '  "learning_roadmap": [\n'
+    '    {"skill": "<a skill the JD wants that the résumé lacks>",\n'
+    '     "importance": "high|medium|low",\n'
+    '     "reason": "<why this role needs it>",\n'
+    '     "est_time": "<realistic self-study estimate, e.g. \'2-3 weeks\'>"}\n'
+    "  ]\n"
+    "}\n\n"
+    "RULES:\n"
+    "- Be truthful and specific to THIS résumé and JD — no generic filler that could apply to "
+    "anyone. Quote or paraphrase real bullets when you praise or critique.\n"
+    "- role_fit_score reflects the WHOLE candidate (experience, impact, relevance), not just "
+    "keyword overlap. A résumé can have keywords yet still read weak.\n"
+    "- learning_roadmap covers ONLY skills genuinely missing from the résumé; if the résumé "
+    "already covers the JD well, return a short or empty list. Never invent skills the JD "
+    "doesn't ask for.\n"
+    "- Never suggest fabricating experience. Coaching only.\n"
+    "Output JSON only."
+)
+
+
+async def recruiter_review(job: dict, call_llm_fn, domain: str = DEFAULT_DOMAIN) -> dict:
+    """On-demand recruiter's-eye feedback for one job vs the master résumé. Own LLM call, own
+    cached JSON — deliberately separate from analyze()'s deterministic ATS scorer. Returns the
+    parsed feedback dict (with 'created_at'), or {"error": ...}."""
+    resume = await get_resume_template(domain)
+    if not resume:
+        return {"error": "No master resume saved yet. Upload your resume first."}
+    jd = (job.get("description") or "").strip()
+    if not jd:
+        return {"error": "This job has no description text to review against."}
+    job_ref = str(job.get("key") or job.get("job_ref") or job.get("id") or job.get("url") or job.get("title"))
+    user = (f"MASTER RESUME:\n{resume}\n\n"
+            f"TARGET JOB — {job.get('title','')} @ {job.get('company','')} ({job.get('location','')}):\n{jd[:4000]}")
+    try:
+        raw = await call_llm_fn(RECRUITER_PROMPT, user, max_tokens=1600, temperature=0.2)
+        review = _parse_json_object(raw)
+    except Exception as e:
+        print(f"⚠️ [resume_ats] recruiter review failed: {e}")
+        return {"error": "Recruiter review failed — try again in a moment."}
+    now = datetime.now(timezone.utc).isoformat()
+    review["created_at"] = now
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO recruiter_review_cache (job_ref, data, created_at) VALUES (?,?,?)
+               ON CONFLICT(job_ref) DO UPDATE SET data=excluded.data, created_at=excluded.created_at""",
+            (job_ref, json.dumps(review), now))
+        await db.commit()
+    return review
+
+
+async def get_recruiter_review(job_ref: str) -> dict:
+    """Return the cached recruiter feedback for a job_ref, or None if none stored yet."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT data, created_at FROM recruiter_review_cache WHERE job_ref = ?", (str(job_ref),))
+        row = await cur.fetchone()
+    if not row:
+        return None
+    try:
+        review = json.loads(row["data"] or "{}")
+    except Exception:
+        return None
+    review["created_at"] = row["created_at"]
+    return review
 
 
 async def get_scores_map(keys=None) -> dict:
