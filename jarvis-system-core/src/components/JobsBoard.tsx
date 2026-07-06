@@ -2491,6 +2491,29 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                       </div>
                     )}
 
+                    {/* Score breakdown — deterministic, so fixing an item raises this and keeps it up */}
+                    {Array.isArray(audit.breakdown) && audit.breakdown.length > 0 && (
+                      <div>
+                        <h4 className="text-xs font-bold font-mono uppercase tracking-widest text-[#859397] mb-2">Where your score comes from</h4>
+                        <div className="space-y-1.5">
+                          {audit.breakdown.map((b: { criterion: string; score: number; max: number }) => {
+                            const pct = b.max ? Math.round((b.score / b.max) * 100) : 0;
+                            const tone = pct >= 85 ? "#5eead4" : pct >= 50 ? "#ffd6a3" : "#ffb4ab";
+                            return (
+                              <div key={b.criterion} className="flex items-center gap-2">
+                                <span className="w-36 shrink-0 text-xs text-[#dfe2f3] truncate" title={b.criterion}>{b.criterion}</span>
+                                <div className="flex-1 h-2 bg-white/5 rounded-full overflow-hidden">
+                                  <div className="h-full rounded-full" style={{ width: `${pct}%`, background: tone }} />
+                                </div>
+                                <span className="w-12 shrink-0 text-right text-[10px] font-mono" style={{ color: tone }}>{b.score}/{b.max}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <p className="text-[10px] font-mono text-[#859397] mt-2">Rule-based score — fix an item and it goes up and stays up (no more bouncing).</p>
+                      </div>
+                    )}
+
                     {/* Top priorities */}
                     {Array.isArray(audit.top_priorities) && audit.top_priorities.length > 0 && (
                       <div>

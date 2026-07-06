@@ -374,60 +374,230 @@ async def count_unviewed() -> int:
 # STANDALONE RÉSUMÉ AUDIT — a general, job-agnostic health check. No JD.
 # Acts like a senior recruiter + ATS specialist reviewing the résumé cold.
 # ============================================================================
-RESUME_AUDIT_PROMPT = (
-    "You are a SENIOR TECHNICAL RECRUITER and ATS (Applicant Tracking System) specialist with 15 "
-    "years hiring data/analytics talent. A candidate who has gotten ZERO interview calls in ~6 "
-    "months hands you their résumé with no job description. Audit it COLD and BRUTALLY HONESTLY — "
-    "your job is to explain why it isn't landing interviews and exactly how to fix it. Do not be "
-    "polite-vague; be specific and actionable. Judge it the way a real ATS parses it AND the way a "
-    "human recruiter skims it in 7 seconds.\n\n"
-    "Return STRICT JSON only — no markdown, no prose outside the JSON — with EXACTLY this shape:\n"
-    "{\n"
-    '  "overall_score": <int 0-100: overall résumé strength>,\n'
-    '  "ats_parse_score": <int 0-100: how cleanly an ATS parses/reads it>,\n'
-    '  "verdict": "<2-3 sentence blunt honest summary of why it is or isn\'t getting calls>",\n'
-    '  "sections": [ {"name":"Contact info|Summary|Skills|Experience|Education|Projects|Certifications",\n'
-    '                 "status":"present|missing|weak", "note":"<short specific note>"} ],\n'
-    '  "issues": [ {"severity":"high|medium|low",\n'
-    '               "category":"Formatting|Content|Keywords|Impact|Grammar|Length|Contact",\n'
-    '               "problem":"<what is wrong, specific>", "fix":"<exactly what to do about it>"} ],\n'
-    '  "missing": [ "<things entirely absent that recruiters/ATS expect>" ],\n'
-    '  "grammar": [ {"original":"<exact phrase from résumé>", "suggestion":"<corrected>",\n'
-    '                "type":"spelling|grammar|tense|passive-voice|wording"} ],\n'
-    '  "quantification": {"total_bullets":<int>, "bullets_with_metrics":<int>,\n'
-    '                     "note":"<how well achievements are quantified and what to add>"},\n'
-    '  "keywords_to_add": [ "<industry/role keywords likely expected that appear ABSENT — honest, '
-    'do not tell them to lie>" ],\n'
-    '  "top_priorities": [ "<the 3-6 highest-leverage changes, ordered, that will most increase '
-    'interview callbacks>" ]\n'
-    "}\n\n"
-    "RULES:\n"
-    "- Infer the target role from the résumé itself (e.g. Data Analyst). No job description is given.\n"
-    "- Quote REAL phrases from the résumé in 'grammar.original' and be precise — do not invent text.\n"
-    "- 'keywords_to_add' = skills the role generally expects that are missing; NEVER advise fabricating "
-    "experience — frame as 'add if you genuinely have it / learn it'.\n"
-    "- Cover ATS-parse killers (tables, columns, graphics, headers/footers, non-standard section titles, "
-    "date-format inconsistency, missing standard sections), impact/quantification, weak verbs, passive "
-    "voice, tense consistency, length, and contact completeness (email/phone/LinkedIn).\n"
-    "- 'issues' must be concrete and each have a real 'fix'. Prioritize by actual callback impact.\n"
-    "Output JSON only."
+# The SCORE is computed by rules (deterministic_audit below), NOT the LLM — an LLM holistic score
+# oscillates and re-weighs criteria every run, so you can never climb it. The LLM is used ONLY for
+# the two genuinely subjective lists: grammar fixes and missing-keyword suggestions.
+SUGGESTIONS_PROMPT = (
+    "You are a senior technical recruiter reviewing a résumé. Return STRICT JSON only — no score, "
+    "no commentary, no markdown — with exactly two lists:\n"
+    '{ "grammar": [ {"original":"<exact phrase copied from the résumé>", "suggestion":"<corrected>",\n'
+    '               "type":"spelling|grammar|tense|passive-voice|wording"} ],\n'
+    '  "keywords_to_add": [ "<role keyword likely expected but ABSENT from the résumé>" ] }\n'
+    "Quote REAL phrases only (never invent text). NEVER advise fabricating experience — frame keywords "
+    "as 'add if you genuinely have it'. Max 8 grammar items, max 10 keywords. Output JSON only."
 )
+
+# ── Deterministic rule-based scorer ──────────────────────────────────────────
+_R_EMAIL = re.compile(r"[\w.\-+]+@[\w.\-]+\.\w{2,}")
+_R_PHONE = re.compile(r"(?:\+?\d[\d\s().\-]{7,}\d)")
+_R_LINKEDIN = re.compile(r"linkedin\.com/", re.I)
+_R_BULLET = re.compile(r"^\s*[•\-\*▪◦·‣—]\s+\S")
+_R_DATE = re.compile(
+    r"\b(\d{1,2}/\d{4}|\d{1,2}-\d{4}|"
+    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{4}|"
+    r"\d{4}\s*[-–—]\s*(?:present|current|\d{4}))\b", re.I)
+# Core sections and their point weights (sum 20).
+_CORE_SECTIONS = [
+    ("Summary", r"summary|objective|profile\b|about me", 4),
+    ("Skills", r"skills|technical skills|competenc|technolog", 5),
+    ("Experience", r"experience|employment|work history", 6),
+    ("Education", r"education|academic", 5),
+]
+_OPT_SECTIONS = [("Projects", r"projects?\b"), ("Certifications", r"certificat|licen[cs]e")]
+
+
+def _is_heading(line: str) -> bool:
+    s = line.strip()
+    return 0 < len(s.split()) <= 6 and (s.isupper() or s.istitle() or s.endswith(":"))
+
+
+def _date_fmt(tok: str) -> str:
+    t = tok.lower()
+    if "/" in t:
+        return "mm/yyyy"
+    if re.search(r"[a-z]", t):
+        return "mon yyyy"
+    return "yyyy-range"
+
+
+def deterministic_audit(resume: str) -> dict:
+    """Score a résumé with explicit, reproducible rules (0-100). Same input → same score, and
+    fixing a flagged item strictly raises the score and keeps it up. Never raises."""
+    try:
+        return _score(resume or "")
+    except Exception as e:
+        print(f"⚠️ [resume_ats] deterministic scorer error: {e}")
+        return {"overall_score": 0, "ats_parse_score": 0,
+                "verdict": "Couldn't score the résumé text.", "sections": [], "issues": [],
+                "missing": [], "grammar": [], "keywords_to_add": [],
+                "quantification": {"total_bullets": 0, "bullets_with_metrics": 0, "note": ""},
+                "top_priorities": [], "breakdown": []}
+
+
+def _score(text: str) -> dict:
+    from collections import Counter
+    low = text.lower()
+    lines = text.splitlines()
+    words = len(text.split())
+    issues, sections, missing = [], [], []
+
+    def issue(sev, cat, problem, fix):
+        issues.append({"severity": sev, "category": cat, "problem": problem, "fix": fix})
+
+    # 1) Contact completeness (15)
+    e_ok, p_ok, l_ok = bool(_R_EMAIL.search(text)), bool(_R_PHONE.search(text)), bool(_R_LINKEDIN.search(text))
+    contact = (6 if e_ok else 0) + (4 if p_ok else 0) + (5 if l_ok else 0)
+    gaps = [n for n, ok in (("email", e_ok), ("phone", p_ok), ("LinkedIn URL", l_ok)) if not ok]
+    sections.append({"name": "Contact info", "status": "present" if not gaps else "weak",
+                     "note": "" if not gaps else f"Missing: {', '.join(gaps)}."})
+    if gaps:
+        issue("high" if not e_ok else "medium", "Contact", f"Missing {', '.join(gaps)} in the header.",
+              "Add one clean line: email · phone · linkedin.com/in/you (as clickable text).")
+
+    # 2) Standard sections (20)
+    sec_pts = 0
+    for name, pat, w in _CORE_SECTIONS:
+        present = bool(re.search(pat, low))
+        if present:
+            sec_pts += w
+        else:
+            missing.append(f"{name} section")
+            issue("high" if name in ("Experience", "Skills") else "medium", "Formatting",
+                  f"No clear {name} section.", f"Add a standard '{name}' heading — ATS keys off standard titles.")
+        sections.append({"name": name, "status": "present" if present else "missing",
+                         "note": "" if present else f"Add a {name} section."})
+    for name, pat in _OPT_SECTIONS:
+        if re.search(pat, low):
+            sections.append({"name": name, "status": "present", "note": ""})
+
+    # 3) Date-format consistency (12)
+    toks = [m.group(0) for m in _R_DATE.finditer(text)]
+    if len(toks) >= 2:
+        fmts = Counter(_date_fmt(t) for t in toks)
+        ratio = fmts.most_common(1)[0][1] / len(toks)
+        date_pts = round(12 * ratio)
+        if ratio < 0.99:
+            issue("medium", "Formatting",
+                  f"Inconsistent date formats ({len(fmts)} styles across {len(toks)} dates).",
+                  "Pick ONE format (e.g. MM/YYYY) and use it for every role, project and degree.")
+    else:
+        date_pts = 12
+
+    # 4) Quantification / metrics (26) — the biggest lever
+    bullets = [l.strip() for l in lines if _R_BULLET.match(l)]
+    if len(bullets) < 3:
+        bullets = [l.strip() for l in lines if l.strip() and len(l.split()) >= 6
+                   and not _is_heading(l) and not _R_EMAIL.search(l)]
+    total_b = len(bullets)
+    with_m = sum(1 for b in bullets if re.search(r"\d", b))
+    ratio_m = (with_m / total_b) if total_b else 0.0
+    metric_pts = round(26 * ratio_m)
+    if total_b and ratio_m < 0.6:
+        issue("high", "Impact", f"Only {with_m}/{total_b} bullets ({round(ratio_m*100)}%) are quantified.",
+              "Add a concrete number to every bullet you can — %, $, time saved, volume, scale.")
+    if not total_b:
+        issue("high", "Formatting", "No bullet points detected.",
+              "Use • bullets for achievements — recruiters and ATS skim bullets, not paragraphs.")
+
+    # 5) Bullet hygiene (8)
+    hygiene = 0
+    if total_b:
+        long_b = sum(1 for b in bullets if len(b.split()) > 34)
+        hygiene = 8 - (4 if long_b > total_b * 0.3 else 0)
+        if long_b > total_b * 0.3:
+            issue("low", "Content", f"{long_b} bullets run long (>34 words).",
+                  "Tighten to 1–2 lines; lead with the result.")
+
+    # 6) Length (5)
+    if 350 <= words <= 900:
+        length_pts = 5
+    elif 250 <= words < 350 or 900 < words <= 1100:
+        length_pts = 3
+    else:
+        length_pts = 1
+        issue("medium" if words < 250 else "low", "Length",
+              f"Résumé is {words} words ({'too short' if words < 350 else 'long'}).",
+              "Aim for ~1 page (≈450–750 words) for under ~10 years of experience.")
+
+    # 7) ATS parse-safety (14)
+    # A single " | "-separated line (common contact line) is ATS-safe — only treat pipes as a
+    # table when they span multiple rows.
+    col = sum(1 for l in lines if l.count("\t") >= 2 or re.search(r"\S {3,}\S.* {3,}\S", l))
+    box_lines = sum(1 for l in lines if "│" in l or "┃" in l)
+    pipe_lines = sum(1 for l in lines if l.count("|") >= 2)
+    bad = col + box_lines + (pipe_lines if pipe_lines >= 2 else 0)
+    parse_pts = max(0, 14 - min(14, bad * 3))
+    if bad:
+        issue("high", "Formatting",
+              f"{bad} line(s) look like columns/tables (multi-tab or pipe/box characters).",
+              "Use a single-column, top-to-bottom layout — no tables, text boxes or columns.")
+
+    overall = max(0, min(100, contact + sec_pts + date_pts + metric_pts + hygiene + length_pts + parse_pts))
+    ats_parse = round((parse_pts + date_pts + sec_pts + contact) / (14 + 12 + 20 + 15) * 100)
+
+    breakdown = [
+        {"criterion": "Contact info", "score": contact, "max": 15},
+        {"criterion": "Standard sections", "score": sec_pts, "max": 20},
+        {"criterion": "Date consistency", "score": date_pts, "max": 12},
+        {"criterion": "Quantified impact", "score": metric_pts, "max": 26},
+        {"criterion": "Bullet hygiene", "score": hygiene, "max": 8},
+        {"criterion": "Length", "score": length_pts, "max": 5},
+        {"criterion": "ATS parse-safety", "score": parse_pts, "max": 14},
+    ]
+    prio_map = {
+        "Contact info": "Complete the contact header (email · phone · LinkedIn).",
+        "Standard sections": "Add the missing standard sections.",
+        "Date consistency": "Use one consistent date format everywhere.",
+        "Quantified impact": "Quantify more bullets with concrete numbers.",
+        "Bullet hygiene": "Tighten long bullets; lead with results.",
+        "Length": "Bring the length to ~1 page.",
+        "ATS parse-safety": "Remove tables/columns so the ATS parses cleanly.",
+    }
+    top_priorities = [prio_map[b["criterion"]] for b in
+                      sorted(breakdown, key=lambda b: (b["score"] - b["max"]))
+                      if b["score"] < b["max"]][:6]
+
+    worst = (top_priorities[0][0].lower() + top_priorities[0][1:]) if top_priorities else "polish the wording"
+    if overall >= 85:
+        verdict = "Strong résumé — clean, quantified and ATS-safe. Mostly wording polish left."
+    elif overall >= 70:
+        verdict = f"Solid and close. Biggest lever: {worst}"
+    elif overall >= 55:
+        verdict = f"Readable but leaking interviews. Start with: {worst}"
+    else:
+        verdict = f"Likely getting filtered before a human sees it. Fix first: {worst}"
+
+    return {
+        "overall_score": overall, "ats_parse_score": ats_parse, "verdict": verdict,
+        "sections": sections, "issues": issues, "missing": missing,
+        "grammar": [], "keywords_to_add": [],
+        "quantification": {"total_bullets": total_b, "bullets_with_metrics": with_m,
+                           "note": (f"{round(ratio_m*100)}% of bullets carry a number."
+                                    if total_b else "No bullet points detected.")},
+        "top_priorities": top_priorities, "breakdown": breakdown,
+    }
 
 
 async def audit_resume(call_llm_fn) -> dict:
-    """Run a general (job-agnostic) ATS/recruiter audit on the saved master résumé,
-    cache the single latest result, and return it. {"error": ...} if no résumé."""
+    """Job-agnostic résumé audit. The SCORE is deterministic (rule-based) so it's stable and
+    monotonic; the LLM only supplies subjective grammar + keyword suggestions. Caches the latest."""
     resume = await get_resume_template()
     if not (resume or "").strip():
         return {"error": "No master résumé saved yet. Upload or paste your résumé first."}
+
+    audit = deterministic_audit(resume)  # never raises; the number comes from here
+
+    # LLM strictly for the subjective lists — any score it might invent is ignored.
     try:
-        raw = await call_llm_fn(RESUME_AUDIT_PROMPT, f"RÉSUMÉ:\n{resume[:8000]}", max_tokens=3000, temperature=0.0)
-        audit = _parse_json_object(raw)
+        raw = await call_llm_fn(SUGGESTIONS_PROMPT, f"RÉSUMÉ:\n{resume[:8000]}",
+                                max_tokens=1200, temperature=0.0)
+        sug = _parse_json_object(raw) or {}
+        if isinstance(sug.get("grammar"), list):
+            audit["grammar"] = sug["grammar"][:8]
+        if isinstance(sug.get("keywords_to_add"), list):
+            audit["keywords_to_add"] = sug["keywords_to_add"][:10]
     except Exception as e:
-        print(f"⚠️ [resume_ats] audit failed: {e}")
-        return {"error": "Audit failed — try again in a moment."}
-    if not audit or "overall_score" not in audit:
-        return {"error": "Audit couldn't be parsed — try again."}
+        print(f"⚠️ [resume_ats] suggestions failed (score is deterministic regardless): {e}")
 
     now = datetime.now(timezone.utc).isoformat()
     audit["created_at"] = now
