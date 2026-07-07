@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { ScreenId } from "../types";
 import {
   Compass, ClipboardCheck, Send, ListChecks, MailCheck, CalendarClock,
-  BarChart3, Wallet, TerminalSquare, Sparkles, Bot, Search, LifeBuoy, Route, FlaskConical,
+  BarChart3, Wallet, TerminalSquare, Sparkles, Bot, Search, LifeBuoy, Route, FlaskConical, Newspaper,
 } from "lucide-react";
 
 interface HelpProps {
@@ -179,6 +179,16 @@ const SECTIONS: HelpSection[] = [
       { name: "Insights", what: "Response funnel (how far applications get), skill-gap (market demand vs your résumé's coverage across every analysed job), calendar-shield status, and profile freshness.", how: "Open INSIGHTS." },
       { name: "Voice Standup", what: "A single spoken briefing that pulls the whole search together — interviews, follow-ups due, pipeline momentum.", how: "From the Home cockpit, hit BRIEF ME." },
       { name: "Profile Freshness", what: "Nudges to keep your shop-window (LinkedIn, résumé) current so recruiters see the latest you.", how: "Surfaced on INSIGHTS and via notifications." },
+    ],
+  },
+  {
+    id: "daily",
+    title: "Daily AI Update",
+    blurb: "Your morning AI briefing + lesson — now in the console.",
+    Icon: Newspaper,
+    items: [
+      { name: "Daily AI Update", what: "The original morning digest, web-first: fresh AI news, today's concept to learn, a mini-project (day-by-day), a short briefing, and a Python reference implementation with self-test assertions. It auto-generates each morning and drops a notification — it never sends WhatsApp on its own.", how: "Open DAILY. It shows today's update; GENERATE/REGENERATE anytime. Rate it Too easy / Just right / Too hard to tune future difficulty." },
+      { name: "Send to WhatsApp", what: "WhatsApp is opt-in now: the update lives in the console, and only goes to your WhatsApp when you tap the button.", how: "DAILY → Send to WhatsApp (turns green once sent)." },
     ],
   },
   {

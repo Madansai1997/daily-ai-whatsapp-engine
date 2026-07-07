@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { ScreenId } from "../types";
-import { Search, Bell, Settings, HelpCircle } from "lucide-react";
+import { Search, Bell, Settings, HelpCircle, Terminal as TerminalIcon } from "lucide-react";
 
 interface HeaderProps {
   activeScreen: ScreenId;
@@ -105,9 +105,8 @@ export default function Header({
               { screen: ScreenId.Insights, label: "INSIGHTS", active: activeScreen === ScreenId.Insights },
               { screen: ScreenId.Bills, label: "BILLS", active: activeScreen === ScreenId.Bills },
               { screen: ScreenId.Assistant, label: "JARVIS", active: activeScreen === ScreenId.Assistant },
-              { screen: ScreenId.Terminal, label: "TERMINAL", active: activeScreen === ScreenId.Terminal },
-              { screen: ScreenId.Trends, label: "TRENDS", active: activeScreen === ScreenId.Trends },
-              { screen: ScreenId.Help, label: "HELP", active: activeScreen === ScreenId.Help },
+              { screen: ScreenId.Discover, label: "DISCOVER", active: activeScreen === ScreenId.Discover || activeScreen === ScreenId.Trends || activeScreen === ScreenId.Daily },
+              // TERMINAL and HELP live in the always-visible header icons (right side), not nav tabs.
             ].map((item) => (
               <a
                 key={item.label}
@@ -146,6 +145,15 @@ export default function Header({
                 {unread > 99 ? "99+" : unread}
               </span>
             )}
+          </button>
+          <button
+            onClick={() => onNavigate(ScreenId.Terminal)}
+            className={`transition-colors p-1 cursor-pointer ${
+              activeScreen === ScreenId.Terminal ? "text-[#8aebff] nav-active-glow" : "text-[#bbc9cd] hover:text-[#8aebff]"
+            }`}
+            title="Terminal — PDF upload, local files, system info"
+          >
+            <TerminalIcon className="w-5 h-5" />
           </button>
           <button
             onClick={() => onNavigate(ScreenId.Help)}

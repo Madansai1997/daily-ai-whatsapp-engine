@@ -8,7 +8,7 @@ import JobsBoard from "./components/JobsBoard";
 import Insights from "./components/Insights";
 import Bills from "./components/Bills";
 import Help from "./components/Help";
-import TrendLab from "./components/TrendLab";
+import Discover from "./components/Discover";
 import SystemTerminal from "./components/SystemTerminal";
 import SearchOverlay from "./components/SearchOverlay";
 import SettingsDrawer from "./components/SettingsDrawer";
@@ -16,7 +16,7 @@ import NotificationsDrawer from "./components/NotificationsDrawer";
 import LockScreen from "./components/LockScreen";
 import { authStatus, setUnauthHandler } from "./lib/auth";
 import { AnimatePresence, motion } from "motion/react";
-import { LayoutGrid, Bot, Lock, Terminal as TerminalIcon, Briefcase, BarChart3, Wallet, HelpCircle, FlaskConical } from "lucide-react";
+import { LayoutGrid, Bot, Lock, Briefcase, BarChart3, Wallet, Compass } from "lucide-react";
 
 export default function App() {
   const [activeScreen, setActiveScreen] = useState<ScreenId>(ScreenId.Core);
@@ -65,7 +65,7 @@ export default function App() {
     }
 
     // Nav order index to determine forward vs backward push (matches the header order)
-    const screenOrder = [ScreenId.Core, ScreenId.Jobs, ScreenId.Insights, ScreenId.Bills, ScreenId.Assistant, ScreenId.Terminal, ScreenId.Trends, ScreenId.Help];
+    const screenOrder = [ScreenId.Core, ScreenId.Jobs, ScreenId.Insights, ScreenId.Bills, ScreenId.Assistant, ScreenId.Discover, ScreenId.Terminal, ScreenId.Help];
     const fromIndex = screenOrder.indexOf(from);
     const toIndex = screenOrder.indexOf(to);
 
@@ -147,8 +147,8 @@ export default function App() {
             {activeScreen === ScreenId.Bills && (
               <Bills />
             )}
-            {activeScreen === ScreenId.Trends && (
-              <TrendLab />
+            {(activeScreen === ScreenId.Discover || activeScreen === ScreenId.Trends || activeScreen === ScreenId.Daily) && (
+              <Discover initial={activeScreen === ScreenId.Trends ? "trends" : "daily"} />
             )}
             {activeScreen === ScreenId.Help && (
               <Help onNavigate={handleNavigate} />
@@ -165,9 +165,7 @@ export default function App() {
           { screen: ScreenId.Insights, label: "STATS", Icon: BarChart3, active: activeScreen === ScreenId.Insights },
           { screen: ScreenId.Bills, label: "BILLS", Icon: Wallet, active: activeScreen === ScreenId.Bills },
           { screen: ScreenId.Assistant, label: "JARVIS", Icon: Bot, active: activeScreen === ScreenId.Assistant },
-          { screen: ScreenId.Terminal, label: "TERM", Icon: TerminalIcon, active: activeScreen === ScreenId.Terminal },
-          { screen: ScreenId.Trends, label: "TRENDS", Icon: FlaskConical, active: activeScreen === ScreenId.Trends },
-          { screen: ScreenId.Help, label: "HELP", Icon: HelpCircle, active: activeScreen === ScreenId.Help },
+          { screen: ScreenId.Discover, label: "DISCOVER", Icon: Compass, active: activeScreen === ScreenId.Discover || activeScreen === ScreenId.Trends || activeScreen === ScreenId.Daily },
         ].map(({ screen, label, Icon, active }) => (
           <button
             key={label}

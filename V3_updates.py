@@ -292,8 +292,11 @@ SCHEDULE_CONFIG = {
 SCHEDULER_MODE = os.environ.get("SCHEDULER_MODE", "internal").strip().lower()
 
 
-OPENROUTER_MODEL = "openai/gpt-oss-120b"
-OPENROUTER_MODEL_FAST = "openai/gpt-oss-120b"
+# When the OmniRoute gateway is in use it needs a provider-prefixed model id (otherwise
+# "openai/gpt-oss-120b" is ambiguous across providers). The digest's direct anthropic_client
+# calls use these constants, so prefix them here — _complete_with_fallback maps separately.
+OPENROUTER_MODEL = "groq/openai/gpt-oss-120b" if os.environ.get("OMNIROUTE_URL", "").strip() else "openai/gpt-oss-120b"
+OPENROUTER_MODEL_FAST = OPENROUTER_MODEL
 
 FREE_MODELS = [
     "openai/gpt-oss-120b",          # GPT OSS — same model as before, now on Groq's LPU hardware
@@ -778,6 +781,28 @@ def init_db_tables():
     conn.close()
     print("✅ State Engine: All database tables verified and ready.")
 
+
+def init_daily_web_tables():
+    """Web-first Daily AI Update — one structured row per day, read in the console. WhatsApp is
+    only ever sent on explicit trigger (sent_whatsapp flag), never automatically."""
+    conn = aiosqlite.connect_sync(DB_PATH, check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute('''CREATE TABLE IF NOT EXISTS daily_web_digest (
+        date TEXT PRIMARY KEY,
+        news_json TEXT,
+        concept TEXT,
+        pedagogical_focus TEXT,
+        project_json TEXT,
+        digest_text TEXT,
+        reference_code TEXT,
+        difficulty TEXT,
+        sent_whatsapp INTEGER DEFAULT 0,
+        created_at TEXT
+    )''')
+    conn.commit()
+    conn.close()
+    print("✅ Daily web digest table ready.")
+
 init_db_tables()
 init_email_tables()
 init_reminder_tables()
@@ -795,6 +820,7 @@ init_networking_crm_tables()
 init_profile_freshness_tables()
 init_followup_tables()
 init_trend_lab_tables()
+init_daily_web_tables()
 
 
 # ==========================================
@@ -907,7 +933,9 @@ async def lifespan(app: FastAPI):
         print("⏰ Scheduler: EXTERNAL mode — fixed jobs driven by /cron/* endpoints; "
               "reminders fired via /cron/reminders-due. In-process cron jobs not registered.")
     else:
-        scheduler.add_job(run_morning_digest, "cron", hour=SCHEDULE_CONFIG["digest_hour"], minute=0)
+        # Morning digest is now WEB-FIRST — generates + stores + notifies in the console; it
+        # never auto-sends WhatsApp (that's an explicit button in the Daily tab).
+        scheduler.add_job(generate_daily_web_digest, "cron", hour=SCHEDULE_CONFIG["digest_hour"], minute=0)
         for r in SCHEDULE_CONFIG["reminders"]:
             scheduler.add_job(send_checkin_reminder, "cron", hour=r["hour"], minute=0, kwargs={"reminder_number": r["number"]})
         scheduler.add_job(send_weekly_report, "cron", day_of_week="sun", hour=SCHEDULE_CONFIG["weekly_report_hour"], minute=0)
@@ -3291,6 +3319,168 @@ async def morning_digest_endpoint():
 
 
 # ==========================================
+# DAILY AI UPDATE — WEB-FIRST (WhatsApp only on explicit trigger)
+# ==========================================
+_SKILL_LADDER = ["Foundational", "Intermediate", "Advanced", "Expert"]
+
+
+async def generate_daily_web_digest():
+    """Run the SAME pipeline as the morning digest (Planner → live news + RAG → weekly project →
+    Creator → QA Critic) but STORE a structured record for the console instead of sending WhatsApp.
+    Idempotent per day (upserts today's row). Posts a web notification, never a WhatsApp."""
+    await _log_job("generate_daily_web_digest", "started")
+    try:
+        skill, recent_topics, _ = await get_db_state()
+        planner_context = await run_curriculum_planner(skill, recent_topics)
+        concept = planner_context.get("concept", "Agentic Scaffolding Testing")
+        loop = asyncio.get_running_loop()
+
+        async def _fetch_and_save_news():
+            articles = await loop.run_in_executor(None, fetch_live_internet_updates)
+            await save_articles_to_knowledge_store(articles)
+            return articles
+
+        raw_news, relevant_articles = await asyncio.gather(
+            _fetch_and_save_news(), retrieve_relevant_context(concept, limit=3),
+            return_exceptions=True)
+        if isinstance(raw_news, Exception):
+            raw_news = []
+        if isinstance(relevant_articles, Exception):
+            relevant_articles = []
+
+        news_items = (relevant_articles or raw_news)[:5]
+        news_display = [{"title": a.get("title", ""), "url": a.get("url", ""),
+                         "snippet": (a.get("content", "") or "")[:300]} for a in news_items]
+        context_blocks = [f"[{i+1}] Title: {a['title']}\nURL: {a['url']}\nSnippet: {a['content']}"
+                          for i, a in enumerate(news_items[:3])]
+        news_context = "\n\n".join(context_blocks)
+        exclusions = ", ".join(recent_topics) if recent_topics else "None"
+        project_context = await get_or_create_weekly_project(concept, skill)
+
+        final_text, reference_code = await generate_daily_payload(
+            news_context, skill, exclusions, planner_context, project_context)
+        final_text = extract_final_payload(enforce_content_limits(final_text))
+        if not final_text or len(final_text) < 50:
+            final_text = f"🔴 REGULAR DAILY AI UPDATES\nContent generation hiccuped — regenerate.\n\n📘 WHAT I NEED TO LEARN\nToday's concept: {concept}"
+        is_valid, _ = await run_qa_critic(final_text, reference_code)
+
+        today = date.today().isoformat()
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        await log_sent_concept(concept, final_text)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """INSERT INTO daily_web_digest
+                   (date, news_json, concept, pedagogical_focus, project_json, digest_text,
+                    reference_code, difficulty, sent_whatsapp, created_at)
+                   VALUES (?,?,?,?,?,?,?,NULL,0,?)
+                   ON CONFLICT(date) DO UPDATE SET news_json=excluded.news_json, concept=excluded.concept,
+                     pedagogical_focus=excluded.pedagogical_focus, project_json=excluded.project_json,
+                     digest_text=excluded.digest_text, reference_code=excluded.reference_code,
+                     created_at=excluded.created_at""",
+                (today, json.dumps(news_display), concept, planner_context.get("pedagogical_focus", ""),
+                 json.dumps(project_context), final_text, reference_code, now))
+            await db.commit()
+        _store_notification(f"📰 Today's AI update is ready — {concept}. Open the Daily tab.", "daily")
+        await _log_job("generate_daily_web_digest", "completed", f"concept: {concept}")
+        _malloc_trim()
+        return {"ok": True, "date": today, "concept": concept, "qa_passed": bool(is_valid)}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await _log_job("generate_daily_web_digest", "failed", str(e))
+        return {"ok": False, "error": str(e)}
+
+
+def _row_to_digest(row) -> dict:
+    d = dict(row)
+    d["news"] = json.loads(d.get("news_json") or "[]")
+    d["project"] = json.loads(d.get("project_json") or "{}")
+    d["sent_whatsapp"] = bool(d.get("sent_whatsapp"))
+    for k in ("news_json", "project_json"):
+        d.pop(k, None)
+    return d
+
+
+@app.get("/api/daily/today")
+async def daily_today_api():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM daily_web_digest ORDER BY date DESC LIMIT 1")
+        row = await cur.fetchone()
+    return JSONResponse(_row_to_digest(row) if row else {"empty": True})
+
+
+@app.get("/api/daily/history")
+async def daily_history_api():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT date, concept, difficulty, sent_whatsapp FROM daily_web_digest ORDER BY date DESC LIMIT 30")
+        rows = [dict(r) for r in await cur.fetchall()]
+    for r in rows:
+        r["sent_whatsapp"] = bool(r.get("sent_whatsapp"))
+    return JSONResponse({"history": rows})
+
+
+@app.get("/api/daily/{d}")
+async def daily_get_api(d: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM daily_web_digest WHERE date = ?", (d,))
+        row = await cur.fetchone()
+    return JSONResponse(_row_to_digest(row) if row else {"empty": True})
+
+
+@app.post("/api/daily/generate")
+async def daily_generate_api():
+    return JSONResponse(await generate_daily_web_digest())
+
+
+@app.post("/api/daily/{d}/whatsapp")
+async def daily_whatsapp_api(d: str):
+    """The ONLY path that sends the digest to WhatsApp — explicit user action."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT digest_text FROM daily_web_digest WHERE date = ?", (d,))
+        row = await cur.fetchone()
+    if not row or not row["digest_text"]:
+        return JSONResponse({"ok": False, "error": "No digest for that date."}, status_code=404)
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, lambda: send_whatsapp_chunked(row["digest_text"]))
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"WhatsApp send failed: {e}"}, status_code=502)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE daily_web_digest SET sent_whatsapp = 1 WHERE date = ?", (d,))
+        await db.commit()
+    return JSONResponse({"ok": True, "message": "Sent to WhatsApp."})
+
+
+@app.post("/api/daily/{d}/difficulty")
+async def daily_difficulty_api(d: str, request: Request):
+    """Record E/J/H feedback and nudge the skill level (E=too easy → up, H=too hard → down)."""
+    try:
+        rating = str((await request.json()).get("rating", "")).upper()[:1]
+    except Exception:
+        rating = ""
+    if rating not in ("E", "J", "H"):
+        return JSONResponse({"ok": False, "error": "rating must be E, J or H"}, status_code=400)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE daily_web_digest SET difficulty = ? WHERE date = ?", (rating, d))
+        await db.commit()
+    if rating in ("E", "H"):
+        skill, _, _ = await get_db_state()
+        try:
+            idx = _SKILL_LADDER.index(skill)
+        except ValueError:
+            idx = 0
+        idx = min(len(_SKILL_LADDER) - 1, idx + 1) if rating == "E" else max(0, idx - 1)
+        await update_db_skill(_SKILL_LADDER[idx])
+        return JSONResponse({"ok": True, "skill_level": _SKILL_LADDER[idx]})
+    return JSONResponse({"ok": True})
+
+
+# ==========================================
 # EXTERNAL CRON TRIGGERS (SCHEDULER_MODE=external)
 # An outside scheduler (cron-job.org) wakes the sleeping free instance and hits these
 # to drive the fixed jobs, so the service doesn't need to stay awake 24/7. Each is
@@ -3374,6 +3564,16 @@ async def cron_digest(token: str = ""):
         return deny
     _run_bg_job("morning-digest", lambda: run_morning_digest())
     return JSONResponse({"status": "digest triggered"}, status_code=202)
+
+
+@app.post("/cron/web-digest")
+async def cron_web_digest(token: str = ""):
+    """Web-first morning digest (no WhatsApp). Point your daily cron-job.org entry here instead
+    of /cron/digest — it generates + stores + notifies in the console only."""
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    _run_bg_job("web-digest", lambda: generate_daily_web_digest())
+    return JSONResponse({"status": "web digest triggered"}, status_code=202)
 
 
 @app.post("/cron/inbox")

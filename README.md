@@ -75,6 +75,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `60e5d85` feat(trends): Hacker News source (free, no key) + per-idea Build Brief _(2026-07-07)_
 - `0687871` feat(trends): add subreddit mode for the RapidAPI Reddit path _(2026-07-07)_
 - `1509d7a` fix(trends): use RAPIDAPI_KEY1 env for the Reddit RapidAPI call _(2026-07-07)_
 - `1a1bef0` feat(trends): richer YouTube (comment mining) + RapidAPI Reddit path _(2026-07-07)_
@@ -86,7 +87,6 @@ npm install && npm run build     # served by the engine at /console
 - `fddc490` feat(ats): one-tap AUTO-FIX for the deterministic résumé points + fairer scorer _(2026-07-06)_
 - `cfc9738` fix(ats): deterministic rule-based résumé score (ends the audit thrash) _(2026-07-06)_
 - `6c30c53` feat(ats): support checkable grammar list with date-change confirmation popups _(2026-07-06)_
-- `675e482` feat(ats): add rebuild_resume.py master cv restructuring script _(2026-07-06)_
 <!-- /AUTO:changelog -->
 
 ---

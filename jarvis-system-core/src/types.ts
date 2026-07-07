@@ -11,6 +11,8 @@ export enum ScreenId {
   Insights = "insights",
   Bills = "bills",
   Trends = "trends",
+  Daily = "daily",
+  Discover = "discover",
   Help = "help"
 }
 
