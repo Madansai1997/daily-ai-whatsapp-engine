@@ -43,6 +43,17 @@ REDDIT_CLIENT_ID = os.environ.get("REDDIT_CLIENT_ID", "").strip()
 REDDIT_CLIENT_SECRET = os.environ.get("REDDIT_CLIENT_SECRET", "").strip()
 _reddit_token = {"value": "", "exp": 0.0}
 
+# RapidAPI Reddit path — avoids Reddit's own OAuth/app entirely (their app form is flaky). Reuses
+# the account-wide RAPIDAPI_KEY; the user just subscribes (free tier) to a Reddit scraper API.
+# Defaults to 'reddit-scraper2'; override the host/path/param for any other provider. The response
+# parser is schema-agnostic (finds post-like objects anywhere in the JSON), so it survives the
+# shape differences between providers.
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "").strip()
+REDDIT_RAPIDAPI_HOST = os.environ.get("REDDIT_RAPIDAPI_HOST", "reddit-scraper2.p.rapidapi.com").strip()
+REDDIT_RAPIDAPI_PATH = os.environ.get("REDDIT_RAPIDAPI_PATH", "/search_posts").strip()
+REDDIT_RAPIDAPI_QPARAM = os.environ.get("REDDIT_RAPIDAPI_QUERY_PARAM", "query").strip()
+REDDIT_VIA_RAPIDAPI = bool(RAPIDAPI_KEY and REDDIT_RAPIDAPI_HOST)
+
 # Subreddits where product-request language is dense.
 REDDIT_SUBS = ["SomebodyMakeThis", "AppIdeas", "Lightbulb", "SideProject",
                "smallbusiness", "Entrepreneur"]
@@ -51,8 +62,22 @@ WISH_PHRASES = [
     "i wish there was an app", "someone should make", "someone should build",
     "is there an app that", "why isn't there an app", "need an app that",
 ]
-YT_QUERIES = ["i wish there was an app", "why isn't there an app for",
-              "someone should make an app", "app idea"]
+YT_QUERIES = [
+    "i wish there was an app", "why isn't there an app for", "someone should make an app",
+    "app idea", "is there an app that", "apps that should exist",
+    "problems that need an app", "i wish there was an app that",
+]
+YT_VIDEOS_PER_QUERY = 8          # search results per query
+YT_COMMENT_VIDEOS = 4            # of those, fetch comments for the top N
+YT_COMMENTS_PER_VIDEO = 20       # top comments per video (cheap: 1 quota unit each)
+
+# Language that signals a genuine product REQUEST/complaint (used to filter noisy comments).
+REQUEST_RE = re.compile(
+    r"(i wish (there|they|someone|it)|wish there (was|were)|someone should (make|build|create)|"
+    r"is there (an?|any) (app|tool|website|way)|why (isn'?t|is there no|isn'?t there)|"
+    r"need (an?|a) (app|tool|way)|there should be|does anyone know (of )?(an?|any) (app|tool)|"
+    r"an app (that|to|for)|app idea|app for|hate (that|when|how)|so annoying|"
+    r"if only there was|can'?t find (an?|any) (app|tool))", re.I)
 
 MAX_SIGNALS_PER_RUN = 180        # bound memory + LLM cost
 MAX_TEXT_CHARS = 500             # per-signal truncation
@@ -174,8 +199,70 @@ def _collect_reddit(data, out, seen, origin):
         })
 
 
+# ── RapidAPI Reddit path (no Reddit app/OAuth needed) ───────────────────────
+_FIRST = lambda d, keys: next((d[k] for k in keys if isinstance(d.get(k), (str, int, float)) and d.get(k) not in (None, "")), None)
+
+
+def _extract_posts(obj, out, seen, origin):
+    """Schema-agnostic walk: any dict with a non-empty 'title' is treated as a post. Survives the
+    differing response shapes across RapidAPI Reddit providers."""
+    if isinstance(obj, list):
+        for x in obj:
+            _extract_posts(x, out, seen, origin)
+        return
+    if not isinstance(obj, dict):
+        return
+    title = obj.get("title")
+    if isinstance(title, str) and title.strip():
+        body = _FIRST(obj, ["selftext", "text", "body", "content", "description", "selftext_html"]) or ""
+        url = _FIRST(obj, ["permalink", "url", "link", "post_url"]) or ""
+        if isinstance(url, str) and url.startswith("/"):
+            url = "https://www.reddit.com" + url
+        ups = _FIRST(obj, ["score", "ups", "upvotes", "num_upvotes", "upvote_count"]) or 0
+        sid = _FIRST(obj, ["id", "post_id", "name", "fullname", "uuid"]) or (title[:60] + str(url)[:40])
+        sid = f"rapi:{sid}"
+        text = (title.strip() + " — " + str(body).strip()).strip(" —")[:MAX_TEXT_CHARS]
+        if sid not in seen and len(text) >= 12:
+            seen.add(sid)
+            out.append({"source": "reddit", "source_id": sid, "origin": origin,
+                        "text": text, "url": str(url),
+                        "popularity": int(float(ups)) if str(ups).replace(".", "", 1).isdigit() else 0,
+                        "created_utc": ""})
+    # Recurse into nested containers (data/posts/results/children/etc.)
+    for v in obj.values():
+        if isinstance(v, (list, dict)):
+            _extract_posts(v, out, seen, origin)
+
+
+def _rapidapi_reddit_get(query):
+    if not (REDDIT_VIA_RAPIDAPI and requests is not None):
+        return None
+    try:
+        r = requests.get(
+            f"https://{REDDIT_RAPIDAPI_HOST}{REDDIT_RAPIDAPI_PATH}",
+            params={REDDIT_RAPIDAPI_QPARAM: query, "sort": "NEW", "time": "month"},
+            headers={"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": REDDIT_RAPIDAPI_HOST,
+                     "User-Agent": USER_AGENT}, timeout=20)
+        if r.status_code != 200:
+            print(f"⚠️ [trend_lab] rapidapi reddit HTTP {r.status_code} — "
+                  f"subscribe to '{REDDIT_RAPIDAPI_HOST}' on RapidAPI (free), or set REDDIT_RAPIDAPI_HOST/PATH.")
+            return None
+        return r.json()
+    except Exception as e:
+        print(f"⚠️ [trend_lab] rapidapi reddit failed: {e}")
+        return None
+
+
 async def fetch_reddit_signals(per_query=20):
     out, seen = [], set()
+    # Preferred: RapidAPI (no Reddit app). Falls back to OAuth / public .json if not configured.
+    if REDDIT_VIA_RAPIDAPI:
+        for phrase in WISH_PHRASES:
+            data = await asyncio.to_thread(_rapidapi_reddit_get, phrase)
+            _extract_posts(data, out, seen, f"rapidapi:{phrase}")
+            if len(out) >= MAX_SIGNALS_PER_RUN:
+                break
+        return out[:MAX_SIGNALS_PER_RUN]
     for phrase in WISH_PHRASES:
         data = await asyncio.to_thread(
             _reddit_get, "/search.json", "/search",
@@ -193,30 +280,66 @@ async def fetch_reddit_signals(per_query=20):
 
 
 # ── YouTube (Data API v3, free quota; skipped without a key) ─────────────────
-async def fetch_youtube_signals(per_query=12):
+def _yt_comments(video_id):
+    """Top-level comments for a video: [(comment_id, text, likes)]. [] if disabled/blocked."""
+    data = _http_get_json(
+        "https://www.googleapis.com/youtube/v3/commentThreads",
+        {"key": YOUTUBE_API_KEY, "part": "snippet", "videoId": video_id,
+         "order": "relevance", "maxResults": YT_COMMENTS_PER_VIDEO, "textFormat": "plainText"})
+    out = []
+    for item in (data or {}).get("items", []) or []:
+        try:
+            top = item["snippet"]["topLevelComment"]["snippet"]
+            out.append((item["id"], top.get("textDisplay", "") or "",
+                        int(top.get("likeCount") or 0)))
+        except Exception:
+            continue
+    return out
+
+
+async def fetch_youtube_signals():
+    """Search topical videos, then mine their COMMENTS for real product requests (the high-signal
+    part). Video titles/descriptions are kept too (already topical from the query). Comments are
+    filtered by REQUEST_RE so we only store genuine 'I wish there was…' style asks, not chatter."""
     if not YOUTUBE_API_KEY:
         return []
     out, seen = [], set()
-    after = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    after = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
     for q in YT_QUERIES:
         data = await asyncio.to_thread(
             _http_get_json, "https://www.googleapis.com/youtube/v3/search",
             {"key": YOUTUBE_API_KEY, "q": q, "part": "snippet", "type": "video",
-             "maxResults": per_query, "order": "relevance", "publishedAfter": after})
+             "maxResults": YT_VIDEOS_PER_QUERY, "order": "relevance", "publishedAfter": after})
+        vids = []
         for item in (data or {}).get("items", []) or []:
             vid = (item.get("id") or {}).get("videoId")
             sn = item.get("snippet", {}) or {}
             if not vid or vid in seen:
                 continue
-            text = ((sn.get("title") or "") + " — " + (sn.get("description") or "")).strip(" —")[:MAX_TEXT_CHARS]
-            if len(text) < 12:
-                continue
             seen.add(vid)
-            out.append({
-                "source": "youtube", "source_id": f"yt:{vid}", "origin": f"q:{q}",
-                "text": text, "url": f"https://www.youtube.com/watch?v={vid}",
-                "popularity": 0, "created_utc": sn.get("publishedAt") or "",
-            })
+            vids.append(vid)
+            text = ((sn.get("title") or "") + " — " + (sn.get("description") or "")).strip(" —")[:MAX_TEXT_CHARS]
+            if len(text) >= 12:
+                out.append({
+                    "source": "youtube", "source_id": f"yt:{vid}", "origin": f"q:{q}",
+                    "text": text, "url": f"https://www.youtube.com/watch?v={vid}",
+                    "popularity": 0, "created_utc": sn.get("publishedAt") or "",
+                })
+        # Mine comments of the top few videos — where the real requests live.
+        for vid in vids[:YT_COMMENT_VIDEOS]:
+            for cid, ctext, likes in await asyncio.to_thread(_yt_comments, vid):
+                key = f"ytc:{cid}"
+                if key in seen or len(ctext) < 15 or not REQUEST_RE.search(ctext):
+                    continue
+                seen.add(key)
+                out.append({
+                    "source": "youtube", "source_id": key, "origin": f"comment:{q}",
+                    "text": ctext[:MAX_TEXT_CHARS],
+                    "url": f"https://www.youtube.com/watch?v={vid}",
+                    "popularity": int(likes), "created_utc": "",
+                })
+            if len(out) >= MAX_SIGNALS_PER_RUN:
+                break
         if len(out) >= MAX_SIGNALS_PER_RUN:
             break
     return out[:MAX_SIGNALS_PER_RUN]

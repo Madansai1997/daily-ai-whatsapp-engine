@@ -75,6 +75,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `16e1159` feat(trends): Trend Lab — weekly app-idea discovery from Reddit + YouTube _(2026-07-07)_
 - `edbbb56` feat: integrate OmniRoute local AI gateway and rebuild master resume with audit updates _(2026-07-07)_
 - `4106740` feat(jobs): dual ATS+recruiter score badges, header help button, audit fixes _(2026-07-07)_
 - `231ab42` feat(console): Help & Guide screen, delete-résumé, cleaner audit suggestions _(2026-07-06)_
@@ -86,7 +87,6 @@ npm install && npm run build     # served by the engine at /console
 - `658cc96` feat(ats): support interactive keyword selection and injection in resume audit _(2026-07-06)_
 - `d88175a` feat(ats): upgrade apply_rewrites matching robustness and add changes details dialog _(2026-07-06)_
 - `1d6fb70` feat(ats): support applying resume audit grammar suggestions directly to docx _(2026-07-06)_
-- `bf92d81` fix(ats): fix master resume download corruption _(2026-07-05)_
 <!-- /AUTO:changelog -->
 
 ---

@@ -188,7 +188,7 @@ const SECTIONS: HelpSection[] = [
     Icon: FlaskConical,
     items: [
       { name: "Trend Lab", what: "Mines Reddit + YouTube for product requests ('someone should build…', 'I wish there was an app for…'), clusters them into distinct app ideas with the LLM, and scores each by demand (40%), open market / low competition (30%) and monetisation (30%). Ranked highest-first with the evidence quotes.", how: "Open TRENDS → SCAN NOW. Shortlist / mark Building / Dismiss ideas. Runs weekly via cron once set up." },
-      { name: "Setup (free, ~2 min)", what: "Reddit blocks anonymous access from servers, so it needs a free Reddit app. YouTube is optional but adds a second source.", how: "Reddit: reddit.com/prefs/apps → Create app → type 'script' → copy the id + secret into REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET (Render env). YouTube: Google Cloud → enable 'YouTube Data API v3' → API key → YOUTUBE_API_KEY. Then add a weekly cron-job.org hit to /cron/trend-scan?token=<secret>." },
+      { name: "Setup (free)", what: "YouTube works with just an API key. Reddit is added via RapidAPI (no Reddit app / OAuth needed) since Reddit's own app form is flaky.", how: "YouTube: Google Cloud → enable 'YouTube Data API v3' → API key → set YOUTUBE_API_KEY (Render env). Reddit: on RapidAPI subscribe (free tier) to a Reddit scraper like 'reddit-scraper2' → your existing RAPIDAPI_KEY then works (override REDDIT_RAPIDAPI_HOST/PATH for a different provider). Then add a weekly cron-job.org hit to /cron/trend-scan?token=<secret>." },
     ],
   },
   {
