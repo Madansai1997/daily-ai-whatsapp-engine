@@ -56,6 +56,33 @@ interface ReviewItem { concept: string; rep: number; next_due: string; }
 interface FollowTurn { role: string; content: string; }
 interface NoteHit { id: number; title: string; snippet: string; }
 
+// digest_text is the full WhatsApp-format payload (news list + learning notes + any legacy
+// mini-project / weekly-project / QA-assert scaffolding). On the web the news is shown as linked
+// cards + the Home newspaper strip, so here we keep ONLY the learning prose: strip the news list,
+// the project sections, and any assert/QA lines. Returns "" when nothing meaningful is left.
+function cleanLesson(raw: string): string {
+  const out: string[] = [];
+  let section: "pre" | "news" | "learn" | "project" = "pre";
+  let skipAssertRules = false;
+  for (const rawLine of raw.split("\n")) {
+    const line = rawLine.replace(/\*/g, "").replace(/\r/g, "");
+    const t = line.trim();
+    const low = t.toLowerCase();
+    if (low.includes("regular daily ai updates")) { section = "news"; continue; }
+    if (low.includes("what i need to learn")) { section = "learn"; skipAssertRules = false; continue; }
+    if (low.includes("this week") && low.includes("project")) { section = "project"; continue; }
+    if (section === "news" || section === "project") continue;
+    if (low.startsWith("practical mini-project") || low.startsWith("- practical mini-project")) continue;
+    if (low.includes("qa validation lines")) continue;
+    if (low.startsWith("critical assertion")) { skipAssertRules = true; continue; }
+    if (skipAssertRules) { if (/^\d+\./.test(t)) continue; skipAssertRules = false; }
+    if (t.startsWith("assert ")) continue;
+    if (low.startsWith("core concept to master") || low.startsWith("- core concept to master")) continue;
+    out.push(line);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 export default function DailyUpdate() {
   const [digest, setDigest] = useState<Digest | null>(null);
   const [history, setHistory] = useState<HistRow[]>([]);
@@ -299,6 +326,7 @@ export default function DailyUpdate() {
 
   const d = digest;
   const hasDigest = d && !d.empty;
+  const lesson = hasDigest && d!.digest_text ? cleanLesson(d!.digest_text) : "";
   const verdictColor = (v: string) => v === "correct" ? "#a3e635" : v === "partial" ? "#ffd6a3" : "#ffb4ab";
 
   return (
@@ -451,14 +479,14 @@ export default function DailyUpdate() {
             </div>
           )}
 
-          {/* Full digest text */}
-          {d!.digest_text && (
+          {/* Today's lesson — learning prose only (news lives in the cards above + Home strip) */}
+          {lesson && (
             <div className="glass-panel rounded-2xl border border-white/10 p-5 sm:p-6">
               <div className="flex items-center justify-between">
-                <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">Briefing</span>
+                <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">Today's lesson</span>
                 <span className="text-[9px] text-[#859397]/70 font-mono flex items-center gap-1"><Sparkles className="w-3 h-3" /> select any text to save it</span>
               </div>
-              <pre onMouseUp={captureSelection} onTouchEnd={captureSelection} className="mt-2 text-[12px] text-[#dfe2f3] leading-relaxed whitespace-pre-wrap font-sans selection:bg-[#8aebff]/30">{d!.digest_text.replace(/\*/g, "")}</pre>
+              <pre onMouseUp={captureSelection} onTouchEnd={captureSelection} className="mt-2 text-[12px] text-[#dfe2f3] leading-relaxed whitespace-pre-wrap font-sans selection:bg-[#8aebff]/30">{lesson}</pre>
             </div>
           )}
 
