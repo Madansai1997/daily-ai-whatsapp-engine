@@ -15,6 +15,7 @@ import {
   Upload,
   ClipboardCheck,
   Gauge,
+  UserCheck,
   Sparkles,
   Plus,
   Mail,
@@ -52,6 +53,8 @@ interface Application {
   status: string;
   ats_score?: number | null;
   ats_scored_at?: string | null;
+  recruiter_score?: number | null;
+  recruiter_scored_at?: string | null;
   applied_at?: string | null;
   updated_at?: string | null;
 }
@@ -1549,17 +1552,32 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                                 card.title
                               )}
                             </h3>
-                            <div className="flex items-center gap-2 shrink-0">
+                            <div className="flex items-center gap-1.5 shrink-0">
                               {typeof card.ats_score === "number" && (() => {
                                 const c = atsColor(card.ats_score);
                                 return (
                                   <span
-                                    title={`ATS match score${card.ats_scored_at ? ` — as of ${new Date(card.ats_scored_at).toLocaleDateString()}` : ""}`}
-                                    className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold font-mono border cursor-help"
+                                    title={`ATS — keyword match with the job description${card.ats_scored_at ? `, as of ${new Date(card.ats_scored_at).toLocaleDateString()}` : ""}`}
+                                    className="flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-bold font-mono border cursor-help"
                                     style={{ color: c.text, borderColor: `${c.border}55`, backgroundColor: `${c.bg}1a` }}
                                   >
                                     <Gauge className="w-3 h-3" />
+                                    <span className="text-[8px] tracking-wider opacity-70">ATS</span>
                                     {card.ats_score}
+                                  </span>
+                                );
+                              })()}
+                              {typeof card.recruiter_score === "number" && (() => {
+                                const c = atsColor(card.recruiter_score);
+                                return (
+                                  <span
+                                    title={`REC — recruiter's fit read for this role${card.recruiter_scored_at ? `, as of ${new Date(card.recruiter_scored_at).toLocaleDateString()}` : ""}`}
+                                    className="flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-bold font-mono border cursor-help"
+                                    style={{ color: c.text, borderColor: `${c.border}55`, backgroundColor: `${c.bg}1a` }}
+                                  >
+                                    <UserCheck className="w-3 h-3" />
+                                    <span className="text-[8px] tracking-wider opacity-70">REC</span>
+                                    {card.recruiter_score}
                                   </span>
                                 );
                               })()}

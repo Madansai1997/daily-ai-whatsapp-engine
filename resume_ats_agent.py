@@ -434,6 +434,32 @@ async def get_recruiter_review(job_ref: str) -> dict:
     return review
 
 
+async def get_recruiter_scores_map(keys=None) -> dict:
+    """{job_ref: {"recruiter_score": int, "created_at": str}} for cached recruiter reviews.
+    Mirrors get_scores_map so the board can stamp a recruiter fit badge alongside the ATS one.
+    role_fit_score lives inside the cached JSON blob, so we parse it out here."""
+    keys = [str(k) for k in (keys or []) if k]
+    if not keys:
+        return {}
+    placeholders = ",".join("?" for _ in keys)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            f"SELECT job_ref, data, created_at FROM recruiter_review_cache WHERE job_ref IN ({placeholders})",
+            tuple(keys),
+        )
+        rows = await cur.fetchall()
+    out = {}
+    for r in rows:
+        try:
+            score = json.loads(r["data"] or "{}").get("role_fit_score")
+        except Exception:
+            score = None
+        if isinstance(score, (int, float)):
+            out[r["job_ref"]] = {"recruiter_score": int(score), "created_at": r["created_at"]}
+    return out
+
+
 async def get_scores_map(keys=None) -> dict:
     """{job_ref: {"ats_score": int, "created_at": str}} for cached analyses. Pass the list of
     job_refs you care about (e.g. the board's job_keys) — a parameterised WHERE ... IN (...)
@@ -835,7 +861,11 @@ def auto_fix_text(resume: str) -> tuple:
             s = l.strip()
             if _SECTION_HEAD_RE.match(s):
                 break
-            if len(s.split()) >= 20 and "@" not in s and "|" not in s:
+            # First substantial prose line before any section heading = the profile/summary.
+            # ≥12 words catches concise real summaries while still skipping a short job-title
+            # tagline; only lines above the first section can be reached, so this can't grab a
+            # bullet. Contact lines (email / pipe-separated) are excluded.
+            if len(s.split()) >= 12 and "@" not in s and "|" not in s:
                 insert_at = i
                 break
         if insert_at is not None:

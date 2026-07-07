@@ -2,12 +2,82 @@ import { useMemo, useState } from "react";
 import { ScreenId } from "../types";
 import {
   Compass, ClipboardCheck, Send, ListChecks, MailCheck, CalendarClock,
-  BarChart3, Wallet, TerminalSquare, Sparkles, Bot, Search, LifeBuoy,
+  BarChart3, Wallet, TerminalSquare, Sparkles, Bot, Search, LifeBuoy, Route,
 } from "lucide-react";
 
 interface HelpProps {
   onNavigate: (screen: ScreenId) => void;
 }
+
+interface Task {
+  goal: string;
+  steps: string[];
+}
+
+/* The most common "how do I actually do X" goals, as numbered procedures. */
+const TASKS: Task[] = [
+  {
+    goal: "Score my résumé against a specific job",
+    steps: [
+      "Open JOBS and pick the job card (or add one).",
+      "Click ATS ANALYSIS on the card.",
+      "If it asks, paste the job posting — it's saved to the card.",
+      "Read the match score + keyword matrix (required / present / missing).",
+      "Open the STAR/XYZ PLAN tab for suggested bullet rewrites.",
+    ],
+  },
+  {
+    goal: "Get recruiter-style feedback on my résumé",
+    steps: [
+      "Run ATS ANALYSIS on a job card (above).",
+      "Open the RECRUITER READ tab in that analysis.",
+      "Review the fit verdict, 6-second test, strengths, red flags and learning roadmap.",
+    ],
+  },
+  {
+    goal: "Improve my résumé's health score",
+    steps: [
+      "JOBS → RÉSUMÉ → RE-RUN AUDIT.",
+      "Look at 'Where your score comes from' — the bar that isn't full is your lever.",
+      "Click AUTO-FIX to reclaim the structural points (single-column, bullets, summary heading).",
+      "Tick grammar fixes and click APPLY AI SUGGESTIONS to polish the .docx.",
+      "Add real numbers to any flagged bullets (only you can do this), then RE-RUN AUDIT.",
+    ],
+  },
+  {
+    goal: "Replace my stored résumé with a new version",
+    steps: [
+      "JOBS → RÉSUMÉ.",
+      "Click DELETE RÉSUMÉ and confirm (clears text + .docx + cached audit).",
+      "Click UPLOAD CV and choose the new PDF/DOCX/TXT.",
+      "RE-RUN AUDIT to score the fresh version.",
+    ],
+  },
+  {
+    goal: "Track a job I just applied to",
+    steps: [
+      "Fastest: open JARVIS and say \"applied to <role> at <company> on <site>\".",
+      "Or: JOBS → Add Job and fill in the details.",
+      "The card lands in the 'applied' column; email sync advances it automatically later.",
+    ],
+  },
+  {
+    goal: "Follow up on an application that went quiet",
+    steps: [
+      "JOBS → Follow-ups — JARVIS has already drafted follow-ups for stale 'applied' cards.",
+      "Open a draft, edit if you like.",
+      "Click Send — your Send click is the approval; nothing goes out on its own.",
+    ],
+  },
+  {
+    goal: "Add a bill or deadline",
+    steps: [
+      "Fastest: JARVIS → \"add electricity 1200 due on the 5th every month\".",
+      "Or: open BILLS → Add bill.",
+      "You'll be notified before it's due; hit Mark Paid when you pay it.",
+    ],
+  },
+];
 
 interface HelpItem {
   name: string;
@@ -140,6 +210,16 @@ export default function Help({ onNavigate }: HelpProps) {
     })).filter((s) => s.items.length > 0 || s.title.toLowerCase().includes(q));
   }, [query]);
 
+  const filteredTasks = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return TASKS;
+    return TASKS.filter(
+      (t) =>
+        t.goal.toLowerCase().includes(q) ||
+        t.steps.some((s) => s.toLowerCase().includes(q))
+    );
+  }, [query]);
+
   return (
     <div className="w-full max-w-4xl mx-auto space-y-6">
       {/* Header */}
@@ -179,8 +259,40 @@ export default function Help({ onNavigate }: HelpProps) {
         </div>
       </div>
 
+      {/* Common tasks — step by step */}
+      {filteredTasks.length > 0 && (
+        <div className="glass-panel rounded-2xl border border-[#a3e635]/20 overflow-hidden">
+          <div className="px-6 py-4 border-b border-white/5 bg-[#a3e635]/5 flex items-center gap-3">
+            <Route className="w-5 h-5 text-[#a3e635]" />
+            <div>
+              <h2 className="text-sm font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">
+                Common tasks — step by step
+              </h2>
+              <p className="text-[11px] text-[#859397]">Exactly what to click to get a thing done.</p>
+            </div>
+          </div>
+          <div className="grid sm:grid-cols-2 gap-px bg-white/5">
+            {filteredTasks.map((t) => (
+              <div key={t.goal} className="p-5 bg-[#0f131f]/60">
+                <p className="text-[#dfe2f3] font-semibold text-sm mb-2.5">{t.goal}</p>
+                <ol className="space-y-1.5">
+                  {t.steps.map((s, i) => (
+                    <li key={i} className="flex items-start gap-2 text-[12px] text-[#bbc9cd] leading-relaxed">
+                      <span className="flex-shrink-0 w-4 h-4 rounded-full bg-[#a3e635]/15 text-[#a3e635] text-[9px] font-bold font-mono flex items-center justify-center mt-0.5">
+                        {i + 1}
+                      </span>
+                      {s}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Sections */}
-      {filtered.length === 0 && (
+      {filtered.length === 0 && filteredTasks.length === 0 && (
         <div className="glass-panel rounded-2xl border border-white/10 p-8 text-center text-[#859397] font-mono text-sm">
           No help topic matches “{query}”. Try a different word, or ask JARVIS directly.
         </div>

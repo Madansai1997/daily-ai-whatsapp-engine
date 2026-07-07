@@ -199,6 +199,7 @@ from resume_ats_agent import (
     analyze as run_ats_analysis,
     get_analysis as get_ats_analysis,
     get_scores_map as get_ats_scores_map,
+    get_recruiter_scores_map,
     skill_gap_summary,
     delete_analysis as delete_ats_analysis,
     mark_viewed as mark_ats_viewed,
@@ -5572,13 +5573,19 @@ async def chat_history_api(limit: int = 50):
 @app.get("/applications")
 async def applications_list_api():
     apps = await list_applications()
-    # Stamp each card with its latest ATS match score (only analysed cards get one).
+    # Stamp each card with its latest ATS match score + recruiter fit score (only cards that
+    # have been analysed / reviewed get one — the board shows both, clearly labelled).
     keys = [(a.get("job_key") or f"app:{a.get('id')}") for a in apps]
     scores = await get_ats_scores_map(keys)
+    rec_scores = await get_recruiter_scores_map(keys)
     for a in apps:
-        s = scores.get(a.get("job_key") or f"app:{a.get('id')}")
+        k = a.get("job_key") or f"app:{a.get('id')}"
+        s = scores.get(k)
         a["ats_score"] = s["ats_score"] if s else None
         a["ats_scored_at"] = s["created_at"] if s else None
+        rs = rec_scores.get(k)
+        a["recruiter_score"] = rs["recruiter_score"] if rs else None
+        a["recruiter_scored_at"] = rs["created_at"] if rs else None
     return JSONResponse({"applications": apps, "statuses": APPLICATION_STATUSES})
 
 

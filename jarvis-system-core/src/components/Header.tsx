@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { ScreenId } from "../types";
-import { Search, Bell, Settings } from "lucide-react";
+import { Search, Bell, Settings, HelpCircle } from "lucide-react";
 
 interface HeaderProps {
   activeScreen: ScreenId;
@@ -146,9 +146,18 @@ export default function Header({
               </span>
             )}
           </button>
-          <button 
+          <button
+            onClick={() => onNavigate(ScreenId.Help)}
+            className={`transition-colors p-1 cursor-pointer ${
+              activeScreen === ScreenId.Help ? "text-[#8aebff] nav-active-glow" : "text-[#bbc9cd] hover:text-[#8aebff]"
+            }`}
+            title="Help & Guide — what everything does and how to use it"
+          >
+            <HelpCircle className="w-5 h-5" />
+          </button>
+          <button
             onClick={onOpenSettings}
-            className="text-[#bbc9cd] hover:text-[#8aebff] transition-colors p-1 cursor-pointer" 
+            className="text-[#bbc9cd] hover:text-[#8aebff] transition-colors p-1 cursor-pointer"
             title="Core Controls"
           >
             <Settings className="w-5 h-5" />
