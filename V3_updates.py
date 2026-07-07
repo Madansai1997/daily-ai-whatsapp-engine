@@ -166,6 +166,13 @@ from profile_freshness import (
     add_asset as add_profile_asset,
     delete_asset as delete_profile_asset,
 )
+from trend_lab_agent import (
+    init_trend_lab_tables,
+    run_trend_scan,
+    list_trend_ideas,
+    set_idea_status as set_trend_idea_status,
+    trend_lab_stats,
+)
 from calendar_shield import analyze as calendar_shield_analyze
 from daily_standup import standup_briefing, cockpit as cockpit_brief
 from gemini_tts import (
@@ -785,6 +792,7 @@ init_workspace_notes_tables()
 init_networking_crm_tables()
 init_profile_freshness_tables()
 init_followup_tables()
+init_trend_lab_tables()
 
 
 # ==========================================
@@ -5613,6 +5621,44 @@ async def applications_list_api():
         a["recruiter_score"] = rs["recruiter_score"] if rs else None
         a["recruiter_scored_at"] = rs["created_at"] if rs else None
     return JSONResponse({"applications": apps, "statuses": APPLICATION_STATUSES})
+
+
+# ── Trend Lab — weekly app-idea discovery from Reddit + YouTube ──
+@app.get("/api/trends")
+async def trends_list_api(status: str = ""):
+    ideas = await list_trend_ideas(status=status or None)
+    return JSONResponse({"ideas": ideas})
+
+
+@app.get("/api/trends/stats")
+async def trends_stats_api():
+    return JSONResponse(await trend_lab_stats())
+
+
+@app.post("/api/trends/scan")
+async def trends_scan_api():
+    """Manual 'scan now' from the console. Runs the full fetch→cluster→score pipeline."""
+    summary = await run_trend_scan(call_llm, notify_fn=lambda msg, cat="trends": _store_notification(msg, cat))
+    return JSONResponse({"ok": True, **summary})
+
+
+@app.post("/api/trends/{idea_id}/status")
+async def trends_status_api(idea_id: int, request: Request):
+    try:
+        status = (await request.json()).get("status", "")
+    except Exception:
+        status = ""
+    return JSONResponse(await set_trend_idea_status(idea_id, status))
+
+
+@app.post("/cron/trend-scan")
+async def cron_trend_scan(token: str = ""):
+    """Weekly external trigger (cron-job.org). Fetches + clusters + scores app ideas."""
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    _run_bg_job("trend-scan", lambda: run_trend_scan(
+        call_llm, notify_fn=lambda msg, cat="trends": _store_notification(msg, cat)))
+    return JSONResponse({"status": "trend scan triggered"}, status_code=202)
 
 
 # ── Job Scout review queue — per-job review popup (fresh matches awaiting a decision) ──

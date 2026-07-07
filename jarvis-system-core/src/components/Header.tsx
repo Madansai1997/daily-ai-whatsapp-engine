@@ -98,7 +98,7 @@ export default function Header({
             </div>
           </div>
           {/* Ordered by daily use: Home first, power tools last */}
-          <nav className="hidden md:flex items-center gap-8">
+          <nav className="hidden md:flex items-center gap-5 lg:gap-6">
             {[
               { screen: ScreenId.Core, label: "HOME", active: activeScreen === ScreenId.Core },
               { screen: ScreenId.Jobs, label: "JOBS", active: activeScreen === ScreenId.Jobs || activeScreen === ScreenId.AtsAnalysis },
@@ -106,6 +106,7 @@ export default function Header({
               { screen: ScreenId.Bills, label: "BILLS", active: activeScreen === ScreenId.Bills },
               { screen: ScreenId.Assistant, label: "JARVIS", active: activeScreen === ScreenId.Assistant },
               { screen: ScreenId.Terminal, label: "TERMINAL", active: activeScreen === ScreenId.Terminal },
+              { screen: ScreenId.Trends, label: "TRENDS", active: activeScreen === ScreenId.Trends },
               { screen: ScreenId.Help, label: "HELP", active: activeScreen === ScreenId.Help },
             ].map((item) => (
               <a

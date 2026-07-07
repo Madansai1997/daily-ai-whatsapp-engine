@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { ScreenId } from "../types";
 import {
   Compass, ClipboardCheck, Send, ListChecks, MailCheck, CalendarClock,
-  BarChart3, Wallet, TerminalSquare, Sparkles, Bot, Search, LifeBuoy, Route,
+  BarChart3, Wallet, TerminalSquare, Sparkles, Bot, Search, LifeBuoy, Route, FlaskConical,
 } from "lucide-react";
 
 interface HelpProps {
@@ -179,6 +179,16 @@ const SECTIONS: HelpSection[] = [
       { name: "Insights", what: "Response funnel (how far applications get), skill-gap (market demand vs your résumé's coverage across every analysed job), calendar-shield status, and profile freshness.", how: "Open INSIGHTS." },
       { name: "Voice Standup", what: "A single spoken briefing that pulls the whole search together — interviews, follow-ups due, pipeline momentum.", how: "From the Home cockpit, hit BRIEF ME." },
       { name: "Profile Freshness", what: "Nudges to keep your shop-window (LinkedIn, résumé) current so recruiters see the latest you.", how: "Surfaced on INSIGHTS and via notifications." },
+    ],
+  },
+  {
+    id: "trendlab",
+    title: "Trend Lab — idea discovery",
+    blurb: "Find app ideas people are actually asking for.",
+    Icon: FlaskConical,
+    items: [
+      { name: "Trend Lab", what: "Mines Reddit + YouTube for product requests ('someone should build…', 'I wish there was an app for…'), clusters them into distinct app ideas with the LLM, and scores each by demand (40%), open market / low competition (30%) and monetisation (30%). Ranked highest-first with the evidence quotes.", how: "Open TRENDS → SCAN NOW. Shortlist / mark Building / Dismiss ideas. Runs weekly via cron once set up." },
+      { name: "Setup (free, ~2 min)", what: "Reddit blocks anonymous access from servers, so it needs a free Reddit app. YouTube is optional but adds a second source.", how: "Reddit: reddit.com/prefs/apps → Create app → type 'script' → copy the id + secret into REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET (Render env). YouTube: Google Cloud → enable 'YouTube Data API v3' → API key → YOUTUBE_API_KEY. Then add a weekly cron-job.org hit to /cron/trend-scan?token=<secret>." },
     ],
   },
   {
