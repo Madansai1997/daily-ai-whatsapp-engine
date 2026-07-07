@@ -799,6 +799,33 @@ def init_daily_web_tables():
         sent_whatsapp INTEGER DEFAULT 0,
         created_at TEXT
     )''')
+    # Active-recall: quiz + grades + Feynman "explain it back", one row per day.
+    cur.execute('''CREATE TABLE IF NOT EXISTS study_recall (
+        date TEXT PRIMARY KEY,
+        concept TEXT,
+        quiz_json TEXT,
+        grade_json TEXT,
+        feynman_json TEXT,
+        created_at TEXT
+    )''')
+    # Spaced repetition — each learned concept resurfaces at 1d/3d/1wk/1mo.
+    cur.execute('''CREATE TABLE IF NOT EXISTS srs_reviews (
+        concept TEXT PRIMARY KEY,
+        rep INTEGER DEFAULT 0,
+        next_due TEXT,
+        last_reviewed TEXT,
+        created_at TEXT
+    )''')
+    # Go-deeper follow-up chat — a persistent, multi-turn thread per day's concept.
+    cur.execute('''CREATE TABLE IF NOT EXISTS study_followups (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT,
+        concept TEXT,
+        role TEXT,
+        content TEXT,
+        created_at TEXT
+    )''')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_study_followups_date ON study_followups(date)')
     conn.commit()
     conn.close()
     print("✅ Daily web digest table ready.")
@@ -1759,6 +1786,53 @@ async def mark_review_done(review_id: int):
         await db.execute("UPDATE review_queue SET completed=1 WHERE id=?", (review_id,))
         await db.commit()
 
+
+# ── Spaced repetition (SRS): 1d → 3d → 1wk → 1mo ──
+_SRS_INTERVALS = [1, 3, 7, 30]
+
+
+async def srs_schedule(concept: str):
+    """Schedule a newly-learned concept for its first review (+1 day). No-op if already scheduled."""
+    if not (concept or "").strip():
+        return
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    due = (date.today() + dt.timedelta(days=_SRS_INTERVALS[0])).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO srs_reviews (concept, rep, next_due, created_at) VALUES (?,0,?,?)",
+            (concept.strip(), due, now))
+        await db.commit()
+
+
+async def srs_advance(concept: str):
+    """Move a concept to its next interval after it's been reviewed."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT rep FROM srs_reviews WHERE concept=?", (concept,))
+        row = await cur.fetchone()
+        rep = (row["rep"] if row else 0) + 1
+        interval = _SRS_INTERVALS[min(rep, len(_SRS_INTERVALS) - 1)]
+        nxt = (date.today() + dt.timedelta(days=interval)).isoformat()
+        await db.execute(
+            "UPDATE srs_reviews SET rep=?, next_due=?, last_reviewed=? WHERE concept=?",
+            (rep, nxt, date.today().isoformat(), concept))
+        await db.commit()
+
+
+async def srs_due(today_str: str) -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT concept, rep, next_due FROM srs_reviews WHERE next_due<=? ORDER BY next_due ASC", (today_str,))
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def srs_all() -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT concept, rep, next_due, last_reviewed FROM srs_reviews ORDER BY next_due ASC")
+        return [dict(r) for r in await cur.fetchall()]
+
 async def extract_and_save_facts(user_message: str, assistant_response: str):
     prompt = f"""
 Analyze this exchange and extract permanent facts about the user worth remembering.
@@ -1982,6 +2056,39 @@ async def run_curriculum_planner(skill_level, history_concepts):
             "pedagogical_focus": f"Revisit and solidify understanding at {due_review['difficulty']} level.",
             "assert_template": "Write assertions that specifically test the areas you previously struggled with."
         }
+
+    # Spaced repetition — a concept due for review takes priority over new material.
+    srs_list = await srs_due(today_str)
+    if srs_list:
+        c = srs_list[0]["concept"]
+        await srs_advance(c)
+        print(f"🔁 [SRS]: reviewing '{c}' (rep {srs_list[0]['rep']})")
+        return {
+            "concept": c,
+            "pedagogical_focus": f"Spaced review of {c} — recall and re-derive the key ideas from memory, then check yourself.",
+            "assert_template": "Write assertions that re-verify the core behaviour of this concept.",
+        }
+
+    # Study track — walk an ordered role-targeted syllabus (AI Engineering, ML Foundations, …)
+    # in order, skipping concepts already covered. Falls through to free-choice once complete.
+    track_key = get_setting("study_track", "")
+    if track_key:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT DISTINCT concept FROM sent_history") as cur:
+                completed = {r[0].strip().lower() for r in await cur.fetchall() if r and r[0]}
+        try:
+            from study_tracks import next_concept as _next_track_concept
+            concept, track = _next_track_concept(track_key, completed)
+        except Exception as _e:
+            print(f"⚠️ study track lookup failed: {_e}")
+            concept, track = None, None
+        if concept and track:
+            print(f"🎓 [Study track {track['name']}]: next concept '{concept}'")
+            return {
+                "concept": concept,
+                "pedagogical_focus": f"Build a solid, practical understanding of {concept} within {track['domain']}.",
+                "assert_template": "Write assertions that verify the core behaviour of what you implement for this concept.",
+            }
 
     exclusions = history_concepts
 
@@ -2467,22 +2574,51 @@ async def run_qa_critic(content: str, reference_code: str) -> tuple[bool, str]:
 # ==========================================
 # 9. CREATOR AGENT
 # ==========================================
-async def generate_daily_payload(raw_data, skill_level, exclusions, planner_context, project_context, feedback_loop_msg=""):
+async def generate_daily_payload(raw_data, skill_level, exclusions, planner_context, project_context, feedback_loop_msg="", include_project=True):
     print("🤖 [Creator Agent]: Requesting compact update from Claude...")
 
     concept = planner_context.get("concept")
     pedagogical_focus = planner_context.get("pedagogical_focus")
     assert_template = planner_context.get("assert_template")
 
-    # Project section — always shows full project name + today's subtask only
+    # Project section — always shows full project name + today's subtask only.
+    # Web daily update sets include_project=False (news + concept + a runnable demo, no project).
     project_section = ""
-    if project_context:
+    if project_context and include_project:
         project_section = (
             f"\n*🏗️ THIS WEEK'S PROJECT:*\n"
             f"_{project_context.get('project_title', '')}_\n\n"
             f"*Today — Day {project_context.get('day_number', 1)}: {project_context.get('subtask_title', '')}*\n"
             f"{project_context.get('subtask_description', '')}"
         )
+
+    if include_project:
+        project_line = (f"IMPORTANT: Today's mini project is directly about {concept}. \n"
+                        f"The project, subtask, and learning content must all be on the same topic.\n")
+        learn_block = (
+            "*📘 WHAT I NEED TO LEARN & PROJECTS TO WORK ON*\n"
+            f"- *Core Concept to Master Today*: {concept} — {pedagogical_focus}\n"
+            "- *Practical Mini-Project Blueprint*: A quick technical project loop.\n"
+            "- *QA Validation Lines*:\n"
+            "assert your_function_here() == expected_value\n"
+            "assert your_second_function(input) == specific_result\n"
+            "assert your_third_function() == True\n\n"
+            "CRITICAL ASSERTION RULES:\n"
+            "1. Every assertion MUST start with \"assert \" (lowercase)\n"
+            "2. Every assertion MUST check a SPECIFIC value not just is not None\n"
+            "3. Functions must match exactly what is defined in reference implementation\n"
+            "4. Assertions must test actual concept logic\n\n"
+            "Structure the <reference_implementation> as valid Python code with function definitions.")
+    else:
+        project_line = ""
+        learn_block = (
+            "*📘 WHAT I NEED TO LEARN*\n"
+            f"- *Core Concept to Master Today*: {concept} — {pedagogical_focus}\n"
+            "- *Why it matters*: one sentence on where this shows up in real AI systems.\n"
+            "- *Key ideas*: 2-3 tight bullets a learner should walk away knowing.\n\n"
+            f"Structure the <reference_implementation> as a SHORT, self-contained, runnable Python snippet "
+            f"(10-25 lines) that demonstrates {concept} concretely — a learning example, not a project. "
+            "Include a couple of print() calls so running it shows the idea in action.")
 
     prompt = f"""HARD LIMIT: Return EXACTLY 5 news items. Not 4. Not 6. Not 20.
 Exactly 5 items in the updates section.
@@ -2497,9 +2633,7 @@ Today's Curriculum Focus:
 - Pedagogical Focus: {pedagogical_focus}
 - Assert Template Guide: {assert_template}
 
-IMPORTANT: Today's mini project is directly about {concept}. 
-The project, subtask, and learning content must all be on the same topic.
-
+{project_line}
 Using these fresh live internet updates:
 {raw_data}
 
@@ -2515,21 +2649,7 @@ Structure the <whatsapp_payload> EXACTLY as:
 (Return EXACTLY 5 news items maximum. Not 6, not 7, not 20. Exactly 5. Each item must be under 100 characters.)
 Stop after item 5. Do not add item 6 or beyond under any circumstances.
 
-*📘 WHAT I NEED TO LEARN & PROJECTS TO WORK ON*
-- *Core Concept to Master Today*: {concept} — {pedagogical_focus}
-- *Practical Mini-Project Blueprint*: A quick technical project loop.
-- *QA Validation Lines*:
-assert your_function_here() == expected_value
-assert your_second_function(input) == specific_result
-assert your_third_function() == True
-
-CRITICAL ASSERTION RULES:
-1. Every assertion MUST start with "assert " (lowercase)
-2. Every assertion MUST check a SPECIFIC value not just is not None
-3. Functions must match exactly what is defined in reference implementation
-4. Assertions must test actual concept logic
-
-Structure the <reference_implementation> as valid Python code with function definitions.
+{learn_block}
 
 CRITICAL OUTPUT FORMAT: Wrap your entire final answer in
 <whatsapp_payload> and </whatsapp_payload> tags.
@@ -3355,14 +3475,17 @@ async def generate_daily_web_digest():
                           for i, a in enumerate(news_items[:3])]
         news_context = "\n\n".join(context_blocks)
         exclusions = ", ".join(recent_topics) if recent_topics else "None"
-        project_context = await get_or_create_weekly_project(concept, skill)
 
+        # Web daily update: no weekly project, no mini-project/QA-asserts — just news + concept
+        # + a short runnable demo. (The WhatsApp morning digest still includes the project.)
         final_text, reference_code = await generate_daily_payload(
-            news_context, skill, exclusions, planner_context, project_context)
+            news_context, skill, exclusions, planner_context, {}, include_project=False)
         final_text = extract_final_payload(enforce_content_limits(final_text))
         if not final_text or len(final_text) < 50:
             final_text = f"🔴 REGULAR DAILY AI UPDATES\nContent generation hiccuped — regenerate.\n\n📘 WHAT I NEED TO LEARN\nToday's concept: {concept}"
-        is_valid, _ = await run_qa_critic(final_text, reference_code)
+        # Lightweight validation — the heavy assert/sandbox/mutation QA only applies to the project.
+        is_valid = ("📘 WHAT I NEED TO LEARN" in final_text) and len(final_text) >= 120
+        project_context = {}
 
         today = date.today().isoformat()
         now = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -3380,6 +3503,7 @@ async def generate_daily_web_digest():
                 (today, json.dumps(news_display), concept, planner_context.get("pedagogical_focus", ""),
                  json.dumps(project_context), final_text, reference_code, now))
             await db.commit()
+        await srs_schedule(concept)  # queue this concept for spaced review (+1d, then 3/7/30)
         _store_notification(f"📰 Today's AI update is ready — {concept}. Open the Daily tab.", "daily")
         await _log_job("generate_daily_web_digest", "completed", f"concept: {concept}")
         _malloc_trim()
@@ -3478,6 +3602,387 @@ async def daily_difficulty_api(d: str, request: Request):
         await update_db_skill(_SKILL_LADDER[idx])
         return JSONResponse({"ok": True, "skill_level": _SKILL_LADDER[idx]})
     return JSONResponse({"ok": True})
+
+
+# ── Study track — pick a role-targeted syllabus for the Daily AI Update ──
+async def _completed_concepts_lower() -> set:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT DISTINCT concept FROM sent_history") as cur:
+            return {r[0].strip().lower() for r in await cur.fetchall() if r and r[0]}
+
+
+@app.get("/api/study/tracks")
+async def study_tracks_api():
+    import study_tracks
+    return JSONResponse({"tracks": study_tracks.list_tracks()})
+
+
+@app.get("/api/study/current")
+async def study_current_api():
+    import study_tracks
+    key = get_setting("study_track", "")
+    progress = study_tracks.track_progress(key, await _completed_concepts_lower()) if key else None
+    return JSONResponse({"active": key, "progress": progress})
+
+
+@app.post("/api/study/select")
+async def study_select_api(request: Request):
+    """Set the active study track (or '' / 'none' for free-choice). Also steers the domain so the
+    planner stays on-topic after the syllabus is finished."""
+    import study_tracks
+    try:
+        key = str((await request.json()).get("track_key", "")).strip()
+    except Exception:
+        key = ""
+    if key in ("", "none", "free"):
+        save_setting("study_track", "")
+        save_setting("domain_display", "general knowledge")
+        return JSONResponse({"ok": True, "active": ""})
+    t = study_tracks.TRACKS.get(key)
+    if not t:
+        return JSONResponse({"ok": False, "error": "unknown track"}, status_code=400)
+    save_setting("study_track", key)
+    save_setting("domain_display", t["domain"])
+    progress = study_tracks.track_progress(key, await _completed_concepts_lower())
+    return JSONResponse({"ok": True, "active": key, "progress": progress})
+
+
+# ── Active recall — daily quiz + "explain it back" (Feynman) ──
+def _json_obj(raw: str) -> dict:
+    raw = (raw or "").strip()
+    s = raw.find("{")
+    if s == -1:
+        raise ValueError("no JSON object")
+    obj, _ = json.JSONDecoder().raw_decode(raw[s:])
+    return obj
+
+
+_QUIZ_GEN_PROMPT = (
+    "You are a study coach. Given a CONCEPT and its lesson, write 2-3 short active-recall questions "
+    "that test genuine understanding (not trivia), each with a concise ideal answer. STRICT JSON only: "
+    '{"questions":[{"q":"...","ideal":"..."}]} — 2-3 items. Output JSON only.')
+_QUIZ_GRADE_PROMPT = (
+    "You are grading a learner's recall answers. For each item you get the question, the ideal answer "
+    "and the learner's answer. Judge each as correct / partial / incorrect and give a 1-2 sentence "
+    "explanation that teaches. Give an overall 0-100 score. STRICT JSON only: "
+    '{"overall":<int>,"items":[{"verdict":"correct|partial|incorrect","explanation":"..."}]} '
+    "(items in the same order). Output JSON only.")
+_FEYNMAN_PROMPT = (
+    "You are a study coach using the Feynman technique. Given a CONCEPT and the learner's plain-language "
+    "explanation, assess whether they truly understand it. Say what's correct, and specifically what's "
+    "missing or wrong. Encouraging but honest. STRICT JSON only: "
+    '{"rating":"solid|partial|shaky","correct":"...","missing":["..."],"feedback":"..."} Output JSON only.')
+
+
+async def _get_digest_row(d: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT concept, digest_text FROM daily_web_digest WHERE date = ?", (d,))
+        return await cur.fetchone()
+
+
+@app.post("/api/daily/{d}/quiz")
+async def daily_quiz_api(d: str):
+    """Return the recall quiz for a day's concept (cached, or generated on first call).
+    Ideal answers are withheld from the client — they're used server-side for grading."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT quiz_json, grade_json FROM study_recall WHERE date = ?", (d,))
+        row = await cur.fetchone()
+    if row and row["quiz_json"]:
+        qs = json.loads(row["quiz_json"])
+        return JSONResponse({"questions": [{"q": q.get("q", "")} for q in qs],
+                             "graded": json.loads(row["grade_json"]) if row["grade_json"] else None})
+    dig = await _get_digest_row(d)
+    if not dig:
+        return JSONResponse({"error": "No lesson for that date."}, status_code=404)
+    user = f"CONCEPT: {dig['concept']}\n\nLESSON:\n{(dig['digest_text'] or '')[:2000]}\n\nWrite the quiz."
+    try:
+        qs = (_json_obj(await call_llm(_QUIZ_GEN_PROMPT, user, max_tokens=700, temperature=0.3)) or {}).get("questions", [])
+    except Exception as e:
+        return JSONResponse({"error": f"Quiz generation failed: {e}"}, status_code=400)
+    qs = [q for q in qs if isinstance(q, dict) and q.get("q")][:3]
+    if not qs:
+        return JSONResponse({"error": "Couldn't generate a quiz — try regenerating the lesson."}, status_code=400)
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO study_recall (date, concept, quiz_json, created_at) VALUES (?,?,?,?)
+               ON CONFLICT(date) DO UPDATE SET concept=excluded.concept, quiz_json=excluded.quiz_json""",
+            (d, dig["concept"], json.dumps(qs), now))
+        await db.commit()
+    return JSONResponse({"questions": [{"q": q["q"]} for q in qs], "graded": None})
+
+
+@app.post("/api/daily/{d}/quiz/grade")
+async def daily_quiz_grade_api(d: str, request: Request):
+    try:
+        answers = (await request.json()).get("answers", [])
+    except Exception:
+        answers = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT concept, quiz_json FROM study_recall WHERE date = ?", (d,))
+        row = await cur.fetchone()
+    if not row or not row["quiz_json"]:
+        return JSONResponse({"error": "Generate the quiz first."}, status_code=400)
+    qs = json.loads(row["quiz_json"])
+    lines = [f"{i+1}. Q: {q.get('q','')}\n   Ideal: {q.get('ideal','')}\n   Learner: {answers[i] if i < len(answers) else '(blank)'}"
+             for i, q in enumerate(qs)]
+    try:
+        graded = _json_obj(await call_llm(_QUIZ_GRADE_PROMPT, f"CONCEPT: {row['concept']}\n\n" + "\n".join(lines), max_tokens=900, temperature=0.0))
+    except Exception as e:
+        return JSONResponse({"error": f"Grading failed: {e}"}, status_code=400)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE study_recall SET grade_json = ? WHERE date = ?", (json.dumps(graded), d))
+        await db.commit()
+    return JSONResponse(graded)
+
+
+@app.post("/api/daily/{d}/feynman")
+async def daily_feynman_api(d: str, request: Request):
+    try:
+        explanation = str((await request.json()).get("explanation", "")).strip()
+    except Exception:
+        explanation = ""
+    if len(explanation) < 10:
+        return JSONResponse({"error": "Write a couple of sentences explaining it in your own words."}, status_code=400)
+    dig = await _get_digest_row(d)
+    if not dig:
+        return JSONResponse({"error": "No lesson for that date."}, status_code=404)
+    try:
+        res = _json_obj(await call_llm(_FEYNMAN_PROMPT, f"CONCEPT: {dig['concept']}\n\nLEARNER'S EXPLANATION:\n{explanation[:1500]}", max_tokens=700, temperature=0.2))
+    except Exception as e:
+        return JSONResponse({"error": f"Assessment failed: {e}"}, status_code=400)
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO study_recall (date, concept, feynman_json, created_at) VALUES (?,?,?,?)
+               ON CONFLICT(date) DO UPDATE SET feynman_json=excluded.feynman_json""",
+            (d, dig["concept"], json.dumps(res), now))
+        await db.commit()
+    return JSONResponse(res)
+
+
+# ── Spaced-repetition reviews + study tracking (streak, mastery) ──
+@app.get("/api/study/reviews")
+async def study_reviews_api():
+    today = date.today().isoformat()
+    allr = await srs_all()
+    due = [r for r in allr if (r.get("next_due") or "9999") <= today]
+    upcoming = [r for r in allr if (r.get("next_due") or "9999") > today]
+    return JSONResponse({"due": due, "upcoming": upcoming[:10], "due_count": len(due)})
+
+
+@app.get("/api/study/stats")
+async def study_stats_api():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        dates = [r["date"] for r in await (await db.execute("SELECT date FROM daily_web_digest ORDER BY date DESC")).fetchall()]
+        recalls = [dict(r) for r in await (await db.execute("SELECT concept, grade_json FROM study_recall WHERE grade_json IS NOT NULL")).fetchall()]
+    # Streak: consecutive days up to today (or yesterday) with a lesson.
+    dset = set(dates)
+    streak = 0
+    cur_day = date.today()
+    if cur_day.isoformat() not in dset:
+        cur_day = cur_day - dt.timedelta(days=1)  # allow "today not done yet"
+    while cur_day.isoformat() in dset:
+        streak += 1
+        cur_day = cur_day - dt.timedelta(days=1)
+    # Mastery from latest quiz score per concept.
+    mastery = []
+    scores = []
+    for r in recalls:
+        try:
+            ov = json.loads(r["grade_json"]).get("overall")
+        except Exception:
+            ov = None
+        if isinstance(ov, (int, float)):
+            mastery.append({"concept": r["concept"], "score": int(ov)})
+            scores.append(int(ov))
+    mastery.sort(key=lambda m: m["score"])  # weakest first (what to review)
+    reviews_due = len(await srs_due(date.today().isoformat()))
+    return JSONResponse({
+        "streak": streak,
+        "concepts_learned": len(dset),
+        "quizzed": len(scores),
+        "avg_recall": round(sum(scores) / len(scores)) if scores else None,
+        "mastery": mastery[:20],
+        "reviews_due": reviews_due,
+    })
+
+
+@app.get("/api/study/flashcards/export")
+async def study_flashcards_export_api():
+    """Anki-ready flashcards (tab-separated: front<TAB>back) built from every recall quiz taken."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute("SELECT concept, quiz_json FROM study_recall WHERE quiz_json IS NOT NULL")).fetchall()
+    lines = []
+    for r in rows:
+        try:
+            for q in json.loads(r["quiz_json"]):
+                front = (q.get("q") or "").replace("\t", " ").replace("\n", " ").strip()
+                back = (q.get("ideal") or "").replace("\t", " ").replace("\n", " ").strip()
+                if front and back:
+                    lines.append(f"{front}\t{back}")
+        except Exception:
+            continue
+    body = "\n".join(lines) or "No flashcards yet — take a recall quiz first."
+    return Response(content=body, media_type="text/tab-separated-values",
+                    headers={"Content-Disposition": 'attachment; filename="jarvis_flashcards.tsv"'})
+
+
+@app.post("/api/study/weekly-recap")
+async def study_weekly_recap_api():
+    """Synthesize the week's concepts into a recap + a short combined quiz."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute("SELECT DISTINCT concept FROM daily_web_digest ORDER BY date DESC LIMIT 7")).fetchall()
+    concepts = [r["concept"] for r in rows if r["concept"]]
+    if not concepts:
+        return JSONResponse({"error": "No lessons yet this week."}, status_code=400)
+    sys = ("You are a study coach writing a weekly recap. Given the concepts a learner studied this "
+           "week, write a tight synthesis connecting them, then 3 mixed recall questions. STRICT JSON only: "
+           '{"recap":"<2-4 sentences tying the week together>","quiz":["q1","q2","q3"]} Output JSON only.')
+    try:
+        res = _json_obj(await call_llm(sys, "This week's concepts:\n- " + "\n- ".join(concepts), max_tokens=900, temperature=0.3))
+    except Exception as e:
+        return JSONResponse({"error": f"Recap failed: {e}"}, status_code=400)
+    res["concepts"] = concepts
+    return JSONResponse(res)
+
+
+@app.get("/api/daily/{d}/followups")
+async def daily_followups_thread_api(d: str):
+    """The persistent follow-up chat thread for a day's concept (chronological)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT role, content, created_at FROM study_followups WHERE date = ? ORDER BY id ASC", (d,))
+        turns = [dict(r) for r in await cur.fetchall()]
+    return JSONResponse({"turns": turns})
+
+
+@app.post("/api/daily/{d}/followup")
+async def daily_followup_api(d: str, request: Request):
+    """Ask a follow-up about the day's concept — a persistent, multi-turn chat thread. Each turn
+    is grounded in the lesson AND the prior conversation, so questions can build on each other."""
+    try:
+        question = str((await request.json()).get("question", "")).strip()
+    except Exception:
+        question = ""
+    if len(question) < 3:
+        return JSONResponse({"error": "Ask a question."}, status_code=400)
+    dig = await _get_digest_row(d)
+    if not dig:
+        return JSONResponse({"error": "No lesson for that date."}, status_code=404)
+    # Pull the running thread so the tutor has conversational memory.
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT role, content FROM study_followups WHERE date = ? ORDER BY id ASC", (d,))
+        prior = [dict(r) for r in await cur.fetchall()]
+    sys = ("You are a patient tutor continuing a conversation about one concept. Answer the learner's "
+           "latest question clearly and concisely (3-6 sentences), grounded in the lesson and consistent "
+           "with what you've already told them. Use a concrete example if it helps. If they refer to "
+           "'that' or 'it', resolve it from the conversation so far.")
+    history = "\n".join(f"{'Learner' if t['role'] == 'user' else 'Tutor'}: {t['content']}" for t in prior[-8:])
+    user = (f"CONCEPT: {dig['concept']}\n\nLESSON:\n{(dig['digest_text'] or '')[:1400]}\n\n"
+            f"{('CONVERSATION SO FAR:' + chr(10) + history + chr(10) + chr(10)) if history else ''}"
+            f"LATEST QUESTION: {question}")
+    try:
+        answer = (await call_llm(sys, user, max_tokens=600, temperature=0.4) or "").strip()
+    except Exception as e:
+        return JSONResponse({"error": f"Answer failed: {e}"}, status_code=400)
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executemany(
+            "INSERT INTO study_followups (date, concept, role, content, created_at) VALUES (?,?,?,?,?)",
+            [(d, dig["concept"], "user", question, now),
+             (d, dig["concept"], "assistant", answer, now)])
+        await db.commit()
+    return JSONResponse({"answer": answer})
+
+
+@app.post("/api/daily/{d}/check-code")
+async def daily_check_code_api(d: str, request: Request):
+    """Check the learner's code attempt against the concept + reference implementation (LLM review —
+    no code is executed)."""
+    try:
+        code = str((await request.json()).get("code", "")).strip()
+    except Exception:
+        code = ""
+    if len(code) < 5:
+        return JSONResponse({"error": "Paste your code attempt."}, status_code=400)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT concept, reference_code FROM daily_web_digest WHERE date = ?", (d,))
+        row = await cur.fetchone()
+    if not row:
+        return JSONResponse({"error": "No lesson for that date."}, status_code=404)
+    sys = ("You are a code reviewer for a learner practising a concept. Given the CONCEPT, a REFERENCE "
+           "implementation, and the learner's ATTEMPT, judge whether the attempt correctly implements the "
+           "concept. Do NOT execute code — reason about it. STRICT JSON only: "
+           '{"passed":<bool>,"feedback":"<what works, what to fix, 2-4 sentences>"} Output JSON only.')
+    user = f"CONCEPT: {row['concept']}\n\nREFERENCE:\n{(row['reference_code'] or '')[:1200]}\n\nATTEMPT:\n{code[:1500]}"
+    try:
+        res = _json_obj(await call_llm(sys, user, max_tokens=500, temperature=0.0))
+    except Exception as e:
+        return JSONResponse({"error": f"Check failed: {e}"}, status_code=400)
+    return JSONResponse({"passed": bool(res.get("passed")), "feedback": res.get("feedback", "")})
+
+
+@app.post("/api/daily/{d}/save-note")
+async def daily_save_note_api(d: str, request: Request):
+    """Save into the Workspace notes / knowledge base. If a `text` highlight is sent, save just that
+    (tagged to the concept); otherwise save the full lesson."""
+    try:
+        highlight = str((await request.json()).get("text", "")).strip()
+    except Exception:
+        highlight = ""
+    dig = await _get_digest_row(d)
+    if not dig:
+        return JSONResponse({"error": "No lesson for that date."}, status_code=404)
+    if highlight:
+        title = f"✨ {dig['concept']} — highlight ({d})"
+        body = f"{highlight}\n\n— from your {d} lesson on *{dig['concept']}*"
+    else:
+        title = f"📘 {dig['concept']} ({d})"
+        body = dig["digest_text"] or ""
+    note = await create_note(title=title, body=body)
+    return JSONResponse({"ok": True, "note_id": note.get("id"), "kind": "highlight" if highlight else "lesson"})
+
+
+@app.get("/api/study/notes/search")
+async def study_notes_search_api(q: str = ""):
+    """Search-back over saved lessons + highlights (and any workspace note). Simple ranked LIKE match
+    across title + body — free, no embeddings."""
+    q = (q or "").strip()
+    if len(q) < 2:
+        return JSONResponse({"results": []})
+    like = f"%{q}%"
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """SELECT id, title, body, updated_at FROM workspace_notes
+               WHERE title LIKE ? OR body LIKE ?
+               ORDER BY (CASE WHEN title LIKE ? THEN 0 ELSE 1 END), updated_at DESC LIMIT 15""",
+            (like, like, like))
+        rows = [dict(r) for r in await cur.fetchall()]
+    # Build a short snippet around the first match for each hit.
+    results = []
+    ql = q.lower()
+    for r in rows:
+        body = r.get("body") or ""
+        idx = body.lower().find(ql)
+        if idx >= 0:
+            start = max(0, idx - 60)
+            snippet = ("…" if start > 0 else "") + body[start:idx + len(q) + 90].strip() + "…"
+        else:
+            snippet = body[:150].strip() + ("…" if len(body) > 150 else "")
+        results.append({"id": r["id"], "title": r["title"], "snippet": snippet, "updated_at": r["updated_at"]})
+    return JSONResponse({"results": results})
 
 
 # ==========================================

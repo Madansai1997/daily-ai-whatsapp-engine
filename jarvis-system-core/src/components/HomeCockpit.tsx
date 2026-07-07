@@ -4,6 +4,7 @@ import { ScreenId } from "../types";
 import {
   Volume2, Square, RefreshCw, ArrowRight, Sparkles, Clock, CalendarClock,
   Wallet, Users, AlertTriangle, MessageSquare, Sun, Coffee, Moon, CheckCircle2,
+  Newspaper, ExternalLink, BookOpen,
 } from "lucide-react";
 
 interface CockpitStep {
@@ -20,6 +21,9 @@ interface Props {
   onNavigate: (screen: ScreenId, intent?: string) => void;
 }
 
+interface Headline { title: string; url: string; snippet: string; }
+interface DailySnapshot { empty?: boolean; date?: string; concept?: string; news?: Headline[]; }
+
 const SEV: Record<string, string> = {
   red: "#ffb4ab", green: "#5eead4", purple: "#c084fc", amber: "#ffd6a3", grey: "#859397",
 };
@@ -32,6 +36,7 @@ export default function HomeCockpit({ onNavigate }: Props) {
   const [data, setData] = useState<Cockpit | null>(null);
   const [loading, setLoading] = useState(true);
   const [speaking, setSpeaking] = useState(false);
+  const [daily, setDaily] = useState<DailySnapshot | null>(null);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -48,6 +53,14 @@ export default function HomeCockpit({ onNavigate }: Props) {
     const t = setInterval(() => { if (!document.hidden) load(true); }, 30000);
     return () => { clearInterval(t); try { window.speechSynthesis?.cancel(); } catch { /* */ } };
   }, [load]);
+
+  // Today's AI headlines — the "front page" strip (read-only; full lesson lives on the Daily tab).
+  useEffect(() => {
+    fetch("/api/daily/today", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d) setDaily(d); })
+      .catch(() => { /* leave empty */ });
+  }, []);
 
   // ▶ reads the full JARVIS standup aloud (browser voice; the natural Gemini voice lives on the Standup tool).
   const speakBriefing = async () => {
@@ -136,6 +149,48 @@ export default function HomeCockpit({ onNavigate }: Props) {
               );
             })}
           </div>
+        )}
+      </section>
+
+      {/* The front page — today's 5 AI headlines (newspaper strip) */}
+      <section className="glass-panel rounded-2xl border border-white/5 overflow-hidden">
+        <div className="px-5 py-3 border-b border-white/5 bg-white/[0.03] flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <Newspaper className="w-4 h-4 text-[#8aebff] shrink-0" />
+            <h2 className="text-xs font-bold font-mono uppercase tracking-widest text-[#dfe2f3]">The Daily AI</h2>
+            {daily?.date && <span className="text-[10px] font-mono text-[#5c6a6d] hidden sm:inline truncate">{daily.date}</span>}
+          </div>
+          <button onClick={() => onNavigate(ScreenId.Daily)} className="text-[10px] font-mono text-[#8aebff] hover:underline cursor-pointer shrink-0">read + study →</button>
+        </div>
+        {daily?.concept && (
+          <button onClick={() => onNavigate(ScreenId.Daily)} className="w-full text-left px-5 pt-3 flex items-center gap-2 group cursor-pointer">
+            <BookOpen className="w-3.5 h-3.5 text-[#a3e635] shrink-0" />
+            <span className="text-[11px] font-mono text-[#859397]">Today's concept:</span>
+            <span className="text-[11px] font-semibold text-[#a3e635] group-hover:underline truncate">{daily.concept}</span>
+          </button>
+        )}
+        {daily && !daily.empty && (daily.news?.length || 0) > 0 ? (
+          <ol className="divide-y divide-white/5 mt-2">
+            {daily.news!.slice(0, 5).map((n, i) => (
+              <li key={i}>
+                <a href={n.url || "#"} target={n.url ? "_blank" : undefined} rel="noreferrer"
+                  className="flex items-start gap-3 px-5 py-2.5 hover:bg-white/[0.04] transition-colors group">
+                  <span className="text-[#8aebff] font-mono text-sm font-bold leading-tight w-4 shrink-0">{i + 1}</span>
+                  <div className="min-w-0">
+                    <p className="text-[13px] text-[#dfe2f3] font-medium leading-snug group-hover:text-[#8aebff] flex items-start gap-1">
+                      <span className="min-w-0">{n.title || n.url}</span>
+                      {n.url && <ExternalLink className="w-3 h-3 opacity-40 shrink-0 mt-1" />}
+                    </p>
+                    {n.snippet && <p className="text-[11px] text-[#859397] leading-relaxed mt-0.5 line-clamp-1">{n.snippet}</p>}
+                  </div>
+                </a>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <button onClick={() => onNavigate(ScreenId.Daily)} className="w-full px-5 py-6 text-center cursor-pointer group">
+            <p className="text-[12px] text-[#859397] group-hover:text-[#bbc9cd]">No edition yet today — <span className="text-[#8aebff]">generate today's update →</span></p>
+          </button>
         )}
       </section>
 

@@ -57,6 +57,7 @@ Gmail & Google Calendar APIs · Web Push. Deployed on Render (free tier).
 - **`resume_ats_agent.py`** — Resume ATS Alignment Agent — self-contained skill module (Phase 4).
 - **`resume_editor.py`** — Résumé Editor — in-place .docx editing that PRESERVES formatting.
 - **`shared_memory.py`** — Shared memory bridge for Claude Code ⇄ Antigravity.
+- **`study_tracks.py`** — Study tracks — ordered curricula for the Daily AI Update.
 - **`trend_lab_agent.py`** — Trend Lab Agent — weekly app-idea discovery from Reddit + YouTube (free-tier only).
 - **`weather_agent.py`** — Weather Agent — self-contained skill module.
 - **`workspace_notes.py`** — Workspace Notes — a small DB-backed markdown scratchpad for the console.
@@ -75,6 +76,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `93501c5` feat(daily): web-first Daily AI Update + DISCOVER nav consolidation _(2026-07-07)_
 - `60e5d85` feat(trends): Hacker News source (free, no key) + per-idea Build Brief _(2026-07-07)_
 - `0687871` feat(trends): add subreddit mode for the RapidAPI Reddit path _(2026-07-07)_
 - `1509d7a` fix(trends): use RAPIDAPI_KEY1 env for the Reddit RapidAPI call _(2026-07-07)_
@@ -86,7 +88,6 @@ npm install && npm run build     # served by the engine at /console
 - `f3cc0e1` feat(ats): recruiter-read feedback panel + deterministic per-JD score _(2026-07-06)_
 - `fddc490` feat(ats): one-tap AUTO-FIX for the deterministic résumé points + fairer scorer _(2026-07-06)_
 - `cfc9738` fix(ats): deterministic rule-based résumé score (ends the audit thrash) _(2026-07-06)_
-- `6c30c53` feat(ats): support checkable grammar list with date-change confirmation popups _(2026-07-06)_
 <!-- /AUTO:changelog -->
 
 ---
