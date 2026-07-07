@@ -48,11 +48,11 @@ _reddit_token = {"value": "", "exp": 0.0}
 # Defaults to 'reddit-scraper2'; override the host/path/param for any other provider. The response
 # parser is schema-agnostic (finds post-like objects anywhere in the JSON), so it survives the
 # shape differences between providers.
-RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "").strip()
+RAPIDAPI_KEY1 = os.environ.get("RAPIDAPI_KEY1", "").strip()
 REDDIT_RAPIDAPI_HOST = os.environ.get("REDDIT_RAPIDAPI_HOST", "reddit-scraper2.p.rapidapi.com").strip()
 REDDIT_RAPIDAPI_PATH = os.environ.get("REDDIT_RAPIDAPI_PATH", "/search_posts").strip()
 REDDIT_RAPIDAPI_QPARAM = os.environ.get("REDDIT_RAPIDAPI_QUERY_PARAM", "query").strip()
-REDDIT_VIA_RAPIDAPI = bool(RAPIDAPI_KEY and REDDIT_RAPIDAPI_HOST)
+REDDIT_VIA_RAPIDAPI = bool(RAPIDAPI_KEY1 and REDDIT_RAPIDAPI_HOST)
 
 # Subreddits where product-request language is dense.
 REDDIT_SUBS = ["SomebodyMakeThis", "AppIdeas", "Lightbulb", "SideProject",
@@ -241,7 +241,7 @@ def _rapidapi_reddit_get(query):
         r = requests.get(
             f"https://{REDDIT_RAPIDAPI_HOST}{REDDIT_RAPIDAPI_PATH}",
             params={REDDIT_RAPIDAPI_QPARAM: query, "sort": "NEW", "time": "month"},
-            headers={"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": REDDIT_RAPIDAPI_HOST,
+            headers={"X-RapidAPI-Key": RAPIDAPI_KEY1, "X-RapidAPI-Host": REDDIT_RAPIDAPI_HOST,
                      "User-Agent": USER_AGENT}, timeout=20)
         if r.status_code != 200:
             print(f"⚠️ [trend_lab] rapidapi reddit HTTP {r.status_code} — "
