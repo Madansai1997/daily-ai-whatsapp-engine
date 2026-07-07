@@ -74,6 +74,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `4106740` feat(jobs): dual ATS+recruiter score badges, header help button, audit fixes _(2026-07-07)_
 - `231ab42` feat(console): Help & Guide screen, delete-résumé, cleaner audit suggestions _(2026-07-06)_
 - `f3cc0e1` feat(ats): recruiter-read feedback panel + deterministic per-JD score _(2026-07-06)_
 - `fddc490` feat(ats): one-tap AUTO-FIX for the deterministic résumé points + fairer scorer _(2026-07-06)_
@@ -85,7 +86,6 @@ npm install && npm run build     # served by the engine at /console
 - `1d6fb70` feat(ats): support applying resume audit grammar suggestions directly to docx _(2026-07-06)_
 - `bf92d81` fix(ats): fix master resume download corruption _(2026-07-05)_
 - `44297ff` fix(ats): make resume text extraction robust to invalid formats _(2026-07-05)_
-- `660b424` feat(ats): add resume download and audit upload/auto-rescan _(2026-07-05)_
 <!-- /AUTO:changelog -->
 
 ---

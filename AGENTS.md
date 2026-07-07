@@ -8,7 +8,7 @@
 > ```
 > List / remove: `python3 shared_memory.py list` · `python3 shared_memory.py rm <key>`
 
-_14 shared memories · last rendered 2026-07-05 11:42 UTC_
+_14 shared memories · last rendered 2026-07-06 12:27 UTC_
 
 ## Feedback — how to work
 
@@ -55,9 +55,6 @@ All user-facing JARVIS responses across this project (WhatsApp replies, web chat
 - The existing WhatsApp/general-chat system prompt in `process_message()`'s `GENERAL CONVERSATIONAL CHAT` fallback must NOT be touched per earlier standing instruction — this quality bar applies to new/other response paths, not as license to rewrite that specific prompt.
 
 ## Project — ongoing work & constraints
-
-### console-guided-flow-plan _(via claude-code)_
-PLAN — reorganize the whole JARVIS console into a proper guided, ordered flow (approved 2026-07-05). Reference model = job-search lifecycle: (1) Discover (2) Assess (3) Apply (4) Track (5) Follow-up (6) Interview (7) Reflect. Everything's layout + 'next step' logic obeys this spine. Execution steps, in order: Step 2 = HOME COCKPIT (make Core the default landing screen: greeting + JARVIS voice, a prioritized clickable 'Next steps' queue that deep-links into each tool, a Pipeline pulse with week-momentum folded in, and an 'Ask JARVIS' footer that opens chat). Reuses daily_standup.gather() data — cheap, free-tier. Needs a small 'navigation intents' mechanism so a Home button can open a specific modal on the Jobs screen. Step 3 = reorder Jobs Tools dropdown into lifecycle groups (Discover/Assess/Apply/Follow-up/Interview; Standup moves to Home; Notes=Workspace). Step 4 = reorder top nav HOME→JOBS→INSIGHTS→BILLS→JARVIS→TERMINAL, rename Core→HOME (fixes the two-JARVIS-screens redundancy; chat stays in the Assistant screen). Step 5 = inline next-step cues on kanban cards (Applied>7d shows 'Follow up', interview-matched shows 'Prep'). Each step ships alone, tested under SAFE_MODE, no commit until user says. Started with Step 2.
 
 ### project_whatsapp_engine_oom _(via claude-code)_
 "WhatsApp engine OOM on Render — root cause is glibc malloc-arena ratcheting, not a single spike"
@@ -200,6 +197,9 @@ Wiring: cron endpoint `POST /cron/scan-applications`; run-job name `scan-applica
 **User must add to cron-job.org (external scheduler on Render): two daily hits to `/cron/scan-applications?token=<CLAUDE_CODE_TRIGGER_SECRET>` — ~8:30 AM & ~9:00 PM IST.** Internal-scheduler (local) already registers both.
 
 Committed + pushed to Render 2026-07-03 (commit c65f498), together with: manual Add-Job + chat quick-add ("applied to X at Y on Naukri" → APPLICATION_ACTION add), paste-JD-on-demand ATS for JD-less cards, deterministic ATS keyword present/missing reconciliation, per-card ATS score badges (colour + high→low sort), and PENDING ANALYSES = roles-not-yet-scored. Still pending on Render: the 2 cron-job.org entries above, and verify the master résumé in prod Turso is the real one (not the 66-char stub) via RÉSUMÉ → Upload on the live site.
+
+### console-guided-flow-plan _(via claude-code)_
+PLAN — reorganize the whole JARVIS console into a proper guided, ordered flow (approved 2026-07-05). Reference model = job-search lifecycle: (1) Discover (2) Assess (3) Apply (4) Track (5) Follow-up (6) Interview (7) Reflect. Everything's layout + 'next step' logic obeys this spine. Execution steps, in order: Step 2 = HOME COCKPIT (make Core the default landing screen: greeting + JARVIS voice, a prioritized clickable 'Next steps' queue that deep-links into each tool, a Pipeline pulse with week-momentum folded in, and an 'Ask JARVIS' footer that opens chat). Reuses daily_standup.gather() data — cheap, free-tier. Needs a small 'navigation intents' mechanism so a Home button can open a specific modal on the Jobs screen. Step 3 = reorder Jobs Tools dropdown into lifecycle groups (Discover/Assess/Apply/Follow-up/Interview; Standup moves to Home; Notes=Workspace). Step 4 = reorder top nav HOME→JOBS→INSIGHTS→BILLS→JARVIS→TERMINAL, rename Core→HOME (fixes the two-JARVIS-screens redundancy; chat stays in the Assistant screen). Step 5 = inline next-step cues on kanban cards (Applied>7d shows 'Follow up', interview-matched shows 'Prep'). Each step ships alone, tested under SAFE_MODE, no commit until user says. Started with Step 2.
 
 ## Reference — pointers & resources
 

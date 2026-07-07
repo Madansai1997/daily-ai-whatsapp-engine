@@ -429,6 +429,13 @@ MEMORY_INTENT_PROMPT = (
 )
 
 def get_llm_client() -> AsyncOpenAI:
+    omni_url = os.environ.get("OMNIROUTE_URL", "").strip()
+    if omni_url:
+        print(f"🔌 OmniRoute local gateway enabled for Groq ({omni_url})")
+        return AsyncOpenAI(
+            base_url=omni_url,
+            api_key="omniroute",
+        )
     key = os.environ.get("GROQ_API_KEY", "")
     if not key:
         print("⚠️ WARNING: GROQ_API_KEY not set!")
@@ -442,6 +449,13 @@ anthropic_client = get_llm_client()  # kept same name so all call sites work unc
 
 def get_gemini_client() -> AsyncOpenAI | None:
     """Google AI Studio's OpenAI-compatible client, or None if no key is configured."""
+    omni_url = os.environ.get("OMNIROUTE_URL", "").strip()
+    if omni_url:
+        print(f"🔌 OmniRoute local gateway enabled for Gemini ({omni_url})")
+        return AsyncOpenAI(
+            base_url=omni_url,
+            api_key="omniroute",
+        )
     if not GEMINI_API_KEY:
         return None
     return AsyncOpenAI(base_url=GEMINI_BASE_URL, api_key=GEMINI_API_KEY)
@@ -497,6 +511,18 @@ async def _complete_with_fallback(messages: list, max_tokens: int, temperature: 
     """
     last_err = None
     for client, model in _model_chain():
+        # If calling OmniRoute, map model IDs to prefixed names to avoid ambiguity
+        omni_url = os.environ.get("OMNIROUTE_URL", "").strip()
+        if omni_url:
+            if model == "openai/gpt-oss-120b":
+                model = "groq/openai/gpt-oss-120b"
+            elif model == "llama-3.3-70b-versatile":
+                model = "groq/llama-3.3-70b-versatile"
+            elif model == "llama-3.1-8b-instant":
+                model = "groq/llama-3.1-8b-instant"
+            elif model == "gemini-2.5-flash":
+                model = "openrouter/google/gemini-2.5-flash"
+
         try:
             extra_body = {"reasoning_effort": "low"} if "gpt-oss" in model else {}
             kwargs = {
