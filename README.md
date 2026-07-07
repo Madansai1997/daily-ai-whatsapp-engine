@@ -75,6 +75,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `1509d7a` fix(trends): use RAPIDAPI_KEY1 env for the Reddit RapidAPI call _(2026-07-07)_
 - `1a1bef0` feat(trends): richer YouTube (comment mining) + RapidAPI Reddit path _(2026-07-07)_
 - `16e1159` feat(trends): Trend Lab — weekly app-idea discovery from Reddit + YouTube _(2026-07-07)_
 - `edbbb56` feat: integrate OmniRoute local AI gateway and rebuild master resume with audit updates _(2026-07-07)_
@@ -86,7 +87,6 @@ npm install && npm run build     # served by the engine at /console
 - `6c30c53` feat(ats): support checkable grammar list with date-change confirmation popups _(2026-07-06)_
 - `675e482` feat(ats): add rebuild_resume.py master cv restructuring script _(2026-07-06)_
 - `658cc96` feat(ats): support interactive keyword selection and injection in resume audit _(2026-07-06)_
-- `d88175a` feat(ats): upgrade apply_rewrites matching robustness and add changes details dialog _(2026-07-06)_
 <!-- /AUTO:changelog -->
 
 ---

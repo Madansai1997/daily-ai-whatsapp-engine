@@ -52,6 +52,11 @@ RAPIDAPI_KEY1 = os.environ.get("RAPIDAPI_KEY1", "").strip()
 REDDIT_RAPIDAPI_HOST = os.environ.get("REDDIT_RAPIDAPI_HOST", "reddit-scraper2.p.rapidapi.com").strip()
 REDDIT_RAPIDAPI_PATH = os.environ.get("REDDIT_RAPIDAPI_PATH", "/search_posts").strip()
 REDDIT_RAPIDAPI_QPARAM = os.environ.get("REDDIT_RAPIDAPI_QUERY_PARAM", "query").strip()
+# "search" = iterate WISH_PHRASES against a keyword-search endpoint.
+# "subreddit" = iterate REDDIT_SUBS against a per-subreddit endpoint (e.g. reddit34
+#   /getPostsBySubreddit?subreddit=…). The idea subs are already request-dense, so this works well.
+REDDIT_RAPIDAPI_MODE = os.environ.get("REDDIT_RAPIDAPI_MODE", "search").strip().lower()
+REDDIT_RAPIDAPI_SORT = os.environ.get("REDDIT_RAPIDAPI_SORT", "new").strip()
 REDDIT_VIA_RAPIDAPI = bool(RAPIDAPI_KEY1 and REDDIT_RAPIDAPI_HOST)
 
 # Subreddits where product-request language is dense.
@@ -240,7 +245,7 @@ def _rapidapi_reddit_get(query):
     try:
         r = requests.get(
             f"https://{REDDIT_RAPIDAPI_HOST}{REDDIT_RAPIDAPI_PATH}",
-            params={REDDIT_RAPIDAPI_QPARAM: query, "sort": "NEW", "time": "month"},
+            params={REDDIT_RAPIDAPI_QPARAM: query, "sort": REDDIT_RAPIDAPI_SORT},
             headers={"X-RapidAPI-Key": RAPIDAPI_KEY1, "X-RapidAPI-Host": REDDIT_RAPIDAPI_HOST,
                      "User-Agent": USER_AGENT}, timeout=20)
         if r.status_code != 200:
@@ -257,9 +262,11 @@ async def fetch_reddit_signals(per_query=20):
     out, seen = [], set()
     # Preferred: RapidAPI (no Reddit app). Falls back to OAuth / public .json if not configured.
     if REDDIT_VIA_RAPIDAPI:
-        for phrase in WISH_PHRASES:
-            data = await asyncio.to_thread(_rapidapi_reddit_get, phrase)
-            _extract_posts(data, out, seen, f"rapidapi:{phrase}")
+        # search mode → keyword phrases; subreddit mode → the idea subreddits themselves.
+        terms = REDDIT_SUBS if REDDIT_RAPIDAPI_MODE == "subreddit" else WISH_PHRASES
+        for term in terms:
+            data = await asyncio.to_thread(_rapidapi_reddit_get, term)
+            _extract_posts(data, out, seen, f"rapidapi:{term}")
             if len(out) >= MAX_SIGNALS_PER_RUN:
                 break
         return out[:MAX_SIGNALS_PER_RUN]
