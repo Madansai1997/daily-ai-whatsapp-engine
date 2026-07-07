@@ -172,6 +172,8 @@ from trend_lab_agent import (
     list_trend_ideas,
     set_idea_status as set_trend_idea_status,
     trend_lab_stats,
+    generate_build_brief,
+    get_build_brief,
 )
 from calendar_shield import analyze as calendar_shield_analyze
 from daily_standup import standup_briefing, cockpit as cockpit_brief
@@ -5649,6 +5651,23 @@ async def trends_status_api(idea_id: int, request: Request):
     except Exception:
         status = ""
     return JSONResponse(await set_trend_idea_status(idea_id, status))
+
+
+@app.post("/api/trends/{idea_id}/brief")
+async def trends_brief_generate_api(idea_id: int):
+    """Generate (or refresh) a lean MVP build brief for one idea."""
+    result = await generate_build_brief(idea_id, call_llm)
+    if result.get("error"):
+        return JSONResponse({"error": result["error"]}, status_code=400)
+    return JSONResponse(result)
+
+
+@app.get("/api/trends/{idea_id}/brief")
+async def trends_brief_get_api(idea_id: int):
+    brief = await get_build_brief(idea_id)
+    if not brief:
+        return JSONResponse({"error": "no brief"}, status_code=404)
+    return JSONResponse(brief)
 
 
 @app.post("/cron/trend-scan")

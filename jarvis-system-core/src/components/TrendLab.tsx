@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import {
   FlaskConical, RefreshCw, TrendingUp, Star, Hammer, X, ChevronDown, ChevronUp,
-  MessageSquare, ExternalLink,
+  MessageSquare, ExternalLink, FileText,
 } from "lucide-react";
 
 interface Quote { text: string; url: string; }
@@ -17,6 +17,15 @@ interface Idea {
   sources: string[];
   quotes: Quote[];
   status: "new" | "shortlisted" | "building" | "dismissed";
+  has_brief?: boolean;
+}
+interface Brief {
+  mvp_features: string[];
+  stack: string[];
+  differentiator: string;
+  monetization: string;
+  v1_scope: string;
+  first_steps: string[];
 }
 interface Stats { signals: number; ideas: number; shortlisted: number; youtube_enabled: boolean; }
 
@@ -40,6 +49,10 @@ export default function TrendLab() {
   const [scanMsg, setScanMsg] = useState("");
   const [filter, setFilter] = useState<string>("");
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [briefFor, setBriefFor] = useState<Idea | null>(null);
+  const [brief, setBrief] = useState<Brief | null>(null);
+  const [briefLoading, setBriefLoading] = useState(false);
+  const [briefError, setBriefError] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -61,7 +74,9 @@ export default function TrendLab() {
       const d = await res.json();
       if (!res.ok || d?.ok === false) throw new Error(d?.error || `HTTP ${res.status}`);
       const parts = [`${d.new_signals ?? 0} new signal(s)`, `${d.ideas_created ?? 0} new idea(s)`];
-      if (!d.reddit && !d.youtube) parts.push("— 0 fetched: set Reddit / YouTube keys (see Help).");
+      const src = [d.reddit && `${d.reddit} reddit`, d.youtube && `${d.youtube} youtube`, d.hackernews && `${d.hackernews} HN`].filter(Boolean);
+      if (src.length) parts.push(`(${src.join(" · ")})`);
+      else parts.push("— 0 fetched: check Help for source setup.");
       setScanMsg(parts.join(" · "));
       await load();
     } catch (e) { setScanMsg(`Scan failed: ${e instanceof Error ? e.message : e}`); }
@@ -76,6 +91,27 @@ export default function TrendLab() {
         body: JSON.stringify({ status }),
       });
     } finally { if (filter) load(); }
+  };
+
+  const openBrief = async (idea: Idea, forceNew = false) => {
+    setBriefFor(idea);
+    setBrief(null);
+    setBriefError("");
+    setBriefLoading(true);
+    try {
+      // Use the cached brief if one exists and we're not regenerating.
+      if (idea.has_brief && !forceNew) {
+        const g = await fetch(`/api/trends/${idea.id}/brief`);
+        if (g.ok) { setBrief(await g.json()); return; }
+      }
+      const res = await fetch(`/api/trends/${idea.id}/brief`, { method: "POST" });
+      const d = await res.json();
+      if (!res.ok || d?.error) throw new Error(d?.error || `HTTP ${res.status}`);
+      setBrief(d as Brief);
+      setIdeas((prev) => prev.map((i) => (i.id === idea.id ? { ...i, has_brief: true } : i)));
+    } catch (e) {
+      setBriefError(e instanceof Error ? e.message : String(e));
+    } finally { setBriefLoading(false); }
   };
 
   const Bar = ({ label, val }: { label: string; val: number }) => (
@@ -226,6 +262,7 @@ export default function TrendLab() {
 
                     {/* Actions */}
                     <div className="mt-4 flex items-center gap-2 flex-wrap">
+                      <button onClick={() => openBrief(idea)} className="px-3 py-1.5 rounded-lg text-[11px] font-bold font-mono text-[#22d3ee] bg-[#22d3ee]/10 border border-[#22d3ee]/40 hover:bg-[#22d3ee]/20 transition-all cursor-pointer flex items-center gap-1.5"><FileText className="w-3 h-3" /> {idea.has_brief ? "Build Brief" : "Build Brief"}</button>
                       <button onClick={() => setStatus(idea.id, "shortlisted")} className="px-3 py-1.5 rounded-lg text-[11px] font-bold font-mono text-[#a3e635] bg-[#a3e635]/10 border border-[#a3e635]/30 hover:bg-[#a3e635]/20 transition-all cursor-pointer flex items-center gap-1.5"><Star className="w-3 h-3" /> Shortlist</button>
                       <button onClick={() => setStatus(idea.id, "building")} className="px-3 py-1.5 rounded-lg text-[11px] font-bold font-mono text-[#8aebff] bg-[#8aebff]/10 border border-[#8aebff]/30 hover:bg-[#8aebff]/20 transition-all cursor-pointer flex items-center gap-1.5"><Hammer className="w-3 h-3" /> Building</button>
                       <button onClick={() => setStatus(idea.id, "dismissed")} className="px-3 py-1.5 rounded-lg text-[11px] font-semibold font-mono text-[#ffb4ab] bg-[#ffb4ab]/10 border border-[#ffb4ab]/30 hover:bg-[#ffb4ab]/20 transition-all cursor-pointer flex items-center gap-1.5"><X className="w-3 h-3" /> Dismiss</button>
@@ -236,6 +273,76 @@ export default function TrendLab() {
             </div>
           );
         })
+      )}
+
+      {/* Build Brief modal */}
+      {briefFor && (
+        <div className="fixed inset-0 bg-[#0a0e1a]/80 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setBriefFor(null)}>
+          <div className="w-full max-w-2xl glass-panel rounded-2xl border border-[#22d3ee]/30 shadow-2xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="p-5 border-b border-white/5 bg-[#161e2e]/80 flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <FileText className="w-5 h-5 text-[#22d3ee]" />
+                <div>
+                  <h2 className="text-sm font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">Build Brief</h2>
+                  <p className="text-[11px] text-[#859397]">{briefFor.title}</p>
+                </div>
+              </div>
+              <button onClick={() => setBriefFor(null)} className="p-1.5 rounded-full hover:bg-white/5 text-[#bbc9cd] cursor-pointer"><X className="w-4.5 h-4.5" /></button>
+            </div>
+            <div className="p-5 overflow-y-auto space-y-4 font-mono text-xs">
+              {briefLoading && (
+                <div className="flex items-center gap-2 text-[#22d3ee] py-8 justify-center"><RefreshCw className="w-4 h-4 animate-spin" /> Drafting your MVP plan…</div>
+              )}
+              {!briefLoading && briefError && (
+                <div className="p-4 rounded-lg bg-[#ffb4ab]/10 border border-[#ffb4ab]/30 text-[#ffb4ab]">{briefError}
+                  <button onClick={() => openBrief(briefFor, true)} className="ml-3 underline cursor-pointer">Retry</button>
+                </div>
+              )}
+              {!briefLoading && brief && (
+                <>
+                  <div>
+                    <span className="text-[10px] uppercase tracking-wider text-[#22d3ee]">MVP features (v1)</span>
+                    <ul className="mt-1.5 space-y-1">
+                      {brief.mvp_features?.map((f, i) => (
+                        <li key={i} className="flex items-start gap-2 text-[#dfe2f3]"><span className="text-[#22d3ee]">▹</span>{f}</li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div>
+                    <span className="text-[10px] uppercase tracking-wider text-[#859397]">Stack (free-tier)</span>
+                    <div className="mt-1.5 flex flex-wrap gap-1.5">
+                      {brief.stack?.map((s, i) => (
+                        <span key={i} className="px-2 py-0.5 rounded border border-white/10 bg-white/5 text-[#bbc9cd]">{s}</span>
+                      ))}
+                    </div>
+                  </div>
+                  {brief.differentiator && (
+                    <div><span className="text-[10px] uppercase tracking-wider text-[#859397]">Differentiator</span><p className="mt-1 text-[#dfe2f3] leading-relaxed">{brief.differentiator}</p></div>
+                  )}
+                  {brief.monetization && (
+                    <div><span className="text-[10px] uppercase tracking-wider text-[#a3e635]">Monetisation</span><p className="mt-1 text-[#dfe2f3] leading-relaxed">{brief.monetization}</p></div>
+                  )}
+                  {brief.v1_scope && (
+                    <div className="p-3 rounded-lg bg-[#22d3ee]/5 border border-[#22d3ee]/15"><span className="text-[10px] uppercase tracking-wider text-[#22d3ee]">Ship first (v1 scope)</span><p className="mt-1 text-[#dfe2f3] leading-relaxed">{brief.v1_scope}</p></div>
+                  )}
+                  {brief.first_steps?.length > 0 && (
+                    <div>
+                      <span className="text-[10px] uppercase tracking-wider text-[#859397]">First 3 steps</span>
+                      <ol className="mt-1.5 space-y-1">
+                        {brief.first_steps.map((s, i) => (
+                          <li key={i} className="flex items-start gap-2 text-[#dfe2f3]"><span className="flex-shrink-0 w-4 h-4 rounded-full bg-[#22d3ee]/15 text-[#22d3ee] text-[9px] font-bold flex items-center justify-center mt-0.5">{i + 1}</span>{s}</li>
+                        ))}
+                      </ol>
+                    </div>
+                  )}
+                  <div className="pt-1">
+                    <button onClick={() => openBrief(briefFor, true)} className="text-[11px] text-[#8aebff] hover:underline flex items-center gap-1 cursor-pointer"><RefreshCw className="w-3 h-3" /> Regenerate</button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       <p className="text-center text-[11px] text-[#859397] font-mono pb-4 flex items-center justify-center gap-1.5">

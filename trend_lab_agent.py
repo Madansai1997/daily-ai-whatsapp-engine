@@ -21,6 +21,7 @@ import os
 import re
 import json
 import time
+import html
 import asyncio
 from datetime import datetime, timezone, timedelta
 
@@ -121,6 +122,13 @@ def init_trend_lab_tables():
         created_at TEXT,
         updated_at TEXT
     )''')
+    # On-demand MVP build brief (JSON), generated per idea — added via migration for old DBs.
+    try:
+        cols = [r[1] for r in cur.execute("PRAGMA table_info(trend_ideas)").fetchall()]
+        if "build_brief" not in cols:
+            cur.execute("ALTER TABLE trend_ideas ADD COLUMN build_brief TEXT")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
     print("✅ Trend Lab tables ready.")
@@ -352,6 +360,50 @@ async def fetch_youtube_signals():
     return out[:MAX_SIGNALS_PER_RUN]
 
 
+# ── Hacker News (free Algolia API — no key, no signup) ──────────────────────
+HN_QUERIES = ["wish there was an app", "someone should build", "is there a tool",
+              "app idea", "i built", "show hn", "ask hn app"]
+
+
+def _strip_html(s):
+    return html.unescape(re.sub(r"<[^>]+>", " ", s or "")).strip()
+
+
+async def fetch_hackernews_signals(per_query=15):
+    """Mine Hacker News (Ask HN / Show HN / comments) for product requests via the free HN Algolia
+    search API — no key, no auth. Comments are filtered by REQUEST_RE; stories kept as-is."""
+    out, seen = [], set()
+    for q in HN_QUERIES:
+        for tag in ("story", "comment"):
+            data = await asyncio.to_thread(
+                _http_get_json, "https://hn.algolia.com/api/v1/search",
+                {"query": q, "tags": tag, "hitsPerPage": per_query})
+            for hit in (data or {}).get("hits", []) or []:
+                oid = hit.get("objectID")
+                if not oid or f"hn:{oid}" in seen:
+                    continue
+                if tag == "comment":
+                    text = _strip_html(hit.get("comment_text"))
+                    if not REQUEST_RE.search(text):
+                        continue
+                else:
+                    text = ((hit.get("title") or "") + " — " + _strip_html(hit.get("story_text"))).strip(" —")
+                text = text[:MAX_TEXT_CHARS]
+                if len(text) < 15:
+                    continue
+                seen.add(f"hn:{oid}")
+                out.append({
+                    "source": "hn", "source_id": f"hn:{oid}", "origin": f"hn:{q}",
+                    "text": text,
+                    "url": hit.get("url") or f"https://news.ycombinator.com/item?id={oid}",
+                    "popularity": int(hit.get("points") or 0),
+                    "created_utc": hit.get("created_at") or "",
+                })
+            if len(out) >= MAX_SIGNALS_PER_RUN:
+                return out[:MAX_SIGNALS_PER_RUN]
+    return out[:MAX_SIGNALS_PER_RUN]
+
+
 async def store_signals(signals) -> int:
     """Insert new signals, dedup by source_id. Returns how many were newly stored."""
     now = datetime.now(timezone.utc).isoformat()
@@ -483,10 +535,11 @@ async def run_trend_scan(call_llm_fn, notify_fn=None) -> dict:
     outward. Returns a summary dict."""
     reddit = await fetch_reddit_signals()
     youtube = await fetch_youtube_signals()
-    new_signals = await store_signals(reddit + youtube)
+    hn = await fetch_hackernews_signals()
+    new_signals = await store_signals(reddit + youtube + hn)
     result = await cluster_and_score(call_llm_fn)
     summary = {
-        "reddit": len(reddit), "youtube": len(youtube),
+        "reddit": len(reddit), "youtube": len(youtube), "hackernews": len(hn),
         "new_signals": new_signals, **result,
     }
     if result.get("ideas_created") and notify_fn:
@@ -517,6 +570,8 @@ async def list_trend_ideas(status: str = None, limit: int = 60) -> list:
     for r in rows:
         r["sources"] = json.loads(r.get("sources_json") or "[]")
         r["quotes"] = json.loads(r.get("quotes_json") or "[]")
+        r["has_brief"] = bool(r.get("build_brief"))
+        r.pop("build_brief", None)  # keep list payload light; fetch the brief on demand
     return rows
 
 
@@ -528,6 +583,72 @@ async def set_idea_status(idea_id: int, status: str) -> dict:
                          (status, datetime.now(timezone.utc).isoformat(), idea_id))
         await db.commit()
     return {"ok": True}
+
+
+# ── Build Brief — turn an idea into an actionable MVP plan ───────────────────
+BUILD_BRIEF_PROMPT = (
+    "You are a pragmatic indie-hacker technical co-founder. Given ONE app idea (title, the pain it "
+    "solves, and a summary), produce a lean MVP build plan an individual developer could ship in "
+    "2-3 weeks on a FREE/cheap stack. Return STRICT JSON only — no markdown — EXACTLY:\n"
+    "{\n"
+    '  "mvp_features": [<3-6 core features for v1, each a short phrase — ruthlessly minimal>],\n'
+    '  "stack": [<free/cheap-tier tools to build it: language, framework, DB, hosting, key APIs>],\n'
+    '  "differentiator": "<one sentence: the wedge that makes this stand out vs whatever exists>",\n'
+    '  "monetization": "<the realistic money model + first price point, one sentence>",\n'
+    '  "v1_scope": "<one sentence: exactly what to ship first (and what to deliberately cut)>",\n'
+    '  "first_steps": [<3 concrete next actions to start building today>]\n'
+    "}\n\n"
+    "RULES: keep it buildable by one person, favour free tiers, be specific (name real tools), and "
+    "cut scope hard — a shippable v1, not a dream. No fluff. Output JSON only."
+)
+
+
+async def generate_build_brief(idea_id: int, call_llm_fn) -> dict:
+    """LLM-generate (and cache) an MVP build plan for one idea. Returns the brief dict or {error}."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT id, title, pain, summary, build_brief FROM trend_ideas WHERE id = ?", (idea_id,))
+        row = await cur.fetchone()
+    if not row:
+        return {"error": "Idea not found."}
+    idea = dict(row)
+    user = (f"IDEA: {idea.get('title')}\n"
+            f"PAIN: {idea.get('pain') or ''}\n"
+            f"SUMMARY: {idea.get('summary') or ''}\n\nWrite the build brief.")
+    try:
+        raw = await call_llm_fn(BUILD_BRIEF_PROMPT, user, max_tokens=1200, temperature=0.3)
+        brief = _parse_json_object(raw)
+    except Exception as e:
+        print(f"⚠️ [trend_lab] build brief failed: {e}")
+        return {"error": "Build brief failed — try again in a moment."}
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE trend_ideas SET build_brief = ?, updated_at = ? WHERE id = ?",
+                         (json.dumps(brief), datetime.now(timezone.utc).isoformat(), idea_id))
+        await db.commit()
+    return brief
+
+
+async def get_build_brief(idea_id: int) -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT build_brief FROM trend_ideas WHERE id = ?", (idea_id,))
+        row = await cur.fetchone()
+    if not row or not row["build_brief"]:
+        return None
+    try:
+        return json.loads(row["build_brief"])
+    except Exception:
+        return None
+
+
+def _parse_json_object(raw: str) -> dict:
+    raw = (raw or "").strip()
+    start = raw.find("{")
+    if start == -1:
+        raise ValueError("no JSON object")
+    obj, _ = json.JSONDecoder().raw_decode(raw[start:])
+    return obj
 
 
 async def trend_lab_stats() -> dict:

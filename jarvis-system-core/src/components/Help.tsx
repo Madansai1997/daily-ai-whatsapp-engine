@@ -187,7 +187,8 @@ const SECTIONS: HelpSection[] = [
     blurb: "Find app ideas people are actually asking for.",
     Icon: FlaskConical,
     items: [
-      { name: "Trend Lab", what: "Mines Reddit + YouTube for product requests ('someone should build…', 'I wish there was an app for…'), clusters them into distinct app ideas with the LLM, and scores each by demand (40%), open market / low competition (30%) and monetisation (30%). Ranked highest-first with the evidence quotes.", how: "Open TRENDS → SCAN NOW. Shortlist / mark Building / Dismiss ideas. Runs weekly via cron once set up." },
+      { name: "Trend Lab", what: "Mines Hacker News (free, no key), Reddit + YouTube for product requests ('someone should build…', 'I wish there was an app for…'), clusters them into distinct app ideas with the LLM, and scores each by demand (40%), open market / low competition (30%) and monetisation (30%). Ranked highest-first with the evidence quotes.", how: "Open TRENDS → SCAN NOW. Shortlist / mark Building / Dismiss ideas. Runs weekly via cron once set up." },
+      { name: "Build Brief", what: "On any idea, turns it into a lean MVP plan you could ship in 2-3 weeks: core v1 features, a free-tier tech stack, the differentiator, a monetisation model, and the first 3 steps. Cached per idea; regenerate anytime.", how: "TRENDS → an idea card → Build Brief." },
       { name: "Setup (free)", what: "YouTube works with just an API key. Reddit is added via RapidAPI (no Reddit app / OAuth needed) since Reddit's own app form is flaky.", how: "YouTube: Google Cloud → enable 'YouTube Data API v3' → API key → set YOUTUBE_API_KEY (Render env). Reddit: on RapidAPI subscribe (free tier) to a Reddit scraper like 'reddit-scraper2' → your existing RAPIDAPI_KEY then works (override REDDIT_RAPIDAPI_HOST/PATH for a different provider). Then add a weekly cron-job.org hit to /cron/trend-scan?token=<secret>." },
     ],
   },
