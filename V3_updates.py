@@ -4024,6 +4024,34 @@ async def daily_followup_api(d: str, request: Request):
     return JSONResponse(reply)
 
 
+@app.post("/api/daily/{d}/rewrite-code")
+async def daily_rewrite_code_api(d: str, request: Request):
+    """Rewrite a snippet so it RUNS in the browser sandbox — standard library only, no pip/network —
+    while still teaching the same concept. Used by the 'Rewrite to run offline' button."""
+    try:
+        code = str((await request.json()).get("code", "")).strip()
+    except Exception:
+        code = ""
+    if len(code) < 5:
+        return JSONResponse({"error": "No code to rewrite."}, status_code=400)
+    dig = await _get_digest_row(d)
+    concept = dig["concept"] if dig else ""
+    sys = ("Rewrite the given Python so it RUNS in a browser sandbox: Python STANDARD LIBRARY ONLY — no "
+           "pip/third-party imports (no tiktoken, numpy, pandas, openai, requests, torch, transformers), no "
+           "network, no file I/O. Keep it teaching the SAME concept; MOCK any external library/service with "
+           "a small plain function (e.g. a fake tokenizer that splits on spaces). Keep it short with a few "
+           "print() calls that show the idea. Return ONLY the raw Python code — no markdown fences, no prose.")
+    user = f"CONCEPT: {concept}\n\nCODE TO REWRITE:\n{code[:2000]}"
+    try:
+        out = await call_llm(sys, user, max_tokens=800, temperature=0.2)
+    except Exception as e:
+        return JSONResponse({"error": f"Rewrite failed: {e}"}, status_code=400)
+    out = re.sub(r'^```(?:python)?\s*|\s*```$', '', (out or "").strip(), flags=re.MULTILINE).strip()
+    if not out:
+        return JSONResponse({"error": "Couldn't rewrite it — try again."}, status_code=400)
+    return JSONResponse({"code": out})
+
+
 @app.post("/api/daily/{d}/check-code")
 async def daily_check_code_api(d: str, request: Request):
     """Check the learner's code attempt against the concept + reference implementation (LLM review —

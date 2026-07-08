@@ -223,8 +223,9 @@ export default function DailyUpdate() {
   const [codeText, setCodeText] = useState("");
   const [codeResult, setCodeResult] = useState<{ passed: boolean; feedback: string } | null>(null);
   const [codeBusy, setCodeBusy] = useState(false);
-  const [runOut, setRunOut] = useState<{ out: string; err: boolean } | null>(null);
+  const [runOut, setRunOut] = useState<{ out: string; err: boolean; blocked?: boolean } | null>(null);
   const [runBusy, setRunBusy] = useState(false);
+  const [rewriteBusy, setRewriteBusy] = useState(false);
   // Notes: highlight-to-save + search-back
   const [highlight, setHighlight] = useState("");
   const [noteQ, setNoteQ] = useState("");
@@ -429,7 +430,7 @@ export default function DailyUpdate() {
     // Fail fast on libraries the browser runtime can't install (no pip / no network) — no more hangs.
     const blocked = BLOCKED_IMPORTS.find((m) => new RegExp(`(^|\\n)\\s*(import|from)\\s+${m}\\b`).test(src));
     if (blocked) {
-      setRunOut({ out: `This example uses "${blocked}", which the in-browser Python can't install (no pip, no network). Use "Check my code (AI)" for feedback instead, or rewrite it with just Python's standard library.`, err: true });
+      setRunOut({ out: `This example uses "${blocked}", which the in-browser Python can't install (no pip, no network).`, err: true, blocked: true });
       return;
     }
     setRunBusy(true); setRunOut({ out: "Booting Python runtime… (first run downloads ~6 MB)", err: false });
@@ -454,6 +455,21 @@ export default function DailyUpdate() {
     setCodeText(code);
     scrollToId("daily-run");
     runCode(code);
+  };
+  // Turn a snippet that needs unavailable libs into a standard-library-only version, then run it.
+  const rewriteToRun = async () => {
+    if (!digest?.date || rewriteBusy) return;
+    setRewriteBusy(true); setRunOut({ out: "Rewriting to run offline…", err: false });
+    try {
+      const res = await fetch(`/api/daily/${digest.date}/rewrite-code`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: codeText }),
+      });
+      const dd = await safeJson(res);
+      if (dd.error) { setRunOut({ out: `Rewrite failed: ${dd.error}`, err: true }); return; }
+      if (dd.code) { setCodeText(dd.code as string); await runCode(dd.code as string); }
+    } catch (e) {
+      setRunOut({ out: e instanceof Error ? e.message : String(e), err: true });
+    } finally { setRewriteBusy(false); }
   };
   const saveNote = async (text?: string) => {
     if (!digest?.date) return;
@@ -915,6 +931,15 @@ export default function DailyUpdate() {
                 <div className="rounded-lg overflow-hidden border border-white/10">
                   <div className="px-3 py-1.5 bg-white/5 text-[9px] uppercase tracking-wider font-mono flex items-center gap-1.5" style={{ color: runOut.err ? "#ffb4ab" : "#a3e635" }}>{runOut.err ? <XCircle className="w-3 h-3" /> : <CheckCircle2 className="w-3 h-3" />} output</div>
                   <pre className="p-3 overflow-x-auto text-[11px] leading-relaxed font-mono bg-[#0a0e1a]/70 whitespace-pre-wrap" style={{ color: runOut.err ? "#ffb4ab" : "#dfe2f3" }}>{runOut.out}</pre>
+                  {runOut.blocked && (
+                    <div className="p-3 pt-0 flex items-center gap-2 flex-wrap">
+                      <button onClick={rewriteToRun} disabled={rewriteBusy}
+                        className="px-3 py-1.5 rounded-lg text-xs font-bold font-mono text-[#0a0e1a] bg-[#a3e635] hover:bg-[#b6f24d] cursor-pointer disabled:opacity-50 flex items-center gap-1.5">
+                        {rewriteBusy ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Rewriting…</> : <><RefreshCw className="w-3.5 h-3.5" /> Rewrite to run offline</>}
+                      </button>
+                      <span className="text-[10px] text-[#859397]">turns it into a standard-library version and runs it</span>
+                    </div>
+                  )}
                 </div>
               )}
               {codeResult && (
