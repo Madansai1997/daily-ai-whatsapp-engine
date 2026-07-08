@@ -816,6 +816,13 @@ def init_daily_web_tables():
         last_reviewed TEXT,
         created_at TEXT
     )''')
+    # Deep-dive explainer — a full, structured explanation of the day's concept (cached per day).
+    cur.execute('''CREATE TABLE IF NOT EXISTS study_lessons (
+        date TEXT PRIMARY KEY,
+        concept TEXT,
+        data TEXT,
+        created_at TEXT
+    )''')
     # Go-deeper follow-up chat — a persistent, multi-turn thread per day's concept.
     cur.execute('''CREATE TABLE IF NOT EXISTS study_followups (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3853,6 +3860,67 @@ async def study_weekly_recap_api():
     return JSONResponse(res)
 
 
+_EXPLAIN_PROMPT = (
+    "You are an expert tutor writing a clear, self-contained explainer of ONE concept for a motivated "
+    "learner (a data analyst moving into AI engineering). Teach it from scratch so they truly understand "
+    "it — plain language, no hand-waving. Build intuition first, then detail. Include a relatable analogy "
+    "and at least one concrete worked example. STRICT JSON only, no markdown fences:\n"
+    '{"tldr":"2-3 sentence plain-English summary of what it is and why it exists",'
+    '"analogy":"one relatable everyday analogy that captures the core idea",'
+    '"sections":[{"heading":"short heading","body":"2-5 sentences that build understanding"}],'
+    '"example":{"caption":"a concrete worked example explained in words","code":"a short runnable snippet OR empty string"},'
+    '"key_points":["3-6 crisp takeaways"],'
+    '"pitfalls":["2-4 common misunderstandings or mistakes to avoid"]}'
+    " Aim for 3-5 sections. Output JSON only.")
+
+
+async def _get_cached_lesson(d: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT data FROM study_lessons WHERE date = ?", (d,))
+        row = await cur.fetchone()
+    if row and row["data"]:
+        try:
+            return json.loads(row["data"])
+        except Exception:
+            return None
+    return None
+
+
+@app.get("/api/daily/{d}/explain")
+async def daily_explain_get_api(d: str):
+    """Return the cached deep-dive explainer for a day (or null if it hasn't been generated yet)."""
+    return JSONResponse({"explanation": await _get_cached_lesson(d)})
+
+
+@app.post("/api/daily/{d}/explain")
+async def daily_explain_gen_api(d: str):
+    """Generate (once) and cache a full structured explainer of the day's concept."""
+    cached = await _get_cached_lesson(d)
+    if cached:
+        return JSONResponse({"explanation": cached})
+    dig = await _get_digest_row(d)
+    if not dig:
+        return JSONResponse({"error": "No lesson for that date."}, status_code=404)
+    user = (f"CONCEPT: {dig['concept']}\n\n"
+            f"CONTEXT FROM TODAY'S BRIEFING:\n{(dig['digest_text'] or '')[:1200]}\n\n"
+            "Write the explainer for this concept.")
+    try:
+        res = _json_obj(await call_llm(_EXPLAIN_PROMPT, user, max_tokens=1800, temperature=0.3))
+    except Exception as e:
+        return JSONResponse({"error": f"Explainer failed: {e}"}, status_code=400)
+    if not res or not res.get("tldr"):
+        return JSONResponse({"error": "Couldn't build the explainer — try again."}, status_code=400)
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO study_lessons (date, concept, data, created_at) VALUES (?,?,?,?)
+               ON CONFLICT(date) DO UPDATE SET concept=excluded.concept, data=excluded.data""",
+            (d, dig["concept"], json.dumps(res), now))
+        await db.commit()
+    return JSONResponse({"explanation": res})
+
+
 @app.get("/api/daily/{d}/followups")
 async def daily_followups_thread_api(d: str):
     """The persistent follow-up chat thread for a day's concept (chronological)."""
@@ -3896,11 +3964,14 @@ async def daily_followup_api(d: str, request: Request):
     except Exception as e:
         return JSONResponse({"error": f"Answer failed: {e}"}, status_code=400)
     now = dt.datetime.now(dt.timezone.utc).isoformat()
+    # Two separate execute() calls — the Turso (prod) connection wrapper has no executemany().
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.executemany(
+        await db.execute(
             "INSERT INTO study_followups (date, concept, role, content, created_at) VALUES (?,?,?,?,?)",
-            [(d, dig["concept"], "user", question, now),
-             (d, dig["concept"], "assistant", answer, now)])
+            (d, dig["concept"], "user", question, now))
+        await db.execute(
+            "INSERT INTO study_followups (date, concept, role, content, created_at) VALUES (?,?,?,?,?)",
+            (d, dig["concept"], "assistant", answer, now))
         await db.commit()
     return JSONResponse({"answer": answer})
 

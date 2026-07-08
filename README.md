@@ -76,6 +76,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `66df91b` fix(daily): Briefing shows lesson prose only — strip news list + legacy project scaffolding _(2026-07-08)_
 - `2808551` feat(daily): threaded tutor + knowledge base + in-browser run; drop weekly project; Home front-page _(2026-07-07)_
 - `93501c5` feat(daily): web-first Daily AI Update + DISCOVER nav consolidation _(2026-07-07)_
 - `60e5d85` feat(trends): Hacker News source (free, no key) + per-idea Build Brief _(2026-07-07)_
@@ -87,7 +88,6 @@ npm install && npm run build     # served by the engine at /console
 - `4106740` feat(jobs): dual ATS+recruiter score badges, header help button, audit fixes _(2026-07-07)_
 - `231ab42` feat(console): Help & Guide screen, delete-résumé, cleaner audit suggestions _(2026-07-06)_
 - `f3cc0e1` feat(ats): recruiter-read feedback panel + deterministic per-JD score _(2026-07-06)_
-- `fddc490` feat(ats): one-tap AUTO-FIX for the deterministic résumé points + fairer scorer _(2026-07-06)_
 <!-- /AUTO:changelog -->
 
 ---

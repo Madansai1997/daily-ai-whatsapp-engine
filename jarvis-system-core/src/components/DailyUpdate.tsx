@@ -3,7 +3,7 @@ import {
   Newspaper, RefreshCw, ExternalLink, BookOpen, Code2, Send,
   CheckCircle2, Smile, Meh, Frown, History, GraduationCap, Brain, XCircle, AlertCircle,
   Flame, Layers, Target, Repeat, MessageCircleQuestion, Download, StickyNote, CalendarRange,
-  Play, Sparkles, Search, User, Bot,
+  Play, Sparkles, Search, User, Bot, Lightbulb,
 } from "lucide-react";
 import { getToken } from "../lib/auth";
 
@@ -55,6 +55,14 @@ interface Stats { streak: number; concepts_learned: number; quizzed: number; avg
 interface ReviewItem { concept: string; rep: number; next_due: string; }
 interface FollowTurn { role: string; content: string; }
 interface NoteHit { id: number; title: string; snippet: string; }
+interface Explain {
+  tldr: string;
+  analogy?: string;
+  sections?: { heading: string; body: string }[];
+  example?: { caption?: string; code?: string };
+  key_points?: string[];
+  pitfalls?: string[];
+}
 
 // digest_text is the full WhatsApp-format payload (news list + learning notes + any legacy
 // mini-project / weekly-project / QA-assert scaffolding). On the web the news is shown as linked
@@ -83,6 +91,19 @@ function cleanLesson(raw: string): string {
   return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+// Parse a response as JSON, but never throw on a plain-text error page (e.g. a 500
+// "Internal Server Error") — return a clean {error} instead so the UI shows a friendly message.
+async function safeJson(res: Response): Promise<Record<string, unknown>> {
+  const text = await res.text();
+  try { return JSON.parse(text); }
+  catch { return { error: res.ok ? "Unexpected response from the server." : `Server error (${res.status}). Please try again.` }; }
+}
+
+// Smooth-scroll to a section (used by the "study in 4 steps" hint card).
+function scrollToId(id: string) {
+  document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 export default function DailyUpdate() {
   const [digest, setDigest] = useState<Digest | null>(null);
   const [history, setHistory] = useState<HistRow[]>([]);
@@ -102,6 +123,9 @@ export default function DailyUpdate() {
   const [feynBusy, setFeynBusy] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
   const [reviews, setReviews] = useState<{ due: ReviewItem[]; upcoming: ReviewItem[]; due_count: number } | null>(null);
+  // Deep-dive explainer
+  const [explain, setExplain] = useState<Explain | null>(null);
+  const [explainBusy, setExplainBusy] = useState(false);
   // Go-deeper extras — follow-up chat thread
   const [followQ, setFollowQ] = useState("");
   const [followThread, setFollowThread] = useState<FollowTurn[]>([]);
@@ -120,17 +144,29 @@ export default function DailyUpdate() {
   const [noteSearchBusy, setNoteSearchBusy] = useState(false);
   const [recap, setRecap] = useState<{ recap: string; quiz: string[] } | null>(null);
   const [recapBusy, setRecapBusy] = useState(false);
+  // "Study in 4 steps" hint card — dismissible, remembered across sessions.
+  const [showHint, setShowHint] = useState(() => {
+    try { return localStorage.getItem("daily_hint_dismissed") !== "1"; } catch { return true; }
+  });
+  const dismissHint = () => {
+    setShowHint(false);
+    try { localStorage.setItem("daily_hint_dismissed", "1"); } catch { /* ignore */ }
+  };
 
   const loadDay = useCallback(async (d?: string) => {
     const r = await fetch(d ? `/api/daily/${d}` : "/api/daily/today");
     let day: Digest | null = null;
     if (r.ok) { day = await r.json(); setDigest(day); }
     setQuiz(null); setAnswers([]); setGrade(null); setFeyn(null); setFeynText("");
-    setFollowThread([]); setCodeResult(null); setRunOut(null);
-    // Load the persistent follow-up thread for this concept.
+    setFollowThread([]); setCodeResult(null); setRunOut(null); setExplain(null);
+    // Load the persistent follow-up thread + any cached deep-dive explainer for this concept.
     if (day?.date) {
-      const tr = await fetch(`/api/daily/${day.date}/followups`);
+      const [tr, er] = await Promise.all([
+        fetch(`/api/daily/${day.date}/followups`),
+        fetch(`/api/daily/${day.date}/explain`),
+      ]);
       if (tr.ok) setFollowThread((await tr.json()).turns || []);
+      if (er.ok) { const ed = await er.json(); if (ed.explanation) setExplain(ed.explanation); }
     }
   }, []);
 
@@ -246,6 +282,18 @@ export default function DailyUpdate() {
     finally { setFeynBusy(false); }
   };
 
+  const getExplain = async () => {
+    if (!digest?.date || explainBusy) return;
+    setExplainBusy(true);
+    try {
+      const res = await fetch(`/api/daily/${digest.date}/explain`, { method: "POST" });
+      const dd = await safeJson(res);
+      if (dd.error) setMsg(`Explainer: ${dd.error}`);
+      else setExplain(dd.explanation as Explain);
+    } catch (e) { setMsg(`Explainer: ${e instanceof Error ? e.message : e}`); }
+    finally { setExplainBusy(false); }
+  };
+
   const askFollowup = async () => {
     if (!digest?.date || followQ.trim().length < 3 || followBusy) return;
     const q = followQ.trim();
@@ -256,8 +304,8 @@ export default function DailyUpdate() {
       const res = await fetch(`/api/daily/${digest.date}/followup`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q }),
       });
-      const dd = await res.json();
-      setFollowThread((t) => [...t, { role: "assistant", content: dd.error ? `Error: ${dd.error}` : dd.answer }]);
+      const dd = await safeJson(res);
+      setFollowThread((t) => [...t, { role: "assistant", content: dd.error ? `${dd.error}` : String(dd.answer || "") }]);
     } catch (e) {
       setFollowThread((t) => [...t, { role: "assistant", content: `Error: ${e instanceof Error ? e.message : e}` }]);
     } finally { setFollowBusy(false); }
@@ -452,11 +500,91 @@ export default function DailyUpdate() {
         </div>
       ) : (
         <>
+          {/* How to study today — dismissible, clickable 4-step flow */}
+          {showHint && (
+            <div className="glass-panel rounded-2xl border border-[#8aebff]/20 p-4 sm:p-5">
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-[10px] uppercase tracking-widest text-[#8aebff] font-mono font-bold">How to study today</span>
+                <button onClick={dismissHint} title="Got it — hide this" className="text-[#859397] hover:text-[#dfe2f3] cursor-pointer"><XCircle className="w-4 h-4" /></button>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {([
+                  [BookOpen, "Read", "the concept + lesson", "daily-read"],
+                  [MessageCircleQuestion, "Ask", "“Go deeper” until it clicks", "daily-ask"],
+                  [Play, "Run", "the code / check your own", "daily-run"],
+                  [Brain, "Recall", "quiz + explain it back", "daily-recall"],
+                ] as [typeof BookOpen, string, string, string][]).map(([Icon, title, sub, id], i) => (
+                  <button key={id} onClick={() => scrollToId(id)}
+                    className="text-left rounded-xl border border-white/5 bg-white/[0.02] hover:bg-white/[0.06] hover:border-[#8aebff]/25 p-3 transition-all cursor-pointer group">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] font-mono font-bold text-[#8aebff]">{i + 1}</span>
+                      <Icon className="w-3.5 h-3.5 text-[#8aebff]" />
+                      <span className="text-[12px] font-bold text-[#dfe2f3]">{title}</span>
+                    </div>
+                    <p className="text-[10px] text-[#859397] mt-1 leading-snug group-hover:text-[#bbc9cd]">{sub}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Concept */}
-          <div className="glass-panel rounded-2xl border border-[#8aebff]/15 p-5 sm:p-6">
+          <div id="daily-read" className="glass-panel rounded-2xl border border-[#8aebff]/15 p-5 sm:p-6 scroll-mt-24">
             <div className="flex items-center gap-2 mb-1"><BookOpen className="w-4 h-4 text-[#8aebff]" /><span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">Today's concept</span></div>
             <h2 className="text-lg font-bold text-[#dfe2f3]">{d!.concept}</h2>
             {d!.pedagogical_focus && <p className="text-[13px] text-[#bbc9cd] leading-relaxed mt-1">{d!.pedagogical_focus}</p>}
+          </div>
+
+          {/* Deep dive — full, from-scratch explainer of the concept */}
+          <div className="glass-panel rounded-2xl border border-[#8aebff]/15 p-5 sm:p-6 space-y-4">
+            <div className="flex items-center gap-2"><GraduationCap className="w-4.5 h-4.5 text-[#8aebff]" /><span className="text-xs font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">Understand this topic</span><span className="text-[10px] text-[#859397]">— the full explainer, from scratch</span></div>
+            {!explain ? (
+              <div className="space-y-2.5">
+                <p className="text-[12px] text-[#859397] leading-relaxed">
+                  Get a proper, from-scratch explanation of <span className="text-[#dfe2f3] font-semibold">{d!.concept}</span> — plain language, an analogy, a worked example, key points and common pitfalls. Read this first, then ask JARVIS anything below.
+                </p>
+                <button onClick={getExplain} disabled={explainBusy}
+                  className="px-4 py-2 rounded-lg text-xs font-bold font-mono text-[#0a0e1a] bg-[#8aebff] hover:bg-[#a5f0ff] transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2">
+                  {explainBusy ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Writing your explainer…</> : <><BookOpen className="w-3.5 h-3.5" /> Explain this topic in detail</>}
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-4" onMouseUp={captureSelection} onTouchEnd={captureSelection}>
+                <p className="text-[13px] text-[#dfe2f3] leading-relaxed selection:bg-[#8aebff]/30">{explain.tldr}</p>
+                {explain.analogy && (
+                  <div className="flex items-start gap-2 p-3 rounded-lg bg-[#ffd6a3]/5 border border-[#ffd6a3]/15">
+                    <Lightbulb className="w-4 h-4 text-[#ffd6a3] mt-0.5 flex-shrink-0" />
+                    <p className="text-[12px] text-[#bbc9cd] leading-relaxed selection:bg-[#8aebff]/30"><span className="text-[#ffd6a3] font-semibold">Think of it like: </span>{explain.analogy}</p>
+                  </div>
+                )}
+                {explain.sections?.map((s, i) => (
+                  <div key={i}>
+                    <h3 className="text-[13px] font-bold text-[#8aebff]">{s.heading}</h3>
+                    <p className="text-[12px] text-[#bbc9cd] leading-relaxed mt-1 selection:bg-[#8aebff]/30">{s.body}</p>
+                  </div>
+                ))}
+                {explain.example && (explain.example.caption || explain.example.code) && (
+                  <div className="rounded-lg border border-white/10 overflow-hidden">
+                    <div className="px-3 py-2 bg-white/5 text-[10px] uppercase tracking-wider font-mono text-[#a3e635] flex items-center gap-1.5"><Code2 className="w-3.5 h-3.5" /> Worked example</div>
+                    {explain.example.caption && <p className="px-3 py-2 text-[12px] text-[#bbc9cd] leading-relaxed">{explain.example.caption}</p>}
+                    {explain.example.code && <pre className="px-3 pb-3 overflow-x-auto text-[11px] font-mono text-[#a3e635] leading-relaxed whitespace-pre-wrap">{explain.example.code}</pre>}
+                  </div>
+                )}
+                {(explain.key_points?.length ?? 0) > 0 && (
+                  <div>
+                    <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">Key points</span>
+                    <ul className="mt-1 space-y-1">{explain.key_points!.map((k, i) => (<li key={i} className="flex items-start gap-1.5 text-[12px] text-[#dfe2f3] leading-relaxed"><CheckCircle2 className="w-3.5 h-3.5 text-[#a3e635] mt-0.5 flex-shrink-0" />{k}</li>))}</ul>
+                  </div>
+                )}
+                {(explain.pitfalls?.length ?? 0) > 0 && (
+                  <div>
+                    <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">Common pitfalls</span>
+                    <ul className="mt-1 space-y-1">{explain.pitfalls!.map((p, i) => (<li key={i} className="flex items-start gap-1.5 text-[12px] text-[#bbc9cd] leading-relaxed"><AlertCircle className="w-3.5 h-3.5 text-[#ffb4ab] mt-0.5 flex-shrink-0" />{p}</li>))}</ul>
+                  </div>
+                )}
+                <p className="text-[10px] text-[#859397]/70 font-mono pt-1">Still unclear on anything? Use “Go deeper” below to ask JARVIS.</p>
+              </div>
+            )}
           </div>
 
           {/* News */}
@@ -499,7 +627,7 @@ export default function DailyUpdate() {
           )}
 
           {/* Active recall — quiz + Feynman */}
-          <div className="glass-panel rounded-2xl border border-[#8aebff]/15 p-5 sm:p-6 space-y-4">
+          <div id="daily-recall" className="glass-panel rounded-2xl border border-[#8aebff]/15 p-5 sm:p-6 space-y-4 scroll-mt-24">
             <div className="flex items-center gap-2"><Brain className="w-4.5 h-4.5 text-[#8aebff]" /><span className="text-xs font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">Test your recall</span><span className="text-[10px] text-[#859397]">— reading is passive; recall is what sticks</span></div>
 
             {/* Quiz */}
@@ -570,7 +698,7 @@ export default function DailyUpdate() {
           </div>
 
           {/* Go deeper — threaded follow-up chat + try-it code (run in-browser or LLM review) */}
-          <div className="glass-panel rounded-2xl border border-white/10 p-5 sm:p-6 space-y-4">
+          <div id="daily-ask" className="glass-panel rounded-2xl border border-white/10 p-5 sm:p-6 space-y-4 scroll-mt-24">
             <div className="flex items-center gap-2"><MessageCircleQuestion className="w-4.5 h-4.5 text-[#8aebff]" /><span className="text-xs font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">Go deeper</span><span className="text-[10px] text-[#859397]">— a running conversation about this concept</span></div>
             <div className="space-y-2">
               {followThread.length > 0 && (
@@ -594,7 +722,7 @@ export default function DailyUpdate() {
                   className="px-3 py-2 rounded-lg text-xs font-bold font-mono text-[#8aebff] bg-[#8aebff]/10 border border-[#8aebff]/30 hover:bg-[#8aebff]/20 cursor-pointer disabled:opacity-50">{followBusy ? "…" : "Ask"}</button>
               </div>
             </div>
-            <div className="space-y-2 pt-2 border-t border-white/5">
+            <div id="daily-run" className="space-y-2 pt-2 border-t border-white/5 scroll-mt-24">
               <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono flex items-center gap-1.5"><Code2 className="w-3.5 h-3.5" /> Try it — write Python, run it right here, or get an LLM review</span>
               <textarea value={codeText} onChange={(e) => setCodeText(e.target.value)} placeholder="# your attempt — print(...) to see output"
                 spellCheck={false}
