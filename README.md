@@ -76,6 +76,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `3c735f3` fix(daily): Turso-safe Go-Deeper + Deep Dive explainer + 4-step study hint _(2026-07-08)_
 - `66df91b` fix(daily): Briefing shows lesson prose only — strip news list + legacy project scaffolding _(2026-07-08)_
 - `2808551` feat(daily): threaded tutor + knowledge base + in-browser run; drop weekly project; Home front-page _(2026-07-07)_
 - `93501c5` feat(daily): web-first Daily AI Update + DISCOVER nav consolidation _(2026-07-07)_
@@ -87,7 +88,6 @@ npm install && npm run build     # served by the engine at /console
 - `edbbb56` feat: integrate OmniRoute local AI gateway and rebuild master resume with audit updates _(2026-07-07)_
 - `4106740` feat(jobs): dual ATS+recruiter score badges, header help button, audit fixes _(2026-07-07)_
 - `231ab42` feat(console): Help & Guide screen, delete-résumé, cleaner audit suggestions _(2026-07-06)_
-- `f3cc0e1` feat(ats): recruiter-read feedback panel + deterministic per-JD score _(2026-07-06)_
 <!-- /AUTO:changelog -->
 
 ---

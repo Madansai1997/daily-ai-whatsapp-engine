@@ -2691,6 +2691,13 @@ Example:
     else:
         whatsapp_payload = text
 
+    # The model sometimes leaks the reference implementation INSIDE the payload — strip it so the
+    # lesson prose never carries a code dump (the code is shown/run separately from reference_code).
+    whatsapp_payload = re.sub(r'<reference_implementation>.*?</reference_implementation>', '',
+                              whatsapp_payload, flags=re.DOTALL | re.IGNORECASE)
+    whatsapp_payload = re.sub(r'</?(reference_implementation|whatsapp_payload)>', '',
+                              whatsapp_payload, flags=re.IGNORECASE).strip()
+
     if project_section:
         whatsapp_payload += f"\n\n{project_section}"
 
@@ -3861,17 +3868,19 @@ async def study_weekly_recap_api():
 
 
 _EXPLAIN_PROMPT = (
-    "You are an expert tutor writing a clear, self-contained explainer of ONE concept for a motivated "
-    "learner (a data analyst moving into AI engineering). Teach it from scratch so they truly understand "
-    "it — plain language, no hand-waving. Build intuition first, then detail. Include a relatable analogy "
-    "and at least one concrete worked example. STRICT JSON only, no markdown fences:\n"
-    '{"tldr":"2-3 sentence plain-English summary of what it is and why it exists",'
-    '"analogy":"one relatable everyday analogy that captures the core idea",'
-    '"sections":[{"heading":"short heading","body":"2-5 sentences that build understanding"}],'
-    '"example":{"caption":"a concrete worked example explained in words","code":"a short runnable snippet OR empty string"},'
+    "You are a friendly, engaging tutor writing a self-contained explainer of ONE concept for a motivated "
+    "learner (a data analyst moving into AI engineering). Teach it so it CLICKS — do NOT write dictionary "
+    "definitions. Every section must TEACH THROUGH a concrete mini-scenario or worked example with real "
+    "numbers/strings, using 'you' language (e.g. 'say you send the model...'). Build intuition first, then "
+    "detail. STRICT JSON only, no markdown fences:\n"
+    '{"tldr":"2-3 sentence plain-English summary of what it is and why it matters to you",'
+    '"analogy":"one vivid everyday analogy that captures the core idea",'
+    '"sections":[{"heading":"short heading","body":"2-5 sentences that TEACH via a concrete example/scenario with real numbers, not a definition"}],'
+    '"example":{"caption":"a step-by-step worked example explained in words","code":"a short runnable snippet OR empty string"},'
     '"key_points":["3-6 crisp takeaways"],'
-    '"pitfalls":["2-4 common misunderstandings or mistakes to avoid"]}'
-    " Aim for 3-5 sections. Output JSON only.")
+    '"pitfalls":["2-4 common misunderstandings or mistakes to avoid"],'
+    '"quick_check":{"q":"one question that makes them apply the idea (not just recall a definition)","a":"the answer in 1-2 sentences"}}'
+    " Aim for 3-5 sections. Make it concrete and engaging. Output JSON only.")
 
 
 async def _get_cached_lesson(d: str):
@@ -3951,10 +3960,12 @@ async def daily_followup_api(d: str, request: Request):
         cur = await db.execute(
             "SELECT role, content FROM study_followups WHERE date = ? ORDER BY id ASC", (d,))
         prior = [dict(r) for r in await cur.fetchall()]
-    sys = ("You are a patient tutor continuing a conversation about one concept. Answer the learner's "
-           "latest question clearly and concisely (3-6 sentences), grounded in the lesson and consistent "
-           "with what you've already told them. Use a concrete example if it helps. If they refer to "
-           "'that' or 'it', resolve it from the conversation so far.")
+    sys = ("You are a friendly, engaging tutor continuing a conversation about ONE concept. Reply "
+           "conversationally and SHORT — 2-4 sentences, or a few tight bullet points; never a wall of "
+           "text. Lead with the direct answer, then ONE concrete example if it helps. You may use **bold** "
+           "for key terms and '- ' for bullets. Ground it in the lesson and stay consistent with the "
+           "conversation so far; resolve 'that'/'it' from context. If they say 'explain more' or similar, "
+           "go one level deeper with a FRESH example instead of repeating what you already said.")
     history = "\n".join(f"{'Learner' if t['role'] == 'user' else 'Tutor'}: {t['content']}" for t in prior[-8:])
     user = (f"CONCEPT: {dig['concept']}\n\nLESSON:\n{(dig['digest_text'] or '')[:1400]}\n\n"
             f"{('CONVERSATION SO FAR:' + chr(10) + history + chr(10) + chr(10)) if history else ''}"

@@ -62,6 +62,7 @@ interface Explain {
   example?: { caption?: string; code?: string };
   key_points?: string[];
   pitfalls?: string[];
+  quick_check?: { q: string; a: string };
 }
 
 // digest_text is the full WhatsApp-format payload (news list + learning notes + any legacy
@@ -69,13 +70,20 @@ interface Explain {
 // cards + the Home newspaper strip, so here we keep ONLY the learning prose: strip the news list,
 // the project sections, and any assert/QA lines. Returns "" when nothing meaningful is left.
 function cleanLesson(raw: string): string {
+  // Drop any leaked reference-implementation code block + stray xml-ish tags before line parsing.
+  raw = raw
+    .replace(/<reference_implementation>[\s\S]*?<\/reference_implementation>/gi, "")
+    .replace(/<\/?(reference_implementation|whatsapp_payload)>/gi, "");
   const out: string[] = [];
   let section: "pre" | "news" | "learn" | "project" = "pre";
   let skipAssertRules = false;
+  let inCode = false;
   for (const rawLine of raw.split("\n")) {
     const line = rawLine.replace(/\*/g, "").replace(/\r/g, "");
     const t = line.trim();
     const low = t.toLowerCase();
+    if (t.startsWith("```")) { inCode = !inCode; continue; }  // drop code blocks (shown in the editor)
+    if (inCode) continue;
     if (low.includes("regular daily ai updates")) { section = "news"; continue; }
     if (low.includes("what i need to learn")) { section = "learn"; skipAssertRules = false; continue; }
     if (low.includes("this week") && low.includes("project")) { section = "project"; continue; }
@@ -104,6 +112,30 @@ function scrollToId(id: string) {
   document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+// Tiny markdown-lite renderer: **bold** + "- " bullets + paragraphs. Keeps tutor replies readable
+// instead of a single wall of text, without pulling in a markdown library.
+function RichText({ text }: { text: string }) {
+  const lines = text.split("\n").filter((l) => l.trim() !== "");
+  const fmt = (s: string) =>
+    s.split(/(\*\*[^*]+\*\*)/g).map((p, j) =>
+      p.startsWith("**") && p.endsWith("**")
+        ? <strong key={j} className="text-[#dfe2f3] font-semibold">{p.slice(2, -2)}</strong>
+        : <span key={j}>{p}</span>);
+  return (
+    <div className="space-y-1">
+      {lines.map((ln, i) => {
+        const isBullet = /^\s*[-*•]\s+/.test(ln);
+        if (isBullet) {
+          return <div key={i} className="flex gap-1.5"><span className="text-[#8aebff] mt-0.5">•</span><p className="leading-relaxed flex-1">{fmt(ln.replace(/^\s*[-*•]\s+/, ""))}</p></div>;
+        }
+        return <p key={i} className="leading-relaxed">{fmt(ln)}</p>;
+      })}
+    </div>
+  );
+}
+
+const FOLLOWUP_CHIPS = ["Explain more simply", "Give a real-world example", "Show me the code", "Quiz me on this"];
+
 export default function DailyUpdate() {
   const [digest, setDigest] = useState<Digest | null>(null);
   const [history, setHistory] = useState<HistRow[]>([]);
@@ -126,6 +158,7 @@ export default function DailyUpdate() {
   // Deep-dive explainer
   const [explain, setExplain] = useState<Explain | null>(null);
   const [explainBusy, setExplainBusy] = useState(false);
+  const [checkOpen, setCheckOpen] = useState(false);
   // Go-deeper extras — follow-up chat thread
   const [followQ, setFollowQ] = useState("");
   const [followThread, setFollowThread] = useState<FollowTurn[]>([]);
@@ -158,7 +191,9 @@ export default function DailyUpdate() {
     let day: Digest | null = null;
     if (r.ok) { day = await r.json(); setDigest(day); }
     setQuiz(null); setAnswers([]); setGrade(null); setFeyn(null); setFeynText("");
-    setFollowThread([]); setCodeResult(null); setRunOut(null); setExplain(null);
+    setFollowThread([]); setCodeResult(null); setRunOut(null); setExplain(null); setCheckOpen(false);
+    // Pre-fill the code editor with the day's runnable example so "Run" works out of the box.
+    setCodeText(day?.reference_code || "");
     // Load the persistent follow-up thread + any cached deep-dive explainer for this concept.
     if (day?.date) {
       const [tr, er] = await Promise.all([
@@ -294,10 +329,10 @@ export default function DailyUpdate() {
     finally { setExplainBusy(false); }
   };
 
-  const askFollowup = async () => {
-    if (!digest?.date || followQ.trim().length < 3 || followBusy) return;
-    const q = followQ.trim();
-    setFollowBusy(true); setFollowQ("");
+  const askFollowup = async (preset?: string) => {
+    const q = (preset ?? followQ).trim();
+    if (!digest?.date || q.length < 3 || followBusy) return;
+    setFollowBusy(true); if (!preset) setFollowQ("");
     // Optimistically show the learner's turn.
     setFollowThread((t) => [...t, { role: "user", content: q }]);
     try {
@@ -554,7 +589,7 @@ export default function DailyUpdate() {
                 {explain.analogy && (
                   <div className="flex items-start gap-2 p-3 rounded-lg bg-[#ffd6a3]/5 border border-[#ffd6a3]/15">
                     <Lightbulb className="w-4 h-4 text-[#ffd6a3] mt-0.5 flex-shrink-0" />
-                    <p className="text-[12px] text-[#bbc9cd] leading-relaxed selection:bg-[#8aebff]/30"><span className="text-[#ffd6a3] font-semibold">Think of it like: </span>{explain.analogy}</p>
+                    <p className="text-[12px] text-[#bbc9cd] leading-relaxed selection:bg-[#8aebff]/30"><span className="text-[#ffd6a3] font-semibold">Think of it like: </span>{explain.analogy.replace(/^\s*think of (it )?(like|as)?[:,]?\s*/i, "")}</p>
                   </div>
                 )}
                 {explain.sections?.map((s, i) => (
@@ -580,6 +615,17 @@ export default function DailyUpdate() {
                   <div>
                     <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">Common pitfalls</span>
                     <ul className="mt-1 space-y-1">{explain.pitfalls!.map((p, i) => (<li key={i} className="flex items-start gap-1.5 text-[12px] text-[#bbc9cd] leading-relaxed"><AlertCircle className="w-3.5 h-3.5 text-[#ffb4ab] mt-0.5 flex-shrink-0" />{p}</li>))}</ul>
+                  </div>
+                )}
+                {explain.quick_check?.q && (
+                  <div className="p-3 rounded-lg bg-[#a3e635]/5 border border-[#a3e635]/20 space-y-2">
+                    <div className="flex items-center gap-1.5"><Brain className="w-3.5 h-3.5 text-[#a3e635]" /><span className="text-[10px] uppercase tracking-wider text-[#a3e635] font-mono font-bold">Quick check — can you answer this?</span></div>
+                    <p className="text-[12px] text-[#dfe2f3] leading-relaxed">{explain.quick_check.q}</p>
+                    {checkOpen ? (
+                      <p className="text-[12px] text-[#bbc9cd] leading-relaxed border-l-2 border-[#a3e635]/40 pl-2">{explain.quick_check.a}</p>
+                    ) : (
+                      <button onClick={() => setCheckOpen(true)} className="px-2.5 py-1 rounded-lg text-[10px] font-mono text-[#a3e635] bg-[#a3e635]/10 border border-[#a3e635]/30 hover:bg-[#a3e635]/20 cursor-pointer">Reveal answer</button>
+                    )}
                   </div>
                 )}
                 <p className="text-[10px] text-[#859397]/70 font-mono pt-1">Still unclear on anything? Use “Go deeper” below to ask JARVIS.</p>
@@ -615,14 +661,6 @@ export default function DailyUpdate() {
                 <span className="text-[9px] text-[#859397]/70 font-mono flex items-center gap-1"><Sparkles className="w-3 h-3" /> select any text to save it</span>
               </div>
               <pre onMouseUp={captureSelection} onTouchEnd={captureSelection} className="mt-2 text-[12px] text-[#dfe2f3] leading-relaxed whitespace-pre-wrap font-sans selection:bg-[#8aebff]/30">{lesson}</pre>
-            </div>
-          )}
-
-          {/* Reference code */}
-          {d!.reference_code && (
-            <div className="glass-panel rounded-2xl border border-white/10 overflow-hidden">
-              <div className="px-6 py-3 border-b border-white/5 bg-white/5 flex items-center gap-2"><Code2 className="w-4 h-4 text-[#8aebff]" /><span className="text-xs font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">Reference implementation</span></div>
-              <pre onMouseUp={captureSelection} onTouchEnd={captureSelection} className="p-5 overflow-x-auto text-[11.5px] leading-relaxed font-mono text-[#a3e635] bg-[#0a0e1a]/50 selection:bg-[#8aebff]/30">{d!.reference_code}</pre>
             </div>
           )}
 
@@ -708,7 +746,7 @@ export default function DailyUpdate() {
                       <div className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 ${t.role === "user" ? "bg-[#8aebff]/15 border border-[#8aebff]/30" : "bg-white/5 border border-white/10"}`}>
                         {t.role === "user" ? <User className="w-3 h-3 text-[#8aebff]" /> : <Bot className="w-3 h-3 text-[#a3e635]" />}
                       </div>
-                      <p className={`text-[12px] leading-relaxed rounded-lg px-3 py-2 max-w-[85%] ${t.role === "user" ? "bg-[#8aebff]/10 border border-[#8aebff]/15 text-[#dfe2f3]" : "bg-white/5 border border-white/5 text-[#bbc9cd]"}`}>{t.content}</p>
+                      <div className={`text-[12px] leading-relaxed rounded-lg px-3 py-2 max-w-[85%] ${t.role === "user" ? "bg-[#8aebff]/10 border border-[#8aebff]/15 text-[#dfe2f3]" : "bg-white/5 border border-white/5 text-[#bbc9cd]"}`}>{t.role === "assistant" ? <RichText text={t.content} /> : t.content}</div>
                     </div>
                   ))}
                   {followBusy && <div className="flex gap-2"><div className="w-6 h-6 rounded-full bg-white/5 border border-white/10 flex items-center justify-center mt-0.5"><Bot className="w-3 h-3 text-[#a3e635]" /></div><p className="text-[12px] text-[#859397] italic px-3 py-2">thinking…</p></div>}
@@ -718,13 +756,20 @@ export default function DailyUpdate() {
                 <input value={followQ} onChange={(e) => setFollowQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && askFollowup()}
                   placeholder={followThread.length ? "Ask another — it remembers the thread…" : "Ask a follow-up about today's concept…"}
                   className="flex-1 bg-[#0a0e1a]/50 border border-white/10 rounded-lg px-3 py-2 text-[12px] text-[#dfe2f3] font-sans outline-none focus:border-[#8aebff]/40" />
-                <button onClick={askFollowup} disabled={followBusy || followQ.trim().length < 3}
+                <button onClick={() => askFollowup()} disabled={followBusy || followQ.trim().length < 3}
                   className="px-3 py-2 rounded-lg text-xs font-bold font-mono text-[#8aebff] bg-[#8aebff]/10 border border-[#8aebff]/30 hover:bg-[#8aebff]/20 cursor-pointer disabled:opacity-50">{followBusy ? "…" : "Ask"}</button>
+              </div>
+              {/* Tappable prompts — keeps it interactive, one tap to dig deeper */}
+              <div className="flex flex-wrap gap-1.5">
+                {FOLLOWUP_CHIPS.map((c) => (
+                  <button key={c} onClick={() => askFollowup(c)} disabled={followBusy}
+                    className="px-2.5 py-1 rounded-full text-[10px] font-mono text-[#8aebff] bg-[#8aebff]/5 border border-[#8aebff]/20 hover:bg-[#8aebff]/15 cursor-pointer disabled:opacity-50 transition-colors">{c}</button>
+                ))}
               </div>
             </div>
             <div id="daily-run" className="space-y-2 pt-2 border-t border-white/5 scroll-mt-24">
-              <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono flex items-center gap-1.5"><Code2 className="w-3.5 h-3.5" /> Try it — write Python, run it right here, or get an LLM review</span>
-              <textarea value={codeText} onChange={(e) => setCodeText(e.target.value)} placeholder="# your attempt — print(...) to see output"
+              <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono flex items-center gap-1.5"><Code2 className="w-3.5 h-3.5" /> Try it — today's example is loaded; run it, tweak it, or write your own</span>
+              <textarea value={codeText} onChange={(e) => setCodeText(e.target.value)} placeholder="# today's runnable example loads here — press Run, or edit it"
                 spellCheck={false}
                 className="w-full bg-[#0a0e1a]/50 border border-white/10 rounded-lg px-3 py-2 text-[11.5px] text-[#a3e635] font-mono outline-none focus:border-[#8aebff]/40 resize-y min-h-[90px]" />
               <div className="flex items-center gap-2 flex-wrap">
