@@ -3,7 +3,7 @@ import {
   Newspaper, RefreshCw, ExternalLink, BookOpen, Code2, Send,
   CheckCircle2, Smile, Meh, Frown, History, GraduationCap, Brain, XCircle, AlertCircle,
   Flame, Layers, Target, Repeat, MessageCircleQuestion, Download, StickyNote, CalendarRange,
-  Play, Sparkles, Search, User, Bot, Lightbulb,
+  Play, Sparkles, Search, User, Bot, Lightbulb, ArrowDown,
 } from "lucide-react";
 import { getToken } from "../lib/auth";
 
@@ -14,6 +14,15 @@ interface PyodideAPI {
   setStdout: (opts: { batched: (s: string) => void }) => void;
   setStderr: (opts: { batched: (s: string) => void }) => void;
 }
+// Reject if a promise doesn't settle in time — so a stalled runtime load never hangs the UI forever.
+function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
+  return Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error(msg)), ms))]);
+}
+// Third-party libs the in-browser Python can't provide (no pip, no network). Bare imports of these
+// would fail — we catch them up front with a clear message instead of a confusing runtime error.
+const BLOCKED_IMPORTS = ["tiktoken", "openai", "anthropic", "cohere", "requests", "httpx", "urllib",
+  "torch", "tensorflow", "keras", "transformers", "sklearn", "scikit", "langchain", "llama_index",
+  "faiss", "chromadb", "pinecone", "boto3", "numpy", "pandas", "scipy"];
 const PYODIDE_VER = "0.26.4";
 let _pyodidePromise: Promise<PyodideAPI> | null = null;
 function loadPyodideOnce(): Promise<PyodideAPI> {
@@ -58,7 +67,9 @@ interface NoteHit { id: number; title: string; snippet: string; }
 interface Explain {
   tldr: string;
   analogy?: string;
-  sections?: { heading: string; body: string }[];
+  flow?: { title?: string; steps?: { label: string; detail?: string }[] };
+  sections?: { heading: string; points?: string[]; body?: string }[];
+  comparison?: { title?: string; col_a?: string; col_b?: string; rows?: { a: string; b: string }[] } | null;
   example?: { caption?: string; code?: string };
   key_points?: string[];
   pitfalls?: string[];
@@ -136,6 +147,49 @@ function RichText({ text }: { text: string }) {
 
 const FOLLOWUP_CHIPS = ["Explain more simply", "Give a real-world example", "Show me the code", "Quiz me on this"];
 
+interface ReplyData { answer?: string; points?: string[]; flow?: string[]; code?: string; suggestions?: string[]; }
+// Assistant turns are stored as a JSON reply object; parse it (falls back to null for old plain-text turns).
+function parseReply(content: string): ReplyData | null {
+  try {
+    const o = JSON.parse(content);
+    if (o && typeof o === "object" && ("answer" in o || "points" in o || "flow" in o)) return o as ReplyData;
+  } catch { /* plain text */ }
+  return null;
+}
+
+// Renders a tutor reply VISUALLY — a one-line answer, an optional flow (A → B → C), scannable
+// bullets, and runnable code you can push into the editor. Falls back to markdown-lite for old turns.
+function AssistantReply({ content, onRunCode }: { content: string; onRunCode: (code: string) => void }) {
+  const data = parseReply(content);
+  if (!data) return <RichText text={content} />;
+  return (
+    <div className="space-y-2">
+      {data.answer && <p className="leading-relaxed font-medium text-[#dfe2f3]">{data.answer}</p>}
+      {(data.flow?.length ?? 0) > 0 && (
+        <div className="flex flex-wrap items-center gap-1">
+          {data.flow!.map((s, i) => (
+            <span key={i} className="flex items-center gap-1">
+              <span className="px-2 py-0.5 rounded bg-[#8aebff]/10 border border-[#8aebff]/25 text-[#8aebff] text-[11px] font-mono">{s}</span>
+              {i < data.flow!.length - 1 && <span className="text-[#859397]">→</span>}
+            </span>
+          ))}
+        </div>
+      )}
+      {(data.points?.length ?? 0) > 0 && (
+        <ul className="space-y-1">{data.points!.map((p, i) => (
+          <li key={i} className="flex items-start gap-1.5"><span className="text-[#8aebff] mt-0.5">▸</span><span>{p}</span></li>
+        ))}</ul>
+      )}
+      {data.code && (
+        <div className="rounded-lg border border-white/10 overflow-hidden">
+          <pre className="p-2.5 overflow-x-auto text-[11px] font-mono text-[#a3e635] bg-[#0a0e1a]/60 whitespace-pre-wrap">{data.code}</pre>
+          <button onClick={() => onRunCode(data.code!)} className="w-full px-2 py-1.5 text-[10px] font-mono text-[#0a0e1a] bg-[#a3e635] hover:bg-[#b6f24d] cursor-pointer flex items-center justify-center gap-1"><Play className="w-3 h-3" /> Load into editor & run</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DailyUpdate() {
   const [digest, setDigest] = useState<Digest | null>(null);
   const [history, setHistory] = useState<HistRow[]>([]);
@@ -162,6 +216,7 @@ export default function DailyUpdate() {
   // Go-deeper extras — follow-up chat thread
   const [followQ, setFollowQ] = useState("");
   const [followThread, setFollowThread] = useState<FollowTurn[]>([]);
+  const [followSuggestions, setFollowSuggestions] = useState<string[]>([]);
   const [followBusy, setFollowBusy] = useState(false);
   const threadRef = useRef<HTMLDivElement>(null);
   // Try-it code — LLM review + real in-browser execution
@@ -191,7 +246,7 @@ export default function DailyUpdate() {
     let day: Digest | null = null;
     if (r.ok) { day = await r.json(); setDigest(day); }
     setQuiz(null); setAnswers([]); setGrade(null); setFeyn(null); setFeynText("");
-    setFollowThread([]); setCodeResult(null); setRunOut(null); setExplain(null); setCheckOpen(false);
+    setFollowThread([]); setFollowSuggestions([]); setCodeResult(null); setRunOut(null); setExplain(null); setCheckOpen(false);
     // Pre-fill the code editor with the day's runnable example so "Run" works out of the box.
     setCodeText(day?.reference_code || "");
     // Load the persistent follow-up thread + any cached deep-dive explainer for this concept.
@@ -200,7 +255,13 @@ export default function DailyUpdate() {
         fetch(`/api/daily/${day.date}/followups`),
         fetch(`/api/daily/${day.date}/explain`),
       ]);
-      if (tr.ok) setFollowThread((await tr.json()).turns || []);
+      if (tr.ok) {
+        const turns: FollowTurn[] = (await tr.json()).turns || [];
+        setFollowThread(turns);
+        const lastA = [...turns].reverse().find((t) => t.role === "assistant");
+        const sug = lastA ? parseReply(lastA.content)?.suggestions : undefined;
+        if (sug?.length) setFollowSuggestions(sug);
+      }
       if (er.ok) { const ed = await er.json(); if (ed.explanation) setExplain(ed.explanation); }
     }
   }, []);
@@ -317,11 +378,11 @@ export default function DailyUpdate() {
     finally { setFeynBusy(false); }
   };
 
-  const getExplain = async () => {
+  const getExplain = async (force = false) => {
     if (!digest?.date || explainBusy) return;
-    setExplainBusy(true);
+    setExplainBusy(true); if (force) setCheckOpen(false);
     try {
-      const res = await fetch(`/api/daily/${digest.date}/explain`, { method: "POST" });
+      const res = await fetch(`/api/daily/${digest.date}/explain${force ? "?force=1" : ""}`, { method: "POST" });
       const dd = await safeJson(res);
       if (dd.error) setMsg(`Explainer: ${dd.error}`);
       else setExplain(dd.explanation as Explain);
@@ -340,7 +401,12 @@ export default function DailyUpdate() {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q }),
       });
       const dd = await safeJson(res);
-      setFollowThread((t) => [...t, { role: "assistant", content: dd.error ? `${dd.error}` : String(dd.answer || "") }]);
+      if (dd.error) {
+        setFollowThread((t) => [...t, { role: "assistant", content: String(dd.error) }]);
+      } else {
+        setFollowThread((t) => [...t, { role: "assistant", content: JSON.stringify(dd) }]);
+        setFollowSuggestions(Array.isArray(dd.suggestions) ? (dd.suggestions as string[]) : []);
+      }
     } catch (e) {
       setFollowThread((t) => [...t, { role: "assistant", content: `Error: ${e instanceof Error ? e.message : e}` }]);
     } finally { setFollowBusy(false); }
@@ -357,24 +423,37 @@ export default function DailyUpdate() {
       else setMsg(`Code check: ${dd.error}`);
     } finally { setCodeBusy(false); }
   };
-  const runCode = async () => {
-    if (codeText.trim().length < 3 || runBusy) return;
+  const runCode = async (override?: string) => {
+    const src = override ?? codeText;
+    if (src.trim().length < 3 || runBusy) return;
+    // Fail fast on libraries the browser runtime can't install (no pip / no network) — no more hangs.
+    const blocked = BLOCKED_IMPORTS.find((m) => new RegExp(`(^|\\n)\\s*(import|from)\\s+${m}\\b`).test(src));
+    if (blocked) {
+      setRunOut({ out: `This example uses "${blocked}", which the in-browser Python can't install (no pip, no network). Use "Check my code (AI)" for feedback instead, or rewrite it with just Python's standard library.`, err: true });
+      return;
+    }
     setRunBusy(true); setRunOut({ out: "Booting Python runtime… (first run downloads ~6 MB)", err: false });
     try {
-      const py = await loadPyodideOnce();
+      const py = await withTimeout(loadPyodideOnce(), 45000, "The Python runtime took too long to load — check your connection and try again.");
       const buf: string[] = [];
       py.setStdout({ batched: (s) => buf.push(s) });
       py.setStderr({ batched: (s) => buf.push(s) });
       try {
-        await py.runPythonAsync(codeText);
+        await withTimeout(py.runPythonAsync(src), 20000, "Execution timed out (possible infinite loop or a blocking call).");
         setRunOut({ out: buf.join("\n").trimEnd() || "(ran with no output)", err: false });
       } catch (execErr) {
         const trace = execErr instanceof Error ? execErr.message : String(execErr);
-        setRunOut({ out: (buf.join("\n") + "\n" + trace).trim(), err: true });
+        setRunOut({ out: (buf.join("\n") + "\n" + trace).trim() || trace, err: true });
       }
     } catch (e) {
       setRunOut({ out: e instanceof Error ? e.message : String(e), err: true });
     } finally { setRunBusy(false); }
+  };
+  // From a tutor reply's "Load into editor & run" button: drop the code into the editor, scroll to it, run.
+  const loadAndRun = (code: string) => {
+    setCodeText(code);
+    scrollToId("daily-run");
+    runCode(code);
   };
   const saveNote = async (text?: string) => {
     if (!digest?.date) return;
@@ -570,13 +649,21 @@ export default function DailyUpdate() {
             {d!.pedagogical_focus && <p className="text-[13px] text-[#bbc9cd] leading-relaxed mt-1">{d!.pedagogical_focus}</p>}
           </div>
 
-          {/* Deep dive — full, from-scratch explainer of the concept */}
+          {/* Deep dive — visual, at-a-glance explainer of the concept */}
           <div className="glass-panel rounded-2xl border border-[#8aebff]/15 p-5 sm:p-6 space-y-4">
-            <div className="flex items-center gap-2"><GraduationCap className="w-4.5 h-4.5 text-[#8aebff]" /><span className="text-xs font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">Understand this topic</span><span className="text-[10px] text-[#859397]">— the full explainer, from scratch</span></div>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2"><GraduationCap className="w-4.5 h-4.5 text-[#8aebff]" /><span className="text-xs font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">Understand this topic</span><span className="text-[10px] text-[#859397] hidden sm:inline">— see it, don't read it</span></div>
+              {explain && (
+                <button onClick={() => getExplain(true)} disabled={explainBusy} title="Rebuild this explainer"
+                  className="text-[#859397] hover:text-[#8aebff] cursor-pointer disabled:opacity-50 flex items-center gap-1 text-[10px] font-mono">
+                  <RefreshCw className={`w-3.5 h-3.5 ${explainBusy ? "animate-spin" : ""}`} /> {explainBusy ? "" : "rebuild"}
+                </button>
+              )}
+            </div>
             {!explain ? (
               <div className="space-y-2.5">
                 <p className="text-[12px] text-[#859397] leading-relaxed">
-                  Get a proper, from-scratch explanation of <span className="text-[#dfe2f3] font-semibold">{d!.concept}</span> — plain language, an analogy, a worked example, key points and common pitfalls. Read this first, then ask JARVIS anything below.
+                  Get a <span className="text-[#dfe2f3] font-semibold">visual, at-a-glance</span> breakdown of <span className="text-[#dfe2f3] font-semibold">{d!.concept}</span> — a step-by-step flow, bullet cards, a comparison table and a worked example. Made to be scanned, not read. Then ask JARVIS anything below.
                 </p>
                 <button onClick={getExplain} disabled={explainBusy}
                   className="px-4 py-2 rounded-lg text-xs font-bold font-mono text-[#0a0e1a] bg-[#8aebff] hover:bg-[#a5f0ff] transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2">
@@ -592,12 +679,56 @@ export default function DailyUpdate() {
                     <p className="text-[12px] text-[#bbc9cd] leading-relaxed selection:bg-[#8aebff]/30"><span className="text-[#ffd6a3] font-semibold">Think of it like: </span>{explain.analogy.replace(/^\s*think of (it )?(like|as)?[:,]?\s*/i, "")}</p>
                   </div>
                 )}
+                {/* Flow pipeline — the "see it" centerpiece */}
+                {(explain.flow?.steps?.length ?? 0) > 0 && (
+                  <div>
+                    {explain.flow!.title && <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">{explain.flow!.title}</span>}
+                    <div className="mt-2 flex flex-col items-center">
+                      {explain.flow!.steps!.map((st, i) => (
+                        <div key={i} className="flex flex-col items-center w-full">
+                          <div className="w-full sm:w-80 text-center rounded-lg border border-[#8aebff]/25 bg-[#8aebff]/[0.06] px-3 py-2">
+                            <div className="text-[12px] font-bold text-[#dfe2f3]">{st.label}</div>
+                            {st.detail && <div className="text-[10px] text-[#859397] font-mono mt-0.5">{st.detail}</div>}
+                          </div>
+                          {i < explain.flow!.steps!.length - 1 && <ArrowDown className="w-4 h-4 text-[#8aebff]/70 my-1" />}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {/* Sections — bullet cards, never paragraphs */}
                 {explain.sections?.map((s, i) => (
-                  <div key={i}>
-                    <h3 className="text-[13px] font-bold text-[#8aebff]">{s.heading}</h3>
-                    <p className="text-[12px] text-[#bbc9cd] leading-relaxed mt-1 selection:bg-[#8aebff]/30">{s.body}</p>
+                  <div key={i} className="rounded-lg border border-white/5 bg-white/[0.02] p-3">
+                    <h3 className="text-[13px] font-bold text-[#8aebff] mb-1.5">{s.heading}</h3>
+                    {(s.points?.length ?? 0) > 0 ? (
+                      <ul className="space-y-1">{s.points!.map((p, j) => (
+                        <li key={j} className="flex items-start gap-1.5 text-[12px] text-[#bbc9cd] leading-relaxed selection:bg-[#8aebff]/30"><span className="text-[#8aebff] mt-0.5">▸</span><span>{p}</span></li>
+                      ))}</ul>
+                    ) : s.body ? (
+                      <p className="text-[12px] text-[#bbc9cd] leading-relaxed selection:bg-[#8aebff]/30">{s.body}</p>
+                    ) : null}
                   </div>
                 ))}
+                {/* Comparison table — when there's a natural A-vs-B */}
+                {explain.comparison && (explain.comparison.rows?.length ?? 0) > 0 && (
+                  <div>
+                    {explain.comparison.title && <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">{explain.comparison.title}</span>}
+                    <div className="mt-1 rounded-lg border border-white/10 overflow-hidden">
+                      <table className="w-full text-[11.5px] border-collapse">
+                        <thead><tr className="bg-white/5 text-left">
+                          <th className="px-3 py-1.5 font-bold text-[#8aebff] w-1/2">{explain.comparison.col_a || "A"}</th>
+                          <th className="px-3 py-1.5 font-bold text-[#a3e635] w-1/2 border-l border-white/10">{explain.comparison.col_b || "B"}</th>
+                        </tr></thead>
+                        <tbody>{explain.comparison.rows!.map((r, i) => (
+                          <tr key={i} className="border-t border-white/5">
+                            <td className="px-3 py-1.5 text-[#bbc9cd] align-top">{r.a}</td>
+                            <td className="px-3 py-1.5 text-[#bbc9cd] align-top border-l border-white/10">{r.b}</td>
+                          </tr>
+                        ))}</tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
                 {explain.example && (explain.example.caption || explain.example.code) && (
                   <div className="rounded-lg border border-white/10 overflow-hidden">
                     <div className="px-3 py-2 bg-white/5 text-[10px] uppercase tracking-wider font-mono text-[#a3e635] flex items-center gap-1.5"><Code2 className="w-3.5 h-3.5" /> Worked example</div>
@@ -746,7 +877,7 @@ export default function DailyUpdate() {
                       <div className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 ${t.role === "user" ? "bg-[#8aebff]/15 border border-[#8aebff]/30" : "bg-white/5 border border-white/10"}`}>
                         {t.role === "user" ? <User className="w-3 h-3 text-[#8aebff]" /> : <Bot className="w-3 h-3 text-[#a3e635]" />}
                       </div>
-                      <div className={`text-[12px] leading-relaxed rounded-lg px-3 py-2 max-w-[85%] ${t.role === "user" ? "bg-[#8aebff]/10 border border-[#8aebff]/15 text-[#dfe2f3]" : "bg-white/5 border border-white/5 text-[#bbc9cd]"}`}>{t.role === "assistant" ? <RichText text={t.content} /> : t.content}</div>
+                      <div className={`text-[12px] leading-relaxed rounded-lg px-3 py-2 max-w-[85%] ${t.role === "user" ? "bg-[#8aebff]/10 border border-[#8aebff]/15 text-[#dfe2f3]" : "bg-white/5 border border-white/5 text-[#bbc9cd]"}`}>{t.role === "assistant" ? <AssistantReply content={t.content} onRunCode={loadAndRun} /> : t.content}</div>
                     </div>
                   ))}
                   {followBusy && <div className="flex gap-2"><div className="w-6 h-6 rounded-full bg-white/5 border border-white/10 flex items-center justify-center mt-0.5"><Bot className="w-3 h-3 text-[#a3e635]" /></div><p className="text-[12px] text-[#859397] italic px-3 py-2">thinking…</p></div>}
@@ -759,9 +890,9 @@ export default function DailyUpdate() {
                 <button onClick={() => askFollowup()} disabled={followBusy || followQ.trim().length < 3}
                   className="px-3 py-2 rounded-lg text-xs font-bold font-mono text-[#8aebff] bg-[#8aebff]/10 border border-[#8aebff]/30 hover:bg-[#8aebff]/20 cursor-pointer disabled:opacity-50">{followBusy ? "…" : "Ask"}</button>
               </div>
-              {/* Tappable prompts — keeps it interactive, one tap to dig deeper */}
+              {/* Tappable prompts — dynamic follow-ups from the last answer, else default starters */}
               <div className="flex flex-wrap gap-1.5">
-                {FOLLOWUP_CHIPS.map((c) => (
+                {(followSuggestions.length ? followSuggestions : FOLLOWUP_CHIPS).map((c) => (
                   <button key={c} onClick={() => askFollowup(c)} disabled={followBusy}
                     className="px-2.5 py-1 rounded-full text-[10px] font-mono text-[#8aebff] bg-[#8aebff]/5 border border-[#8aebff]/20 hover:bg-[#8aebff]/15 cursor-pointer disabled:opacity-50 transition-colors">{c}</button>
                 ))}
@@ -773,7 +904,7 @@ export default function DailyUpdate() {
                 spellCheck={false}
                 className="w-full bg-[#0a0e1a]/50 border border-white/10 rounded-lg px-3 py-2 text-[11.5px] text-[#a3e635] font-mono outline-none focus:border-[#8aebff]/40 resize-y min-h-[90px]" />
               <div className="flex items-center gap-2 flex-wrap">
-                <button onClick={runCode} disabled={runBusy || codeText.trim().length < 3}
+                <button onClick={() => runCode()} disabled={runBusy || codeText.trim().length < 3}
                   className="px-3 py-1.5 rounded-lg text-xs font-bold font-mono text-[#0a0e1a] bg-[#a3e635] hover:bg-[#b6f24d] cursor-pointer disabled:opacity-50 flex items-center gap-1.5">
                   {runBusy ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Running…</> : <><Play className="w-3.5 h-3.5" /> Run (Python)</>}
                 </button>

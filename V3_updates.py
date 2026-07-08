@@ -2625,7 +2625,10 @@ async def generate_daily_payload(raw_data, skill_level, exclusions, planner_cont
             "- *Key ideas*: 2-3 tight bullets a learner should walk away knowing.\n\n"
             f"Structure the <reference_implementation> as a SHORT, self-contained, runnable Python snippet "
             f"(10-25 lines) that demonstrates {concept} concretely — a learning example, not a project. "
-            "Include a couple of print() calls so running it shows the idea in action.")
+            "Include a couple of print() calls so running it shows the idea in action. CRITICAL: use ONLY "
+            "the Python STANDARD LIBRARY — NO third-party/pip packages (no tiktoken, numpy, pandas, openai, "
+            "requests, torch, transformers) and NO network access. It must run offline in a browser sandbox. "
+            "Simulate/mock any external service with a plain function.")
 
     prompt = f"""HARD LIMIT: Return EXACTLY 5 news items. Not 4. Not 6. Not 20.
 Exactly 5 items in the updates section.
@@ -3868,19 +3871,22 @@ async def study_weekly_recap_api():
 
 
 _EXPLAIN_PROMPT = (
-    "You are a friendly, engaging tutor writing a self-contained explainer of ONE concept for a motivated "
-    "learner (a data analyst moving into AI engineering). Teach it so it CLICKS — do NOT write dictionary "
-    "definitions. Every section must TEACH THROUGH a concrete mini-scenario or worked example with real "
-    "numbers/strings, using 'you' language (e.g. 'say you send the model...'). Build intuition first, then "
-    "detail. STRICT JSON only, no markdown fences:\n"
-    '{"tldr":"2-3 sentence plain-English summary of what it is and why it matters to you",'
-    '"analogy":"one vivid everyday analogy that captures the core idea",'
-    '"sections":[{"heading":"short heading","body":"2-5 sentences that TEACH via a concrete example/scenario with real numbers, not a definition"}],'
-    '"example":{"caption":"a step-by-step worked example explained in words","code":"a short runnable snippet OR empty string"},'
-    '"key_points":["3-6 crisp takeaways"],'
-    '"pitfalls":["2-4 common misunderstandings or mistakes to avoid"],'
-    '"quick_check":{"q":"one question that makes them apply the idea (not just recall a definition)","a":"the answer in 1-2 sentences"}}'
-    " Aim for 3-5 sections. Make it concrete and engaging. Output JSON only.")
+    "You are a tutor who teaches VISUALLY, for someone who does NOT want to read paragraphs. Teach ONE "
+    "concept so it can be UNDERSTOOD AT A GLANCE — short phrases, bullets, and a step-by-step flow, NEVER "
+    "long prose. Think diagrams, not essays. Use 'you' language and real values. STRICT JSON only, no "
+    "markdown fences:\n"
+    '{"tldr":"ONE punchy sentence — what it is",'
+    '"analogy":"one short vivid analogy",'
+    '"flow":{"title":"short title","steps":[{"label":"stage name (1-3 words)","detail":"note, max 8 words"}]},'
+    '"sections":[{"heading":"short heading","points":["a short scannable bullet, max 12 words"]}],'
+    '"comparison":{"title":"short title","col_a":"label","col_b":"label","rows":[{"a":"short cell","b":"short cell"}]},'
+    '"example":{"caption":"one line: what it shows","code":"a short runnable snippet (Python standard library ONLY, no pip/third-party, no network) OR empty string"},'
+    '"key_points":["takeaway, max 10 words"],'
+    '"pitfalls":["gotcha, max 10 words"],'
+    '"quick_check":{"q":"an applied question (not a definition)","a":"answer in 1-2 sentences"}}'
+    " RULES: flow = 3-7 stages showing how it works (e.g. Text -> Tokenizer -> Tokens -> Model -> Next token). "
+    "Each section = heading + 2-4 SHORT bullets (never a paragraph). Use 'comparison' ONLY when a natural "
+    "A-vs-B exists (else set it to null). Keep EVERYTHING short, concrete and scannable. Output JSON only.")
 
 
 async def _get_cached_lesson(d: str):
@@ -3903,11 +3909,13 @@ async def daily_explain_get_api(d: str):
 
 
 @app.post("/api/daily/{d}/explain")
-async def daily_explain_gen_api(d: str):
-    """Generate (once) and cache a full structured explainer of the day's concept."""
-    cached = await _get_cached_lesson(d)
-    if cached:
-        return JSONResponse({"explanation": cached})
+async def daily_explain_gen_api(d: str, force: int = 0):
+    """Generate (once) and cache a full structured explainer of the day's concept.
+    Pass ?force=1 to rebuild it (e.g. to pick up a new explainer format)."""
+    if not force:
+        cached = await _get_cached_lesson(d)
+        if cached:
+            return JSONResponse({"explanation": cached})
     dig = await _get_digest_row(d)
     if not dig:
         return JSONResponse({"error": "No lesson for that date."}, status_code=404)
@@ -3960,20 +3968,49 @@ async def daily_followup_api(d: str, request: Request):
         cur = await db.execute(
             "SELECT role, content FROM study_followups WHERE date = ? ORDER BY id ASC", (d,))
         prior = [dict(r) for r in await cur.fetchall()]
-    sys = ("You are a friendly, engaging tutor continuing a conversation about ONE concept. Reply "
-           "conversationally and SHORT — 2-4 sentences, or a few tight bullet points; never a wall of "
-           "text. Lead with the direct answer, then ONE concrete example if it helps. You may use **bold** "
-           "for key terms and '- ' for bullets. Ground it in the lesson and stay consistent with the "
-           "conversation so far; resolve 'that'/'it' from context. If they say 'explain more' or similar, "
-           "go one level deeper with a FRESH example instead of repeating what you already said.")
-    history = "\n".join(f"{'Learner' if t['role'] == 'user' else 'Tutor'}: {t['content']}" for t in prior[-8:])
+
+    def _flatten(role, content):
+        # Assistant turns are stored as structured JSON — flatten to text for the history prompt.
+        if role == "assistant":
+            try:
+                o = json.loads(content)
+                return " ".join([o.get("answer", "")] + (o.get("points") or [])).strip() or content
+            except Exception:
+                return content
+        return content
+
+    sys = ("You are a tutor continuing a chat about ONE concept, for someone who prefers to SEE answers, "
+           "NOT read paragraphs. Answer the latest question VISUALLY and short. STRICT JSON only, no fences:\n"
+           '{"answer":"one short direct sentence",'
+           '"points":["a short scannable bullet, max 14 words"],'
+           '"flow":["stage","stage"],'
+           '"code":"a short runnable python snippet OR empty string",'
+           '"suggestions":["a natural next question, max 8 words"]}'
+           " RULES: 'points' = 2-5 short bullets that carry the real answer (never a paragraph). 'flow' = "
+           "3-6 stages ONLY when the answer is a process/pipeline, else []. 'code' = include ONLY if they "
+           "ask to see/show code or how to implement it, else empty string; when present it MUST use only "
+           "the Python standard library (no pip/third-party imports, no network) so it runs in a browser. "
+           "'suggestions' = 2-3 natural "
+           "next questions that build on THIS answer. Ground it in the lesson and conversation; resolve "
+           "'that'/'it' from context; if they say 'explain more', go deeper with a fresh angle. Output JSON only.")
+    history = "\n".join(f"{'Learner' if t['role'] == 'user' else 'Tutor'}: {_flatten(t['role'], t['content'])}" for t in prior[-8:])
     user = (f"CONCEPT: {dig['concept']}\n\nLESSON:\n{(dig['digest_text'] or '')[:1400]}\n\n"
             f"{('CONVERSATION SO FAR:' + chr(10) + history + chr(10) + chr(10)) if history else ''}"
             f"LATEST QUESTION: {question}")
     try:
-        answer = (await call_llm(sys, user, max_tokens=600, temperature=0.4) or "").strip()
+        raw = await call_llm(sys, user, max_tokens=800, temperature=0.4)
+        data = _json_obj(raw) or {}
     except Exception as e:
         return JSONResponse({"error": f"Answer failed: {e}"}, status_code=400)
+    if not data.get("answer") and not data.get("points"):
+        data = {"answer": (raw or "").strip(), "points": [], "flow": [], "code": "", "suggestions": []}
+    reply = {
+        "answer": str(data.get("answer", "")).strip(),
+        "points": [str(p).strip() for p in (data.get("points") or []) if str(p).strip()][:5],
+        "flow": [str(s).strip() for s in (data.get("flow") or []) if str(s).strip()][:6],
+        "code": str(data.get("code", "") or "").strip(),
+        "suggestions": [str(s).strip() for s in (data.get("suggestions") or []) if str(s).strip()][:3],
+    }
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     # Two separate execute() calls — the Turso (prod) connection wrapper has no executemany().
     async with aiosqlite.connect(DB_PATH) as db:
@@ -3982,9 +4019,9 @@ async def daily_followup_api(d: str, request: Request):
             (d, dig["concept"], "user", question, now))
         await db.execute(
             "INSERT INTO study_followups (date, concept, role, content, created_at) VALUES (?,?,?,?,?)",
-            (d, dig["concept"], "assistant", answer, now))
+            (d, dig["concept"], "assistant", json.dumps(reply), now))
         await db.commit()
-    return JSONResponse({"answer": answer})
+    return JSONResponse(reply)
 
 
 @app.post("/api/daily/{d}/check-code")
