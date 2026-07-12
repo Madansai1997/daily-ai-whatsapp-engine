@@ -8,7 +8,7 @@
 > ```
 > List / remove: `python3 shared_memory.py list` · `python3 shared_memory.py rm <key>`
 
-_14 shared memories · last rendered 2026-07-06 12:27 UTC_
+_15 shared memories · last rendered 2026-07-12 17:23 UTC_
 
 ## Feedback — how to work
 
@@ -55,6 +55,9 @@ All user-facing JARVIS responses across this project (WhatsApp replies, web chat
 - The existing WhatsApp/general-chat system prompt in `process_message()`'s `GENERAL CONVERSATIONAL CHAT` fallback must NOT be touched per earlier standing instruction — this quality bar applies to new/other response paths, not as license to rewrite that specific prompt.
 
 ## Project — ongoing work & constraints
+
+### project_render_postdeploy_todo _(via claude-code)_
+Render post-deploy TODO after commit 2808551 (Daily Update threaded tutor + knowledge base + Pyodide run; weekly-project removed; Home 'The Daily AI' front page). Outstanding manual steps on the live Render instance: (1) cron-job.org — add a DAILY hit to /cron/web-digest?token=<CLAUDE_CODE_TRIGGER_SECRET> and RETIRE the old /cron/digest (WhatsApp morning digest is no longer the primary path; the web daily digest is). (2) REGENERATE the RapidAPI key that leaked in chat earlier, then set the Reddit Trend Lab env vars on Render: RAPIDAPI_KEY1, REDDIT_RAPIDAPI_HOST=reddit34.p.rapidapi.com, REDDIT_RAPIDAPI_PATH=/getPostsBySubreddit, REDDIT_RAPIDAPI_QUERY_PARAM=subreddit, REDDIT_RAPIDAPI_MODE=subreddit. (3) Verify the master resume in prod Turso is the real one (not the 66-char stub) via RESUME -> Upload on the live site. (4) Pyodide 'Run (Python)' on the Daily tab loads its runtime from cdn.jsdelivr.net at click-time (~6MB first run) — confirm reachable from the browser; degrades to an 'offline?' message otherwise. Also for the 2x/day email->Kanban scan: two daily cron-job.org hits to /cron/scan-applications?token=<secret> (~8:30 AM & ~9:00 PM IST) if not already added.
 
 ### project_whatsapp_engine_oom _(via claude-code)_
 "WhatsApp engine OOM on Render — root cause is glibc malloc-arena ratcheting, not a single spike"

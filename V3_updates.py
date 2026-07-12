@@ -779,6 +779,36 @@ def init_db_tables():
     except Exception as e:
         print(f"⚠️ job_logs migration error: {e}")
 
+    # Influencer watcher tables
+    cursor.execute('''CREATE TABLE IF NOT EXISTS watched_influencers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        handle TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        name TEXT,
+        added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(handle, platform))''')
+
+    cursor.execute('''CREATE TABLE IF NOT EXISTS seen_influencer_posts (
+        post_id TEXT PRIMARY KEY,
+        platform TEXT NOT NULL,
+        handle TEXT NOT NULL,
+        discovered_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+    # Persistent feed: doubles as the dedup ledger AND the console feed history (relevance-ranked).
+    cursor.execute('''CREATE TABLE IF NOT EXISTS influencer_posts (
+        post_id TEXT PRIMARY KEY,
+        platform TEXT,
+        handle TEXT,
+        name TEXT,
+        title TEXT,
+        summary TEXT,
+        url TEXT,
+        relevant INTEGER DEFAULT 1,
+        relevance_note TEXT,
+        is_read INTEGER DEFAULT 0,
+        published_at TEXT,
+        seen_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
     conn.commit()
     conn.close()
     print("✅ State Engine: All database tables verified and ready.")
@@ -4317,6 +4347,17 @@ async def cron_followups(token: str = ""):
     res = await _auto_followups_job()
     await _log_job("auto-followups", "completed", f"drafted {res.get('drafted', 0)}")
     return JSONResponse({"status": "followups drafted", **res}, status_code=202)
+
+
+@app.post("/cron/influencer-digest")
+async def cron_influencer_digest(token: str = ""):
+    """Daily: scrape watched influencer pages and compile summarized updates."""
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    from influencer_agent import run_influencer_watcher_digest
+    _run_bg_job("influencer-digest", lambda: run_influencer_watcher_digest(call_llm))
+    return JSONResponse({"status": "influencer digest triggered"}, status_code=202)
+
 
 
 @app.post("/cron/learn-patterns")
@@ -9144,6 +9185,89 @@ async def api_dev_usage(request: Request):
             (tool, day, tokens, cost, duration, note))
         await db.commit()
     return JSONResponse({"ok": True})
+
+
+# ── Watched Influencers (Influencer Agent UI) ──
+@app.get("/api/influencers")
+async def api_influencers_list():
+    from influencer_agent import get_watched_influencers
+    return JSONResponse(await get_watched_influencers())
+
+
+@app.post("/api/influencers")
+async def api_influencers_add(request: Request):
+    body = await request.json()
+    platform = body.get("platform", "").strip().lower()
+    handle = body.get("handle", "").strip()
+    name = body.get("name", "").strip() or handle
+
+    if not platform or not handle:
+        return JSONResponse({"ok": False, "result": "Platform and handle are required."}, status_code=400)
+
+    if platform == "youtube":
+        from influencer_agent import resolve_youtube_channel_id
+        handle = await resolve_youtube_channel_id(handle)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            await db.execute(
+                "INSERT INTO watched_influencers (handle, platform, name) VALUES (?, ?, ?)",
+                (handle, platform, name)
+            )
+            await db.commit()
+            return JSONResponse({"ok": True, "result": f"Added {name} ({platform})"})
+        except aiosqlite.IntegrityError:
+            return JSONResponse({"ok": False, "result": f"{name} is already registered."}, status_code=400)
+
+
+@app.post("/api/influencers/{inf_id}/delete")
+async def api_influencers_delete(inf_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM watched_influencers WHERE id = ?", (inf_id,))
+        await db.commit()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/influencers/sync")
+async def api_influencers_sync():
+    from influencer_agent import run_influencer_watcher_digest
+    digest = await run_influencer_watcher_digest(call_llm)
+    return JSONResponse({"ok": True, "result": digest})
+
+
+@app.post("/api/influencers/{inf_id}/sync")
+async def api_influencers_sync_single(inf_id: int):
+    from influencer_agent import run_single_influencer_sync
+    digest = await run_single_influencer_sync(inf_id, call_llm)
+    return JSONResponse({"ok": True, "result": digest})
+
+
+@app.get("/api/influencers/feed")
+async def api_influencers_feed(limit: int = 60, all: int = 0):
+    """Persistent, relevance-ranked post history for the console feed view."""
+    from influencer_agent import get_feed
+    posts = await get_feed(limit=limit, only_relevant=(all == 0))
+    return JSONResponse(posts)
+
+
+@app.get("/api/influencers/unread-count")
+async def api_influencers_unread_count():
+    from influencer_agent import get_unread_count
+    return JSONResponse({"count": await get_unread_count()})
+
+
+@app.post("/api/influencers/feed/read")
+async def api_influencers_feed_read(request: Request):
+    """Mark specific post_ids read, or all relevant posts when body is empty/omitted."""
+    from influencer_agent import mark_feed_read
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    ids = body.get("post_ids") if isinstance(body, dict) else None
+    await mark_feed_read(ids)
+    return JSONResponse({"ok": True})
+
 
 
 # ── Bills / deadlines (Bill Watcher UI) ──

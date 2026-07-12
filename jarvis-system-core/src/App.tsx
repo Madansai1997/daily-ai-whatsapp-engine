@@ -148,7 +148,7 @@ export default function App() {
               <Bills />
             )}
             {(activeScreen === ScreenId.Discover || activeScreen === ScreenId.Trends || activeScreen === ScreenId.Daily) && (
-              <Discover initial={activeScreen === ScreenId.Trends ? "trends" : "daily"} />
+              <Discover initial={activeScreen === ScreenId.Trends ? "trends" : navIntent === "influencers" ? "influencers" : "daily"} />
             )}
             {activeScreen === ScreenId.Help && (
               <Help onNavigate={handleNavigate} />

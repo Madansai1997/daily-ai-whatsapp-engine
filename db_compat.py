@@ -21,6 +21,10 @@ TURSO_URL = os.environ.get("TURSO_DATABASE_URL", "").replace("libsql://", "https
 TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
 USE_TURSO = bool(TURSO_URL)
 
+# Exported so call sites can `except aiosqlite.IntegrityError:` in BOTH modes. The Turso
+# branch raises this same class on constraint violations (see _handle_response below).
+IntegrityError = _sqlite3.IntegrityError
+
 if not USE_TURSO:
     import aiosqlite as _aiosqlite
 

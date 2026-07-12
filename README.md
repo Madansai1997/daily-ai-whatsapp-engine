@@ -76,6 +76,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `e587052` feat(jobs): multi-source scouting + guided triage funnel (NEW lane, inline Assess, next-step cues) _(2026-07-12)_
 - `9417c93` feat(daily): "Rewrite to run offline" — turn un-runnable snippets into stdlib-only that runs _(2026-07-08)_
 - `c25ce59` feat(daily): visual Deep Dive + interactive Go Deeper; fix in-browser Run hang _(2026-07-08)_
 - `253d97a` feat(daily): interactive study flow — richer Deep Dive, chatty Go Deeper, no code dupes _(2026-07-08)_
@@ -87,7 +88,6 @@ npm install && npm run build     # served by the engine at /console
 - `0687871` feat(trends): add subreddit mode for the RapidAPI Reddit path _(2026-07-07)_
 - `1509d7a` fix(trends): use RAPIDAPI_KEY1 env for the Reddit RapidAPI call _(2026-07-07)_
 - `1a1bef0` feat(trends): richer YouTube (comment mining) + RapidAPI Reddit path _(2026-07-07)_
-- `16e1159` feat(trends): Trend Lab — weekly app-idea discovery from Reddit + YouTube _(2026-07-07)_
 <!-- /AUTO:changelog -->
 
 ---
