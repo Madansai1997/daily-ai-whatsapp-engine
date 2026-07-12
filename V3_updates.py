@@ -98,6 +98,7 @@ from job_scout_agent import (
     init_job_scout_tables,
     run_job_scout_digest,
     run_on_demand_search,
+    search_now_to_board,
     get_last_shown as get_scout_last_shown,
     get_profile as get_job_profile,
     save_profile as save_job_profile,
@@ -108,6 +109,7 @@ from job_apply_agent import (
     apply_now,
     confirm_apply,
     list_pending_confirm,
+    apply_method,
 )
 from application_tracker import (
     init_application_tracker_tables,
@@ -6474,6 +6476,7 @@ async def applications_list_api():
         rs = rec_scores.get(k)
         a["recruiter_score"] = rs["recruiter_score"] if rs else None
         a["recruiter_scored_at"] = rs["created_at"] if rs else None
+        a["apply_method"] = apply_method(a)  # 'email' (can auto-send) or 'link' (apply on site)
     return JSONResponse({"applications": apps, "statuses": APPLICATION_STATUSES})
 
 
@@ -6551,11 +6554,12 @@ async def api_review_queue():
         m = mj.get(c.get("job_key"), {})
         out.append({
             "id": c["id"], "job_key": c.get("job_key"), "title": c.get("title"),
-            "company": c.get("company"), "location": c.get("location"),
+            "company": c.get("company"), "location": c.get("location"), "source": c.get("source"),
             "url": c.get("url"), "description": c.get("description"), "status": c.get("status"),
             "match_score": m.get("score"), "why": m.get("why"), "flags": m.get("flags"),
             "ats_score": s["ats_score"] if s else None,
             "ats_pending": not (s and s.get("ats_score") is not None),
+            "apply_method": apply_method(c),  # 'email' (can auto-send) or 'link' (apply on site)
         })
     return JSONResponse({"queue": out, "statuses": APPLICATION_STATUSES})
 
@@ -6563,6 +6567,27 @@ async def api_review_queue():
 @app.get("/api/job-scout/review-queue/count")
 async def api_review_queue_count():
     return JSONResponse({"count": await count_review_queue()})
+
+
+@app.post("/api/job-scout/search-now")
+async def api_search_now(request: Request):
+    """Console 'Find jobs now' — runs a live search and drops the top matches into the NEW lane
+    (reviewed=0), so on-demand search feeds the same triage funnel as the daily digest."""
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    override = {}
+    if (body.get("role") or "").strip():
+        override["role"] = body["role"].strip()
+    if (body.get("location") or "").strip():
+        override["query_location"] = body["location"].strip()
+    try:
+        res = await search_now_to_board(call_llm, override=override or None, track_fn=add_scout_application)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    return JSONResponse({"ok": True, **res})
 
 
 @app.get("/api/skill-gap")
@@ -6807,8 +6832,16 @@ async def api_review_decide(app_id: int, request: Request):
     if not card:
         return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
     if action == "skip":
-        await mark_reviewed(app_id)
+        # Discard a fresh match you don't want. seen_jobs already blocks it from re-appearing,
+        # so removing the card is safe. Clean its ATS cache so counts don't orphan.
+        await delete_ats_analysis(card.get("job_key") or f"app:{app_id}")
+        await delete_application(app_id)
         return JSONResponse({"ok": True, "outcome": "skipped"})
+    if action == "save":
+        # Keep it on the board as a chosen "interested" card — just clear it from the New lane.
+        await update_application_status_by_id(app_id, "interested")
+        await mark_reviewed(app_id)
+        return JSONResponse({"ok": True, "outcome": "saved"})
     if action == "apply":
         stage = body.get("status") or "applied"
         await update_application_status_by_id(app_id, stage)

@@ -33,6 +33,12 @@ ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY")
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "").strip()
 JSEARCH_HOST = "jsearch.p.rapidapi.com"
 
+# Extra free aggregators — each aggregates many boards (incl. Indeed/Dice/LinkedIn). No-op until
+# its key is set, so the pipeline degrades gracefully. Jooble: free key by email. Careerjet: free
+# affiliate id (affid). Both cover India.
+JOOBLE_API_KEY = os.getenv("JOOBLE_API_KEY", "").strip()
+CAREERJET_AFFID = os.getenv("CAREERJET_AFFID", "").strip()
+
 HTTP_TIMEOUT = 25.0
 UA = {"User-Agent": "Mozilla/5.0 (JARVIS JobScout)"}
 
@@ -80,12 +86,16 @@ def init_job_scout_tables():
     cur.execute('''CREATE TABLE IF NOT EXISTS matched_jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         job_key TEXT UNIQUE,
-        title TEXT, company TEXT, location TEXT, url TEXT, source TEXT,
+        title TEXT, company TEXT, location TEXT, url TEXT, source TEXT, publisher TEXT,
         remote INTEGER, salary TEXT, posted_at TEXT,
         score INTEGER, why TEXT, flags TEXT,
         status TEXT DEFAULT 'new',
         created_at TEXT
     )''')
+    try:  # migrate older DBs that predate the publisher (real-board) column
+        cur.execute("ALTER TABLE matched_jobs ADD COLUMN publisher TEXT")
+    except Exception:
+        pass
     # Display state (NOT the dedup ledger): the exact list last shown to the user, so a
     # "TRACK <n>" reply can resolve index n back to a job — works for both the daily digest
     # and read-only on-demand results. Overwritten each time a digest/search is shown.
@@ -149,7 +159,7 @@ async def save_profile(profile: dict):
 # =========================================================================
 # NORMALIZATION + SOURCE ADAPTERS
 # =========================================================================
-def _norm(external_id, title, company, location, remote, salary, url, source, posted_at, desc):
+def _norm(external_id, title, company, location, remote, salary, url, source, posted_at, desc, publisher=None):
     return {
         "key": f"{source}:{external_id}",
         "title": (title or "").strip(),
@@ -159,6 +169,9 @@ def _norm(external_id, title, company, location, remote, salary, url, source, po
         "salary": salary,
         "url": url,
         "source": source,
+        # Human-facing board this posting actually came from (Indeed / Dice / LinkedIn / …). For
+        # aggregators that expose the origin (JSearch, Jooble) it's that; otherwise the aggregator name.
+        "publisher": (publisher or (source or "").title()).strip() or (source or "").title(),
         "posted_at": posted_at,
         # Kept long enough for the ATS resume analysis (full JD); ranking only reads a slice.
         "description": (desc or "")[:2500],
@@ -274,12 +287,74 @@ async def fetch_jsearch(profile: dict, limit: int = 10) -> list:
             j.get("job_is_remote"), salary,
             j.get("job_apply_link") or j.get("job_google_link"), "jsearch",
             j.get("job_posted_at_datetime_utc"), j.get("job_description"),
+            publisher=j.get("job_publisher"),  # the real board: Indeed / LinkedIn / Dice / …
         ))
     return out
 
 
-# Daily-cron sources only (JSearch is on-demand, deliberately excluded here).
-SOURCES = [fetch_adzuna, fetch_remotive]
+async def fetch_jooble(profile: dict, limit: int = 30) -> list:
+    """Free aggregator (key by email). Aggregates many boards incl. Indeed/LinkedIn; its per-job
+    `source` is the origin board, so publisher shows the real site. No-op without a key."""
+    if not JOOBLE_API_KEY:
+        return []
+    role = profile.get("role", "data analyst")
+    loc = profile.get("query_location") or (profile.get("locations") or ["India"])[0]
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=UA) as c:
+            r = await c.post(f"https://jooble.org/api/{JOOBLE_API_KEY}",
+                             json={"keywords": role, "location": loc})
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        print(f"⚠️ [job_scout] Jooble fetch failed: {e}")
+        return []
+    out = []
+    for j in (data.get("jobs") or [])[:limit]:
+        desc = re.sub(r"<[^>]+>", " ", j.get("snippet") or "")
+        out.append(_norm(
+            j.get("id") or j.get("link"), j.get("title"), j.get("company"),
+            j.get("location"), _looks_remote(j.get("title"), desc, j.get("location")),
+            j.get("salary") or None, j.get("link"), "jooble", j.get("updated"), desc,
+            publisher=(j.get("source") or "Jooble"),
+        ))
+    return out
+
+
+async def fetch_careerjet(profile: dict, limit: int = 30) -> list:
+    """Free aggregator (affiliate id). Aggregates many boards; good India coverage. No-op without affid."""
+    if not CAREERJET_AFFID:
+        return []
+    role = profile.get("role", "data analyst")
+    loc = profile.get("query_location") or (profile.get("locations") or ["India"])[0]
+    params = {
+        "keywords": role, "location": loc, "affid": CAREERJET_AFFID,
+        "user_ip": "8.8.8.8", "user_agent": UA["User-Agent"],
+        "locale_code": profile.get("careerjet_locale", "en_IN"),
+        "pagesize": limit, "sort": "date",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=UA) as c:
+            r = await c.get("https://public.api.careerjet.net/search", params=params)
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        print(f"⚠️ [job_scout] Careerjet fetch failed: {e}")
+        return []
+    out = []
+    for j in (data.get("jobs") or [])[:limit]:
+        desc = re.sub(r"<[^>]+>", " ", j.get("description") or "")
+        out.append(_norm(
+            j.get("url"), j.get("title"), j.get("company"), j.get("locations"),
+            _looks_remote(j.get("title"), desc, j.get("locations")),
+            j.get("salary") or None, j.get("url"), "careerjet", j.get("date"), desc,
+            publisher="Careerjet",
+        ))
+    return out
+
+
+# Daily-cron sources. JSearch is now included (≈1 call/day, well under its 200/mo free cap) so the
+# digest also pulls Indeed/LinkedIn/Dice via Google Jobs. Jooble/Careerjet no-op until keyed.
+SOURCES = [fetch_adzuna, fetch_remotive, fetch_jsearch, fetch_jooble, fetch_careerjet]
 
 
 # =========================================================================
@@ -415,10 +490,11 @@ async def persist_matches(scored: list):
                              (j["key"], now))
             await db.execute(
                 """INSERT OR IGNORE INTO matched_jobs
-                   (job_key, title, company, location, url, source, remote, salary, posted_at,
+                   (job_key, title, company, location, url, source, publisher, remote, salary, posted_at,
                     score, why, flags, status, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'new', ?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'new', ?)""",
                 (j["key"], j["title"], j["company"], j["location"], j["url"], j["source"],
+                 j.get("publisher") or (j.get("source") or "").title(),
                  int(j["remote"]), j.get("salary"), j.get("posted_at"),
                  j.get("score", 0), j.get("why", ""), json.dumps(j.get("flags", [])), now),
             )
@@ -475,6 +551,32 @@ async def run_on_demand_search(call_llm_fn, override: dict = None, top_n: int = 
     scored = scored or candidates                         # if ranking fully failed, still show something
     await record_last_shown(scored[:top_n])               # display state only (TRACK <n>), not the ledger
     return format_digest(scored, top_n=top_n, header=f"🎯 *Live job search — {src}:*", on_demand=True)
+
+
+async def search_now_to_board(call_llm_fn, override: dict = None, track_fn=None, top_n: int = 8) -> dict:
+    """Console 'Find jobs now': same live pipeline as run_on_demand_search, but PERSISTS the top
+    matches into the NEW lane (reviewed=0, via track_fn) so on-demand search feeds the same funnel
+    as the daily digest. add_application is idempotent on job_key, so jobs already on the board are
+    skipped. Returns {found, added}."""
+    profile = dict(await get_profile())
+    if override:
+        profile.update({k: v for k, v in override.items() if v is not None})
+    jobs = await fetch_jsearch(profile, limit=15) if RAPIDAPI_KEY else await fetch_adzuna(profile, limit=15)
+    if not jobs:
+        return {"found": 0, "added": 0}
+    candidates = prefilter(jobs, profile) or jobs[:top_n]
+    scored = await rank_jobs(candidates, profile, call_llm_fn, batch_size=10) or candidates
+    top = scored[:top_n]
+    added = 0
+    if track_fn:
+        for j in top:
+            try:
+                ok, _ = await track_fn(j, "interested")
+                added += 1 if ok else 0
+            except Exception as e:
+                print(f"⚠️ [job_scout] search-now track failed for {j.get('key')}: {e}")
+    await record_last_shown(top)
+    return {"found": len(jobs), "added": added}
 
 
 async def run_job_scout_digest(call_llm_fn, notify_fn=None, track_fn=None, min_score: int = 70,

@@ -17,6 +17,8 @@ import {
   Gauge,
   UserCheck,
   Sparkles,
+  Search,
+  Target,
   Plus,
   Mail,
   Send,
@@ -51,6 +53,8 @@ interface Application {
   source?: string;
   description?: string;
   status: string;
+  reviewed?: number;
+  apply_method?: string;
   ats_score?: number | null;
   ats_scored_at?: string | null;
   recruiter_score?: number | null;
@@ -152,6 +156,18 @@ const atsColor = (score: number) =>
     ? { text: "#ffd6a3", border: "#ffd6a3", bg: "#ffd6a3" }
     : { text: "#ffb4ab", border: "#ffb4ab", bg: "#ffb4ab" };
 
+/* Apply-method tag — email-apply jobs can auto-send; link jobs you submit on the board yourself. */
+const ApplyTag = ({ method }: { method?: string }) =>
+  method === "email" ? (
+    <span title="Email-apply — your tailored résumé + note can be auto-sent" className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#a3e635]/10 border border-[#a3e635]/30 text-[#a3e635] whitespace-nowrap inline-flex items-center gap-1">
+      <Mail className="w-3 h-3" /> Email-apply
+    </span>
+  ) : (
+    <span title="Apply on the job site — résumé & cover prepped, you submit on their page" className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-[#859397] whitespace-nowrap inline-flex items-center gap-1">
+      <ArrowUpRight className="w-3 h-3" /> Apply on site
+    </span>
+  );
+
 // Tiny markdown renderer — enough for LLM briefs & notes (## headings, - bullets, **bold**).
 function renderMarkdown(md: string): React.ReactNode {
   const lines = (md || "").split("\n");
@@ -243,6 +259,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
   const [pending, setPending] = useState<any[]>([]);
   const [pendingBusy, setPendingBusy] = useState<number | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [searchingJobs, setSearchingJobs] = useState(false);
   const [scanOpen, setScanOpen] = useState(false);
   const [scanResult, setScanResult] = useState<any | null>(null);
 
@@ -375,6 +392,26 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
     }
   }, []);
 
+  // Load the fresh-match queue that feeds the NEW column (called on mount + after decisions).
+  const loadReviewQueue = useCallback(async () => {
+    setReviewLoading(true);
+    try {
+      const res = await fetch("/api/job-scout/review-queue");
+      const data = await res.json();
+      const q = Array.isArray(data?.queue) ? data.queue : [];
+      setReviewQueue(q);
+      setStatuses(Array.isArray(data?.statuses) ? data.statuses : statuses);
+      const stageMap: Record<number, string> = {};
+      q.forEach((c: any) => (stageMap[c.id] = "applied"));
+      setReviewStage(stageMap);
+    } catch {
+      setReviewQueue([]);
+    } finally {
+      setReviewLoading(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const loadFollowCount = useCallback(async () => {
     try {
       const res = await fetch("/api/followups");
@@ -389,14 +426,15 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
     loadApplications();
     loadPending();
     loadReviewCount();
+    loadReviewQueue();
     loadFollowCount();
-  }, [loadApplications, loadPending, loadReviewCount, loadFollowCount]);
+  }, [loadApplications, loadPending, loadReviewCount, loadReviewQueue, loadFollowCount]);
 
   // Deep-link: when arriving from the Home cockpit with an intent, open the matching tool.
   useEffect(() => {
     if (!intent) return;
     const map: Record<string, () => void> = {
-      review: openReview, followups: openFollowups, interviews: openPrep,
+      review: loadReviewQueue, followups: openFollowups, interviews: openPrep,
       network: openNetwork, notes: openNotes, add: openAdd, standup: openStandup,
     };
     map[intent]?.();
@@ -720,27 +758,6 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
 
   /* ---- Job Scout review queue ---- */
 
-  const openReview = async () => {
-    setReviewOpen(true);
-    setReviewLoading(true);
-    setReviewMsg("");
-    try {
-      const res = await fetch("/api/job-scout/review-queue");
-      const data = await res.json();
-      const q = Array.isArray(data?.queue) ? data.queue : [];
-      setReviewQueue(q);
-      setStatuses(Array.isArray(data?.statuses) ? data.statuses : statuses);
-      // Default every card's stage selector to "applied".
-      const stageMap: Record<number, string> = {};
-      q.forEach((c: any) => (stageMap[c.id] = "applied"));
-      setReviewStage(stageMap);
-    } catch {
-      setReviewQueue([]);
-    } finally {
-      setReviewLoading(false);
-    }
-  };
-
   const loadReviewAts = async (item: any) => {
     const ref = item.job_key || `app:${item.id}`;
     if (reviewAts[ref]) return; // already loaded/loading
@@ -765,7 +782,38 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
     if (next !== null && !item.ats_pending) loadReviewAts(item);
   };
 
-  const decideReview = async (item: any, action: "apply" | "skip") => {
+  // Phase 2 — inline Assess on a NEW card: expand to show ATS keyword gaps at the apply/skip moment.
+  // Uses the cached analysis if present, else runs it once (no full-screen modal), all in place.
+  const assessInline = async (item: any) => {
+    const ref = item.job_key || `app:${item.id}`;
+    if (reviewExpanded === item.id) { setReviewExpanded(null); return; }
+    setReviewExpanded(item.id);
+    if (reviewAts[ref] && reviewAts[ref] !== "loading") return; // already have it
+    setReviewAts((m) => ({ ...m, [ref]: "loading" }));
+    const fail = (msg?: string) => {
+      setReviewAts((m) => { const n = { ...m }; delete n[ref]; return n; });
+      if (msg) setReviewMsg(msg);
+      setReviewExpanded((e) => (e === item.id ? null : e));
+    };
+    try {
+      // Cached analysis?
+      let res = await fetch(`/ats/${encodeURIComponent(ref)}`);
+      if (res.ok) { const cached = (await res.json()) as AtsResult; setReviewAts((m) => ({ ...m, [ref]: cached })); return; }
+      // Not analysed yet → run it inline (no navigation).
+      res = await fetch(`/applications/${item.id}/ats`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      const data: any = await res.json().catch(() => ({}));
+      if (data?.needs_jd) return fail("No job description on that card — open it to paste the posting, then Assess.");
+      if (!res.ok || "error" in data) return fail("Couldn't assess this one — try again.");
+      setReviewAts((m) => ({ ...m, [ref]: data as AtsResult }));
+      loadApplications(); // refresh the score badge
+    } catch (e) {
+      fail(`Assess failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const decideReview = async (item: any, action: "apply" | "skip" | "save") => {
     setReviewBusyId(item.id);
     setReviewMsg("");
     try {
@@ -776,7 +824,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       });
       const data = await res.json();
       if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP ${res.status}`);
-      // Drop the decided card from the queue.
+      // Drop the decided card from the NEW lane; the board reflects where it went.
       setReviewQueue((q) => q.filter((c) => c.id !== item.id));
       if (action === "apply" && data?.message) setReviewMsg(data.message);
       await Promise.all([loadApplications(), loadReviewCount()]);
@@ -805,6 +853,30 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       setScanOpen(true);
     } finally {
       setScanning(false);
+    }
+  };
+
+  // Console "Find jobs now" — live search that drops the top matches into the NEW triage lane.
+  const searchNow = async () => {
+    setSearchingJobs(true);
+    setToolsOpen(false);
+    setReviewMsg("🔎 Searching live listings…");
+    try {
+      const res = await fetch("/api/job-scout/search-now", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      await Promise.all([loadReviewQueue(), loadReviewCount(), loadApplications()]);
+      setReviewMsg(
+        data.added
+          ? `🎯 Live search added ${data.added} new to triage (scanned ${data.found}).`
+          : `Live search found ${data.found} — nothing new (already on your board or no match).`
+      );
+    } catch (e) {
+      setReviewMsg(`⚠️ Search failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSearchingJobs(false);
     }
   };
 
@@ -1287,6 +1359,22 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
 
   /* ---- Derived: kanban columns grouped by status ---- */
 
+  // Phase 3 — the one next step for a card, by stage (the board drives itself).
+  const nextStep = (card: Application): { label: string; tint: string; onClick?: () => void } | null => {
+    switch (card.status) {
+      case "interested":
+        return { label: "Assess & apply", tint: "#8aebff", onClick: () => runAts(card.id) };
+      // 'applied' is intentionally omitted — stale-applied cards already surface their own
+      // "Follow up" CTA (the recruiter-follow-up feature), so a second cue would be redundant.
+      case "interviewing":
+        return { label: "Prep interview", tint: "#5eead4", onClick: openPrep };
+      case "offer":
+        return { label: "Respond to offer", tint: "#ffd6a3" };
+      default:
+        return null;
+    }
+  };
+
   const columns: RealColumn[] = statuses.map((status) => {
     const cfg = STATUS_CONFIG[status] || {
       accentClass: "text-[#8aebff] border-[#8aebff]/20 bg-[#8aebff]/5",
@@ -1294,7 +1382,8 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
     // Analysed cards rise to the top, highest ATS score first; un-analysed keep their
     // existing (most-recently-updated) order at the bottom.
     const cards = applications
-      .filter((a) => a.status === status)
+      // reviewed=0 are fresh scout matches — they live in the NEW column, not the normal lanes.
+      .filter((a) => a.status === status && a.reviewed !== 0)
       .map((a, i) => ({ a, i }))
       .sort((x, y) => {
         const sx = typeof x.a.ats_score === "number" ? x.a.ats_score : -1;
@@ -1343,14 +1432,13 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
 
           <div className="flex items-center gap-3 font-mono">
             {reviewCount > 0 && (
-              <button
-                onClick={openReview}
-                className="flex items-center gap-2 px-5 py-2 bg-[#c084fc]/10 border border-[#c084fc]/40 rounded-lg text-xs font-semibold hover:bg-[#c084fc]/20 transition-all text-[#c084fc] cursor-pointer animate-pulse"
-                title="Review fresh Job Scout matches — ATS score, apply or skip, move to a stage"
+              <span
+                className="flex items-center gap-2 px-4 py-2 bg-[#a3e635]/10 border border-[#a3e635]/40 rounded-lg text-xs font-semibold text-[#a3e635]"
+                title="Fresh Job Scout matches waiting in the NEW column — save, apply, or skip"
               >
                 <Sparkles className="w-4 h-4" />
-                REVIEW ({reviewCount})
-              </button>
+                {reviewCount} NEW
+              </span>
             )}
             <button
               onClick={openAdd}
@@ -1379,8 +1467,11 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                 <>
                   <div className="fixed inset-0 z-40" onClick={() => setToolsOpen(false)} />
                   <div className="absolute right-0 top-full mt-2 w-60 z-50 glass-panel rounded-xl border border-white/10 shadow-2xl p-1.5">
-                    {/* Ordered by the job-search lifecycle: Prepare → Track → Follow-up → Interview */}
+                    {/* Ordered by the job-search lifecycle: Discover → Prepare → Track → Follow-up → Interview */}
                     {([
+                      { label: "Discover", items: [
+                        { fn: searchNow, icon: Search, label: searchingJobs ? "Searching…" : "Find jobs now", tint: "#8aebff", spin: searchingJobs },
+                      ] },
                       { label: "Prepare", items: [
                         { fn: openResume, icon: FileText, label: "Résumé", tint: "#8aebff" },
                         { fn: openAudit, icon: ClipboardCheck, label: "Résumé audit", tint: "#a3e635" },
@@ -1493,7 +1584,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
           <div className="flex items-center justify-center min-h-[400px] font-mono text-xs text-[#859397] uppercase tracking-widest">
             <RefreshCw className="w-4 h-4 animate-spin mr-3" /> Synchronizing applications…
           </div>
-        ) : columns.every((c) => c.cards.length === 0) ? (
+        ) : columns.every((c) => c.cards.length === 0) && reviewQueue.length === 0 ? (
           <div className="flex flex-col items-center justify-center min-h-[400px] gap-3 text-center">
             <FileText className="w-10 h-10 text-[#8aebff]/40" />
             <p className="font-mono text-sm text-[#dfe2f3]">No applications tracked yet.</p>
@@ -1503,6 +1594,110 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
           </div>
         ) : (
           <div className="flex gap-6 min-w-[1200px] px-2">
+            {/* NEW — triage lane: fresh scout matches land here (daily + on-demand). Save / Apply / Skip. */}
+            {(reviewQueue.length > 0 || reviewMsg) && (
+              <div className="flex-shrink-0 w-80 glass-column flex flex-col rounded-xl min-h-[500px] border border-[#a3e635]/25">
+                <div className="p-4 border-b border-white/5 flex justify-between items-center bg-[#a3e635]/5">
+                  <span className="text-xs font-bold font-mono text-[#a3e635] tracking-widest flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5" /> NEW · TRIAGE
+                  </span>
+                  <span className="text-xs font-mono px-2.5 py-0.5 rounded border text-[#a3e635] border-[#a3e635]/30">
+                    {pad2(reviewQueue.length)}
+                  </span>
+                </div>
+                {reviewMsg && (
+                  <div className="px-4 pt-3 text-[10px] font-mono text-[#8aebff] leading-relaxed">{reviewMsg}</div>
+                )}
+                <div className="p-4 space-y-4 flex-1">
+                  {reviewQueue.length === 0 && (
+                    <p className="text-[10px] font-mono text-[#859397]/60 uppercase tracking-widest text-center py-6">No fresh matches</p>
+                  )}
+                  {reviewQueue.map((item) => {
+                    const busy = reviewBusyId === item.id;
+                    return (
+                      <div key={item.id} className="glass-card p-4 rounded-xl space-y-3">
+                        <div className="flex justify-between items-start gap-2">
+                          <h3 className="text-sm font-bold text-[#dfe2f3] leading-snug">
+                            {item.url ? (
+                              <a href={item.url} target="_blank" rel="noreferrer" className="hover:underline hover:text-[#8aebff]">{item.title}</a>
+                            ) : item.title}
+                          </h3>
+                          {typeof item.match_score === "number" && (
+                            <span title="Job Scout match score (0-100)" className="shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded border" style={{ color: atsColor(item.match_score).text, borderColor: atsColor(item.match_score).border }}>{item.match_score}</span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="text-[11px] font-mono text-[#859397]">{item.company}{item.location ? ` • ${item.location}` : ""}</p>
+                          {item.source ? (
+                            <span title={`Source: ${item.source}`} className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#8aebff]/10 border border-[#8aebff]/25 text-[#8aebff] whitespace-nowrap">{item.source}</span>
+                          ) : null}
+                          <ApplyTag method={item.apply_method} />
+                          {typeof item.ats_score === "number" ? (
+                            <span title="ATS — keyword match with the JD" className="text-[10px] font-mono px-1.5 py-0.5 rounded border" style={{ color: atsColor(item.ats_score).text, borderColor: atsColor(item.ats_score).border }}>ATS {item.ats_score}</span>
+                          ) : null}
+                        </div>
+                        {item.why ? <p className="text-[11px] text-[#bbc9cd] leading-relaxed line-clamp-3">{item.why}</p> : null}
+                        {/* Phase 2 — inline Assess: keyword gaps at the decision moment */}
+                        {(() => {
+                          const ref = item.job_key || `app:${item.id}`;
+                          const ats = reviewAts[ref];
+                          const expanded = reviewExpanded === item.id;
+                          return (
+                            <div>
+                              <button onClick={() => assessInline(item)} className="text-[10px] font-mono text-[#8aebff] hover:underline inline-flex items-center gap-1 cursor-pointer">
+                                <Target className="w-3 h-3" /> {expanded ? "Hide fit" : "Assess fit"}
+                              </button>
+                              {expanded && (
+                                <div className="mt-2 rounded-lg bg-[#0a0e1a]/50 border border-white/10 p-2.5 space-y-2">
+                                  {!ats || ats === "loading" ? (
+                                    <p className="text-[10px] font-mono text-[#859397]">Analysing keyword match…</p>
+                                  ) : (
+                                    <>
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-[9px] font-mono uppercase tracking-wider text-[#859397]">ATS match</span>
+                                        <span className="text-[11px] font-mono font-bold" style={{ color: atsColor(ats.ats_score).text }}>{ats.ats_score}</span>
+                                      </div>
+                                      {(ats.keyword_matrix?.missing?.length ?? 0) > 0 && (
+                                        <div>
+                                          <span className="text-[9px] font-mono uppercase tracking-wider text-[#ffb4ab]">Missing</span>
+                                          <div className="flex flex-wrap gap-1 mt-1">
+                                            {ats.keyword_matrix.missing.slice(0, 10).map((k, i) => (
+                                              <span key={i} className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#ffb4ab]/10 border border-[#ffb4ab]/20 text-[#ffb4ab]">{k}</span>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      )}
+                                      {(ats.keyword_matrix?.present?.length ?? 0) > 0 && (
+                                        <div>
+                                          <span className="text-[9px] font-mono uppercase tracking-wider text-[#a3e635]">You have</span>
+                                          <div className="flex flex-wrap gap-1 mt-1">
+                                            {ats.keyword_matrix.present.slice(0, 8).map((k, i) => (
+                                              <span key={i} className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#a3e635]/10 border border-[#a3e635]/20 text-[#a3e635]">{k}</span>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      )}
+                                    </>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
+                        <div className="flex items-center gap-2">
+                          <button disabled={busy} onClick={() => decideReview(item, "save")} title="Keep as an Interested card"
+                            className="flex-1 px-2 py-1.5 rounded-lg text-[11px] font-bold font-mono text-[#8aebff] bg-[#8aebff]/10 border border-[#8aebff]/30 hover:bg-[#8aebff]/20 cursor-pointer disabled:opacity-50">Save</button>
+                          <button disabled={busy} onClick={() => decideReview(item, "apply")} title="Move to Applied + prep tailored résumé/cover"
+                            className="flex-1 px-2 py-1.5 rounded-lg text-[11px] font-bold font-mono text-[#0a0e1a] bg-[#a3e635] hover:bg-[#b6f24d] cursor-pointer disabled:opacity-50">Apply</button>
+                          <button disabled={busy} onClick={() => decideReview(item, "skip")} title="Discard this match"
+                            className="px-2 py-1.5 rounded-lg text-[11px] font-bold font-mono text-[#859397] border border-white/10 hover:text-[#ffb4ab] hover:border-[#ffb4ab]/30 cursor-pointer disabled:opacity-50">Skip</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             {columns.map((col) => (
               <div
                 key={col.status}
@@ -1589,11 +1784,38 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                             </div>
                           </div>
 
-                          <p className="text-xs font-mono text-[#859397] mb-4">
-                            {card.company}
-                            {card.location ? ` • ${card.location}` : ""}
-                            {card.source ? ` • ${card.source}` : ""}
-                          </p>
+                          <div className="flex items-center gap-2 flex-wrap mb-4">
+                            <p className="text-xs font-mono text-[#859397]">
+                              {card.company}
+                              {card.location ? ` • ${card.location}` : ""}
+                            </p>
+                            {card.source ? (
+                              <span
+                                title={`Source: ${card.source}`}
+                                className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#8aebff]/10 border border-[#8aebff]/25 text-[#8aebff] whitespace-nowrap"
+                              >
+                                {card.source}
+                              </span>
+                            ) : null}
+                            <ApplyTag method={card.apply_method} />
+                          </div>
+
+                          {/* Phase 3 — the one suggested next step for this stage */}
+                          {(() => {
+                            const ns = nextStep(card);
+                            if (!ns) return null;
+                            return (
+                              <button
+                                onClick={ns.onClick}
+                                disabled={!ns.onClick}
+                                title="Suggested next step"
+                                className="mb-3 inline-flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded-md border transition-colors disabled:cursor-default cursor-pointer"
+                                style={{ color: ns.tint, borderColor: `${ns.tint}55`, background: `${ns.tint}14` }}
+                              >
+                                <ArrowUpRight className="w-3 h-3" /> {ns.label}
+                              </button>
+                            );
+                          })()}
 
                           {/* Status selector + tags + inline next-step cues */}
                           <div className="flex items-center flex-wrap gap-2 mb-4">

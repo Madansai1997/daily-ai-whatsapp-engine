@@ -194,9 +194,14 @@ def _find_apply_email(job: dict) -> str | None:
     # Require at least a threshold score (e.g. 3) to prevent matching random footer links/contact emails
     if best_score >= 3:
         return best_email
-        
+
     return None
 
+
+def apply_method(job: dict) -> str:
+    """'email' if this job can be applied to by emailing the resume (an application address is in
+    the posting) — those can be auto-sent — else 'link' (apply on the board's site). Used to tag cards."""
+    return "email" if _find_apply_email(job) else "link"
 
 
 async def _already_prepped(job_key: str) -> bool:

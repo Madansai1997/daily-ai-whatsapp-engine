@@ -125,7 +125,7 @@ async def add_application(job: dict, status: str = "applied", reviewed: int = 1,
                 notes, reviewed, applied_at, updated_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (job.get("key"), title, job.get("company"), job.get("location"),
-             job.get("url"), job.get("source"), job.get("description"), status,
+             job.get("url"), (job.get("publisher") or job.get("source")), job.get("description"), status,
              (notes if notes is not None else job.get("notes")), int(reviewed), now, now),
         )
         if cur.lastrowid:  # a row was actually inserted (not ignored as a dup)
