@@ -4,7 +4,7 @@ import { ScreenId } from "../types";
 import {
   Volume2, Square, RefreshCw, ArrowRight, Sparkles, Clock, CalendarClock,
   Wallet, Users, AlertTriangle, MessageSquare, Sun, Coffee, Moon, CheckCircle2,
-  Newspaper, ExternalLink, BookOpen,
+  Newspaper, ExternalLink, BookOpen, Radio,
 } from "lucide-react";
 
 interface CockpitStep {
@@ -23,6 +23,7 @@ interface Props {
 
 interface Headline { title: string; url: string; snippet: string; }
 interface DailySnapshot { empty?: boolean; date?: string; concept?: string; news?: Headline[]; }
+interface FeedHighlight { name: string; platform: string; title: string; url: string; relevance_note: string; }
 
 const SEV: Record<string, string> = {
   red: "#ffb4ab", green: "#5eead4", purple: "#c084fc", amber: "#ffd6a3", grey: "#859397",
@@ -37,6 +38,7 @@ export default function HomeCockpit({ onNavigate }: Props) {
   const [loading, setLoading] = useState(true);
   const [speaking, setSpeaking] = useState(false);
   const [daily, setDaily] = useState<DailySnapshot | null>(null);
+  const [watch, setWatch] = useState<FeedHighlight[]>([]);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -59,6 +61,14 @@ export default function HomeCockpit({ onNavigate }: Props) {
     fetch("/api/daily/today", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => { if (d) setDaily(d); })
+      .catch(() => { /* leave empty */ });
+  }, []);
+
+  // Watching — top relevant posts from monitored feeds (folds the Influencer Watcher into Home).
+  useEffect(() => {
+    fetch("/api/influencers/feed?limit=4", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (Array.isArray(d)) setWatch(d); })
       .catch(() => { /* leave empty */ });
   }, []);
 
@@ -193,6 +203,36 @@ export default function HomeCockpit({ onNavigate }: Props) {
           </button>
         )}
       </section>
+
+      {/* Watching — relevant updates from monitored feeds */}
+      {watch.length > 0 && (
+        <section className="glass-panel rounded-2xl border border-white/5 overflow-hidden">
+          <div className="px-5 py-3 border-b border-white/5 bg-white/[0.03] flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 min-w-0">
+              <Radio className="w-4 h-4 text-[#a3e635] shrink-0" />
+              <h2 className="text-xs font-bold font-mono uppercase tracking-widest text-[#dfe2f3]">Watching</h2>
+            </div>
+            <button onClick={() => onNavigate(ScreenId.Discover, "influencers")} className="text-[10px] font-mono text-[#8aebff] hover:underline cursor-pointer shrink-0">all feeds →</button>
+          </div>
+          <ol className="divide-y divide-white/5">
+            {watch.map((w, i) => (
+              <li key={i}>
+                <a href={w.url || "#"} target={w.url ? "_blank" : undefined} rel="noreferrer"
+                  className="flex items-start gap-3 px-5 py-2.5 hover:bg-white/[0.04] transition-colors group">
+                  <span className="text-[10px] font-mono text-[#5c6a6d] uppercase w-16 shrink-0 pt-0.5 truncate">{w.name}</span>
+                  <div className="min-w-0">
+                    <p className="text-[13px] text-[#dfe2f3] font-medium leading-snug group-hover:text-[#a3e635] flex items-start gap-1">
+                      <span className="min-w-0">{w.title || w.url}</span>
+                      {w.url && <ExternalLink className="w-3 h-3 opacity-40 shrink-0 mt-1" />}
+                    </p>
+                    {w.relevance_note && <p className="text-[11px] text-[#a3e635]/70 leading-relaxed mt-0.5 line-clamp-1">{w.relevance_note}</p>}
+                  </div>
+                </a>
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
 
       {/* Pipeline pulse band */}
       <section className="glass-panel rounded-2xl border border-white/5 p-5">
