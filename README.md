@@ -37,6 +37,7 @@ Gmail & Google Calendar APIs · Web Push. Deployed on Render (free tier).
 - **`bill_watcher.py`** — Deadline / Bill Watcher — Phase 5 agent, self-contained module.
 - **`calendar_agent.py`** — Calendar Agent — self-contained skill module (Phase 3).
 - **`calendar_shield.py`** — Calendar Shield — guards your schedule around interviews.
+- **`company_watch_agent.py`** — Company Watch — turns the companies on your Kanban into a live news feed.
 - **`daily_standup.py`** — Voice Daily Standup — a single spoken briefing that pulls the whole job search together.
 - **`db_compat.py`** — aiosqlite/sqlite3-compatible shim, so the ~91 existing DB call sites across this app.
 - **`email_triage.py`** — Email Triage Agent — self-contained skill module.
@@ -53,6 +54,7 @@ Gmail & Google Calendar APIs · Web Push. Deployed on Render (free tier).
 - **`pattern_learning.py`** — Pattern Learning Agent — self-contained skill module.
 - **`pdf_import.py`** — PDF Import — self-contained skill module.
 - **`profile_freshness.py`** — Profile-Freshness Nudge — keep your shop-window current.
+- **`relevance.py`** — Shared LLM relevance ranker — the reusable "brain" behind every content watcher.
 - **`reminders.py`** — Reminders Agent — self-contained skill module.
 - **`resume_ats_agent.py`** — Resume ATS Alignment Agent — self-contained skill module (Phase 4).
 - **`resume_editor.py`** — Résumé Editor — in-place .docx editing that PRESERVES formatting.
@@ -76,6 +78,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `1c2e3df` feat(influencer): group feed by channel (collapsible) + assign domain on manual add _(2026-07-13)_
 - `b4fa0d7` feat(influencer): domains (auto-discover creators), topic filter fix, Shorts filter _(2026-07-13)_
 - `7c77459` feat(influencer): finish the watcher upgrade — feed view, RSS, unread badge, Home strip _(2026-07-12)_
 - `c9b1db2` feat: Add Social Media Influencer Watcher Agent with console UI _(2026-07-12)_
@@ -87,7 +90,6 @@ npm install && npm run build     # served by the engine at /console
 - `66df91b` fix(daily): Briefing shows lesson prose only — strip news list + legacy project scaffolding _(2026-07-08)_
 - `2808551` feat(daily): threaded tutor + knowledge base + in-browser run; drop weekly project; Home front-page _(2026-07-07)_
 - `93501c5` feat(daily): web-first Daily AI Update + DISCOVER nav consolidation _(2026-07-07)_
-- `60e5d85` feat(trends): Hacker News source (free, no key) + per-idea Build Brief _(2026-07-07)_
 <!-- /AUTO:changelog -->
 
 ---

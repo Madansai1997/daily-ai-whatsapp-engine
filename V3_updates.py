@@ -845,9 +845,16 @@ def init_daily_web_tables():
         digest_text TEXT,
         reference_code TEXT,
         difficulty TEXT,
+        watch_json TEXT,
         sent_whatsapp INTEGER DEFAULT 0,
         created_at TEXT
     )''')
+    # Migration: "Watch these" — creator videos/posts tied to the day's concept (folds the
+    # Influencer Watcher into the daily lesson). Turso-safe ALTER in try/except.
+    try:
+        cur.execute("ALTER TABLE daily_web_digest ADD COLUMN watch_json TEXT")
+    except Exception:
+        pass
     # Active-recall: quiz + grades + Feynman "explain it back", one row per day.
     cur.execute('''CREATE TABLE IF NOT EXISTS study_recall (
         date TEXT PRIMARY KEY,
@@ -904,6 +911,8 @@ init_profile_freshness_tables()
 init_followup_tables()
 init_trend_lab_tables()
 init_daily_web_tables()
+from company_watch_agent import init_company_watch_tables
+init_company_watch_tables()
 
 
 # ==========================================
@@ -3510,6 +3519,28 @@ async def morning_digest_endpoint():
 _SKILL_LADDER = ["Foundational", "Intermediate", "Advanced", "Expert"]
 
 
+async def _watch_these_for_concept(concept: str, limit: int = 4) -> list:
+    """Tier-1 (free, no LLM): pick relevant creator posts tied to the day's concept. Keyword-overlaps
+    the concept against recent relevant influencer_posts titles; falls back to the newest relevant."""
+    try:
+        from influencer_agent import get_feed
+        posts = await get_feed(limit=30, only_relevant=True)
+    except Exception:
+        return []
+    if not posts:
+        return []
+    tokens = {w.lower() for w in re.findall(r"[A-Za-z]{4,}", concept or "")}
+
+    def overlap(p):
+        title = (p.get("title") or "").lower()
+        return sum(1 for t in tokens if t in title)
+
+    on_topic = sorted((p for p in posts if overlap(p) > 0), key=overlap, reverse=True)[:limit]
+    top = on_topic or posts[:limit]  # posts are already newest-first
+    return [{"name": p.get("name"), "platform": p.get("platform"), "title": p.get("title"),
+             "url": p.get("url"), "note": p.get("relevance_note", "")} for p in top]
+
+
 async def generate_daily_web_digest():
     """Run the SAME pipeline as the morning digest (Planner → live news + RAG → weekly project →
     Creator → QA Critic) but STORE a structured record for the console instead of sending WhatsApp.
@@ -3555,19 +3586,20 @@ async def generate_daily_web_digest():
 
         today = date.today().isoformat()
         now = dt.datetime.now(dt.timezone.utc).isoformat()
+        watch_these = await _watch_these_for_concept(concept)
         await log_sent_concept(concept, final_text)
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 """INSERT INTO daily_web_digest
                    (date, news_json, concept, pedagogical_focus, project_json, digest_text,
-                    reference_code, difficulty, sent_whatsapp, created_at)
-                   VALUES (?,?,?,?,?,?,?,NULL,0,?)
+                    reference_code, difficulty, watch_json, sent_whatsapp, created_at)
+                   VALUES (?,?,?,?,?,?,?,NULL,?,0,?)
                    ON CONFLICT(date) DO UPDATE SET news_json=excluded.news_json, concept=excluded.concept,
                      pedagogical_focus=excluded.pedagogical_focus, project_json=excluded.project_json,
                      digest_text=excluded.digest_text, reference_code=excluded.reference_code,
-                     created_at=excluded.created_at""",
+                     watch_json=excluded.watch_json, created_at=excluded.created_at""",
                 (today, json.dumps(news_display), concept, planner_context.get("pedagogical_focus", ""),
-                 json.dumps(project_context), final_text, reference_code, now))
+                 json.dumps(project_context), final_text, reference_code, json.dumps(watch_these), now))
             await db.commit()
         await srs_schedule(concept)  # queue this concept for spaced review (+1d, then 3/7/30)
         _store_notification(f"📰 Today's AI update is ready — {concept}. Open the Daily tab.", "daily")
@@ -3585,8 +3617,9 @@ def _row_to_digest(row) -> dict:
     d = dict(row)
     d["news"] = json.loads(d.get("news_json") or "[]")
     d["project"] = json.loads(d.get("project_json") or "{}")
+    d["watch"] = json.loads(d.get("watch_json") or "[]")
     d["sent_whatsapp"] = bool(d.get("sent_whatsapp"))
-    for k in ("news_json", "project_json"):
+    for k in ("news_json", "project_json", "watch_json"):
         d.pop(k, None)
     return d
 
@@ -4344,6 +4377,32 @@ async def cron_scan_applications(token: str = ""):
         return deny
     _run_bg_job("scan-applications", lambda: scan_application_emails(call_llm, _store_notification))
     return JSONResponse({"status": "application email scan triggered"}, status_code=202)
+
+
+@app.post("/cron/company-watch")
+async def cron_company_watch(token: str = ""):
+    """Daily: scan Google News for hiring/funding/layoff signals about the companies on the
+    active Kanban board, LLM-filter, and drop a briefing in the inbox. Fire once/day."""
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    from company_watch_agent import run_company_watch
+    _run_bg_job("company-watch", lambda: run_company_watch(call_llm))
+    return JSONResponse({"status": "company watch triggered"}, status_code=202)
+
+
+@app.post("/api/company-watch/run")
+async def api_company_watch_run():
+    """Manual on-demand run from the console (returns the briefing text)."""
+    from company_watch_agent import run_company_watch
+    digest = await run_company_watch(call_llm)
+    return JSONResponse({"ok": True, "result": digest})
+
+
+@app.get("/api/company-watch/news")
+async def api_company_watch_news(company: str = "", limit: int = 50):
+    """Relevant stored signals, newest first — optionally scoped to one company."""
+    from company_watch_agent import list_company_news
+    return JSONResponse(await list_company_news(company.strip() or None, limit))
 
 
 @app.post("/cron/bills")

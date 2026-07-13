@@ -42,12 +42,14 @@ function loadPyodideOnce(): Promise<PyodideAPI> {
 }
 
 interface NewsItem { title: string; url: string; snippet: string; }
+interface WatchItem { name?: string; platform?: string; title?: string; url?: string; note?: string; }
 interface Digest {
   empty?: boolean;
   date?: string;
   concept?: string;
   pedagogical_focus?: string;
   news?: NewsItem[];
+  watch?: WatchItem[];
   digest_text?: string;
   reference_code?: string;
   difficulty?: string | null;
@@ -792,6 +794,26 @@ export default function DailyUpdate() {
                       <div className="min-w-0">
                         <p className="text-[13px] text-[#dfe2f3] font-semibold group-hover:text-[#8aebff] flex items-center gap-1">{n.title || n.url}<ExternalLink className="w-3 h-3 opacity-50 flex-shrink-0" /></p>
                         {n.snippet && <p className="text-[11px] text-[#859397] leading-relaxed mt-0.5 line-clamp-2">{n.snippet}</p>}
+                      </div>
+                    </div>
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Watch these — creator posts tied to today's concept (folds in the Influencer Watcher) */}
+          {d!.watch && d!.watch.length > 0 && (
+            <div className="glass-panel rounded-2xl border border-white/10 overflow-hidden">
+              <div className="px-6 py-3 border-b border-white/5 bg-white/5 flex items-center gap-2"><Play className="w-4 h-4 text-[#a3e635]" /><span className="text-xs font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">Watch these</span><span className="text-[10px] text-[#5c6a6d] font-mono">from your feeds</span></div>
+              <div className="divide-y divide-white/5">
+                {d!.watch.map((w, i) => (
+                  <a key={i} href={w.url || "#"} target={w.url ? "_blank" : undefined} rel="noreferrer" className="block p-4 sm:px-6 hover:bg-white/5 transition-colors group">
+                    <div className="flex items-start gap-2">
+                      <span className="text-[10px] font-mono text-[#5c6a6d] uppercase w-14 shrink-0 mt-0.5 truncate">{w.name}</span>
+                      <div className="min-w-0">
+                        <p className="text-[13px] text-[#dfe2f3] font-semibold group-hover:text-[#a3e635] flex items-center gap-1">{w.title || w.url}<ExternalLink className="w-3 h-3 opacity-50 flex-shrink-0" /></p>
+                        {w.note && <p className="text-[11px] text-[#a3e635]/70 leading-relaxed mt-0.5 line-clamp-1">{w.note}</p>}
                       </div>
                     </div>
                   </a>

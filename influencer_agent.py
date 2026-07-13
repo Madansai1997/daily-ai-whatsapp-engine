@@ -5,6 +5,7 @@ import httpx
 import db_compat as aiosqlite  # routes to Turso in prod, local file in dev — MUST match V3_updates
 from datetime import datetime, timezone
 import json
+from relevance import extract_json_array as _extract_json_array, rank_relevance as _rank_relevance
 
 DB_PATH = os.environ.get("DB_PATH", "agent_memory.db")
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "")
@@ -253,51 +254,10 @@ async def filter_new_posts(db, platform: str, handle: str, posts: list) -> list:
     return await store_new_posts(db, platform, handle, "", posts)
 
 
-def _extract_json_array(text: str):
-    """Pull the first JSON array out of an LLM response, tolerating fenced/verbose output."""
-    if not text:
-        return None
-    m = re.search(r"\[.*\]", text, re.DOTALL)
-    if not m:
-        return None
-    try:
-        return json.loads(m.group(0))
-    except Exception:
-        return None
-
-
 async def rank_relevance(call_llm_fn, posts: list) -> list:
-    """One batched LLM call: for each post decide relevance to Madan's interests + a 1-line why.
-    Returns a list aligned to `posts` of {relevant: bool, note: str}. Fails open (all relevant)."""
-    if not posts:
-        return []
-    listing = ""
-    for i, p in enumerate(posts):
-        listing += f"{i}. [{p.get('platform','')}] {p.get('name','')}: {p.get('text','')[:220]}\n"
-
-    system = (
-        "You curate a feed for Madan. His interests: " + INTERESTS + ". "
-        "Judge each item by its SUBJECT/TOPIC ONLY — ignore clickbait wording, hype, emojis and "
-        "promotional tone. A hyped or sensational title about AI, LLMs, data, tech or career is "
-        "STILL relevant and should be kept. Drop an item ONLY if its subject is clearly unrelated "
-        "to his interests (e.g. cooking, sports, pure unrelated giveaways). When unsure, KEEP it. "
-        "Reply with ONLY a JSON array, one object per item IN THE SAME ORDER, shaped "
-        "{\"i\": <index>, \"keep\": true|false, \"why\": \"<max 10 words naming the topic, or empty>\"}."
-    )
-    try:
-        raw = await call_llm_fn(system, listing)
-        arr = _extract_json_array(raw)
-        if not arr:
-            raise ValueError("no json")
-        out = [{"relevant": True, "note": ""} for _ in posts]
-        for obj in arr:
-            idx = obj.get("i")
-            if isinstance(idx, int) and 0 <= idx < len(posts):
-                out[idx] = {"relevant": bool(obj.get("keep", True)), "note": (obj.get("why") or "").strip()}
-        return out
-    except Exception as e:
-        print(f"⚠️ Relevance ranking failed, keeping all: {e}")
-        return [{"relevant": True, "note": ""} for _ in posts]
+    """Rank posts against Madan's interests. Thin wrapper over the shared ranker in relevance.py
+    (topic-not-tone, boolean keep). Returns list aligned to `posts` of {relevant, note, score}."""
+    return await _rank_relevance(call_llm_fn, posts, INTERESTS)
 
 
 async def _apply_relevance(db, new_posts: list, call_llm_fn) -> list:
