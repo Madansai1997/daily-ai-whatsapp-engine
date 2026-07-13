@@ -9217,6 +9217,7 @@ async def api_influencers_add(request: Request):
     platform = body.get("platform", "").strip().lower()
     handle = body.get("handle", "").strip()
     name = body.get("name", "").strip() or handle
+    domain = (body.get("domain", "") or "").strip()
     yt_content = (body.get("yt_content", "all") or "all").strip().lower()
     if yt_content not in ("all", "videos", "shorts"):
         yt_content = "all"
@@ -9233,11 +9234,12 @@ async def api_influencers_add(request: Request):
     async with aiosqlite.connect(DB_PATH) as db:
         try:
             await db.execute(
-                "INSERT INTO watched_influencers (handle, platform, name, yt_content) VALUES (?, ?, ?, ?)",
-                (handle, platform, name, yt_content)
+                "INSERT INTO watched_influencers (handle, platform, name, yt_content, domain) VALUES (?, ?, ?, ?, ?)",
+                (handle, platform, name, yt_content, domain)
             )
             await db.commit()
-            return JSONResponse({"ok": True, "result": f"Added {name} ({platform})"})
+            tag = f" → {domain}" if domain else ""
+            return JSONResponse({"ok": True, "result": f"Added {name} ({platform}){tag}"})
         except aiosqlite.IntegrityError:
             return JSONResponse({"ok": False, "result": f"{name} is already registered."}, status_code=400)
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { RefreshCw, Plus, X, Trash2, Radio, Youtube, Instagram, Twitter, Rss, CheckCircle2, AlertTriangle, ExternalLink, CheckCheck, Compass, Sparkles } from "lucide-react";
+import { RefreshCw, Plus, X, Trash2, Radio, Youtube, Instagram, Twitter, Rss, CheckCircle2, AlertTriangle, ExternalLink, CheckCheck, Compass, Sparkles, ChevronDown, ChevronRight } from "lucide-react";
 
 interface Influencer {
   id: number;
@@ -57,8 +57,9 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
   const [discMsg, setDiscMsg] = useState("");
   const [discAdding, setDiscAdding] = useState(false);
 
-  const emptyForm = { handle: "", platform: "youtube", name: "", yt_content: "videos" };
+  const emptyForm = { handle: "", platform: "youtube", name: "", yt_content: "videos", domain: "" };
   const [form, setForm] = useState({ ...emptyForm });
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
   const loadFeed = useCallback(async (domain = "") => {
     setFeedLoading(true);
@@ -169,6 +170,23 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
   const visible = showFiltered ? posts : relevant;
   const unread = relevant.filter((p) => p.is_read === 0).length;
 
+  // Group the feed by channel so multiple synced feeds don't merge into one endless pile.
+  // `visible` is newest-first, so first occurrence of a channel orders the groups by recency.
+  const groups: [string, FeedPost[]][] = [];
+  {
+    const idx: Record<string, number> = {};
+    for (const p of visible) {
+      const key = p.name || p.handle;
+      if (idx[key] === undefined) { idx[key] = groups.length; groups.push([key, []]); }
+      groups[idx[key]][1].push(p);
+    }
+  }
+  const allCollapsed = groups.length > 0 && groups.every(([c]) => collapsed[c]);
+  const toggleAll = () => {
+    const next = !allCollapsed;
+    setCollapsed(Object.fromEntries(groups.map(([c]) => [c, next])));
+  };
+
   const markAllRead = async () => {
     try {
       await fetch("/api/influencers/feed/read", {
@@ -214,6 +232,7 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
           platform: form.platform,
           name: form.name.trim() || form.handle.trim(),
           yt_content: form.platform === "youtube" ? form.yt_content : "all",
+          domain: form.domain.trim(),
         }),
       });
       const data = await res.json();
@@ -221,6 +240,7 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
       setAddOpen(false);
       setForm({ ...emptyForm });
       await load();
+      await loadDomains();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -369,17 +389,28 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
       <div className="glass-panel rounded-xl border border-[#3c494c] p-6 space-y-4">
         <div className="flex justify-between items-center border-b border-white/10 pb-4">
           <div>
-            <h3 className="text-lg font-bold text-[#dfe2f3]">Latest Updates</h3>
-            <p className="text-xs text-[#859397]">Relevance-ranked to your interests — noise is filtered out automatically.</p>
+            <h3 className="text-lg font-bold text-[#dfe2f3]">Latest Updates {activeDomain && <span className="text-xs font-mono text-[#8aebff]">· {activeDomain}</span>}</h3>
+            <p className="text-xs text-[#859397]">Grouped by channel · relevance-ranked to your interests.</p>
           </div>
-          {unread > 0 && (
-            <button
-              onClick={markAllRead}
-              className="flex items-center gap-1.5 py-1.5 px-3 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-[#a3e635]/40 text-[#a3e635] rounded-lg text-xs font-mono font-bold cursor-pointer transition-all"
-            >
-              <CheckCheck className="w-3.5 h-3.5" /> MARK ALL READ
-            </button>
-          )}
+          <div className="flex items-center gap-2">
+            {groups.length > 1 && (
+              <button
+                onClick={toggleAll}
+                className="flex items-center gap-1.5 py-1.5 px-3 bg-white/5 hover:bg-white/10 border border-white/10 text-[#bbc9cd] rounded-lg text-xs font-mono font-bold cursor-pointer transition-all"
+              >
+                {allCollapsed ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                {allCollapsed ? "EXPAND ALL" : "COLLAPSE ALL"}
+              </button>
+            )}
+            {unread > 0 && (
+              <button
+                onClick={markAllRead}
+                className="flex items-center gap-1.5 py-1.5 px-3 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-[#a3e635]/40 text-[#a3e635] rounded-lg text-xs font-mono font-bold cursor-pointer transition-all"
+              >
+                <CheckCheck className="w-3.5 h-3.5" /> MARK ALL READ
+              </button>
+            )}
+          </div>
         </div>
 
         {feedLoading ? (
@@ -392,40 +423,62 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
           </div>
         ) : (
           <>
-            <div className="space-y-2">
-              {visible.map((p) => (
-                <a
-                  key={p.post_id}
-                  href={p.url || "#"}
-                  target={p.url ? "_blank" : undefined}
-                  rel="noreferrer"
-                  className={`flex items-start gap-3 p-3 rounded-lg border transition-all group ${platformStyle(p.platform)} ${p.relevant ? "" : "opacity-45 grayscale-[0.4]"} ${p.is_read === 0 && p.relevant ? "" : "opacity-60"} hover:opacity-100 hover:border-white/20`}
-                >
-                  {p.is_read === 0 && p.relevant ? (
-                    <span className="w-2 h-2 rounded-full bg-[#a3e635] mt-1.5 shrink-0" title="unread" />
-                  ) : (
-                    <span className="w-2 h-2 mt-1.5 shrink-0" />
-                  )}
-                  <span className="mt-0.5 shrink-0">{platformIcon(p.platform, "w-3.5 h-3.5")}</span>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[13px] text-[#dfe2f3] font-medium leading-snug group-hover:text-[#8aebff] flex items-start gap-1">
-                      <span className="min-w-0">{p.title || p.url}</span>
-                      {p.url && <ExternalLink className="w-3 h-3 opacity-40 shrink-0 mt-1" />}
-                    </p>
-                    <div className="flex items-center gap-2 mt-1 flex-wrap">
-                      <span className="text-[10px] font-mono text-[#859397]">{p.name}</span>
-                      {p.relevant && p.relevance_note && (
-                        <span className="text-[10px] font-mono text-[#a3e635]/80 bg-[#a3e635]/10 px-1.5 py-0.5 rounded">
-                          {p.relevance_note}
-                        </span>
+            <div className="space-y-3">
+              {groups.map(([channel, items]) => {
+                const isCollapsed = !!collapsed[channel];
+                const unreadN = items.filter((p) => p.is_read === 0 && p.relevant).length;
+                return (
+                  <div key={channel} className="rounded-lg border border-white/8 overflow-hidden">
+                    <button
+                      onClick={() => setCollapsed((m) => ({ ...m, [channel]: !m[channel] }))}
+                      className="w-full flex items-center gap-2 px-3 py-2 bg-white/[0.03] hover:bg-white/[0.06] transition-colors cursor-pointer"
+                    >
+                      {isCollapsed ? <ChevronRight className="w-3.5 h-3.5 text-[#859397] shrink-0" /> : <ChevronDown className="w-3.5 h-3.5 text-[#859397] shrink-0" />}
+                      {platformIcon(items[0].platform, "w-3.5 h-3.5")}
+                      <span className="text-[13px] font-bold text-[#dfe2f3] truncate">{channel}</span>
+                      <span className="text-[10px] font-mono text-[#859397]">· {items.length}</span>
+                      {unreadN > 0 && (
+                        <span className="ml-auto text-[10px] font-mono font-bold text-[#0a0e1a] bg-[#a3e635] px-1.5 py-0.5 rounded-full leading-none shrink-0">{unreadN} new</span>
                       )}
-                      {!p.relevant && (
-                        <span className="text-[10px] font-mono text-[#859397]/70 bg-white/5 px-1.5 py-0.5 rounded">off-topic</span>
-                      )}
-                    </div>
+                    </button>
+                    {!isCollapsed && (
+                      <div className="divide-y divide-white/5">
+                        {items.map((p) => (
+                          <a
+                            key={p.post_id}
+                            href={p.url || "#"}
+                            target={p.url ? "_blank" : undefined}
+                            rel="noreferrer"
+                            className={`flex items-start gap-3 px-3 py-2.5 transition-all group hover:bg-white/[0.04] ${p.relevant ? "" : "opacity-45 grayscale-[0.4] hover:opacity-90"}`}
+                          >
+                            {p.is_read === 0 && p.relevant ? (
+                              <span className="w-2 h-2 rounded-full bg-[#a3e635] mt-1.5 shrink-0" title="unread" />
+                            ) : (
+                              <span className="w-2 h-2 mt-1.5 shrink-0" />
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <p className="text-[13px] text-[#dfe2f3] font-medium leading-snug group-hover:text-[#8aebff] flex items-start gap-1">
+                                <span className="min-w-0">{p.title || p.url}</span>
+                                {p.url && <ExternalLink className="w-3 h-3 opacity-40 shrink-0 mt-1" />}
+                              </p>
+                              {(p.relevance_note || !p.relevant) && (
+                                <div className="flex items-center gap-2 mt-1 flex-wrap">
+                                  {p.relevant && p.relevance_note && (
+                                    <span className="text-[10px] font-mono text-[#a3e635]/80 bg-[#a3e635]/10 px-1.5 py-0.5 rounded">{p.relevance_note}</span>
+                                  )}
+                                  {!p.relevant && (
+                                    <span className="text-[10px] font-mono text-[#859397]/70 bg-white/5 px-1.5 py-0.5 rounded">off-topic</span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          </a>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                </a>
-              ))}
+                );
+              })}
             </div>
 
             {relevant.length === 0 && !showFiltered && filtered.length > 0 && (
@@ -453,7 +506,7 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
             <p className="text-xs text-[#859397]">JARVIS scans these daily. YouTube & RSS are free; Instagram/X need a RapidAPI key.</p>
           </div>
           <button
-            onClick={() => setAddOpen(true)}
+            onClick={() => { setForm({ ...emptyForm, domain: activeDomain }); setErr(""); setAddOpen(true); }}
             className="flex items-center gap-1.5 py-1.5 px-3 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-[#8aebff]/40 text-[#8aebff] rounded-lg text-xs font-mono font-bold cursor-pointer transition-all"
           >
             <Plus className="w-3.5 h-3.5" /> ADD FEED
@@ -623,6 +676,24 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
                     onChange={(e) => setForm({ ...form, name: e.target.value })}
                     className="w-full py-2 px-3 bg-[#1b1f2c]/85 border border-[#3c494c] rounded-lg text-sm text-[#dfe2f3] font-mono focus:border-[#8aebff] outline-none placeholder:text-white/20"
                   />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-mono text-[#859397] tracking-wider uppercase block">Add to domain <span className="text-[#5c6a6d] normal-case">(optional)</span></label>
+                  <input
+                    type="text"
+                    list="domain-options"
+                    placeholder="Pick a domain or type a new one — leave blank for none"
+                    value={form.domain}
+                    onChange={(e) => setForm({ ...form, domain: e.target.value })}
+                    className="w-full py-2 px-3 bg-[#1b1f2c]/85 border border-[#3c494c] rounded-lg text-sm text-[#dfe2f3] font-mono focus:border-[#8aebff] outline-none placeholder:text-white/20"
+                  />
+                  <datalist id="domain-options">
+                    {domains.map((d) => <option key={d.domain} value={d.domain} />)}
+                  </datalist>
+                  <span className="text-[9px] text-[#859397] font-mono mt-1 block">
+                    Groups this channel under a domain so it shows with the rest of that topic.
+                  </span>
                 </div>
               </div>
 
