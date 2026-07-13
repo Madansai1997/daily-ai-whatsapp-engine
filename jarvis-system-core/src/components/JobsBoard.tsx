@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { ScreenId } from "../types";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -12,6 +12,9 @@ import {
   AlertCircle,
   Trash2,
   ChevronDown,
+  MoreHorizontal,
+  SlidersHorizontal,
+  Eye,
   Upload,
   ClipboardCheck,
   Gauge,
@@ -348,6 +351,19 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
 
   // Toolbar overflow — collapses the agent tools into one dropdown
   const [toolsOpen, setToolsOpen] = useState(false);
+
+  // Board-level organization (all client-side over already-loaded data — no new backend calls).
+  const [query, setQuery] = useState("");
+  const [atsMin, setAtsMin] = useState(0);
+  const [methodFilter, setMethodFilter] = useState<"" | "email" | "link">("");
+  const [sourceFilter, setSourceFilter] = useState("");
+  const [focusMode, setFocusMode] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [collapsedCols, setCollapsedCols] = useState<Record<string, boolean>>({ accepted: true, rejected: true });
+  const [expandedCols, setExpandedCols] = useState<Record<string, boolean>>({});
+  // Per-card overflow (⋯) menu — positioned fixed so it escapes the card's overflow-hidden.
+  const [cardMenu, setCardMenu] = useState<{ id: number; x: number; y: number } | null>(null);
+  const COLUMN_CAP = 8;
 
   /* ---- Data loading ---- */
 
@@ -1360,19 +1376,50 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
   /* ---- Derived: kanban columns grouped by status ---- */
 
   // Phase 3 — the one next step for a card, by stage (the board drives itself).
-  const nextStep = (card: Application): { label: string; tint: string; onClick?: () => void } | null => {
+  // The SINGLE primary action shown on a card's face, by stage. Everything else lives in the ⋯ menu.
+  // (Folds in the old nextStep + the stale-applied follow-up + the interviewing prep cue, and wires
+  // the previously-dead "Respond to offer" to the email drafter — one action, no duplicates.)
+  const primaryAction = (card: Application): { label: string; tint: string; onClick?: () => void } | null => {
     switch (card.status) {
       case "interested":
         return { label: "Assess & apply", tint: "#8aebff", onClick: () => runAts(card.id) };
-      // 'applied' is intentionally omitted — stale-applied cards already surface their own
-      // "Follow up" CTA (the recruiter-follow-up feature), so a second cue would be redundant.
+      case "applied": {
+        const d = daysSince(card.applied_at || card.updated_at) ?? 0;
+        return { label: d >= 7 ? `Follow up · ${d}d` : "Follow up", tint: "#ffd6a3", onClick: openFollowups };
+      }
       case "interviewing":
         return { label: "Prep interview", tint: "#5eead4", onClick: openPrep };
       case "offer":
-        return { label: "Respond to offer", tint: "#ffd6a3" };
+        return { label: "Respond to offer", tint: "#ffd6a3", onClick: () => openEmails(card) };
       default:
-        return null;
+        return null; // accepted / rejected — closed, no face action
     }
+  };
+
+  // Focus view = only cards that want action today.
+  const needsAction = (card: Application) => primaryAction(card) !== null;
+
+  // Facet list for the source filter (over already-loaded data).
+  const sourceFacets = useMemo(
+    () => Array.from(new Set(applications.map((a) => a.source).filter(Boolean))) as string[],
+    [applications]
+  );
+  const activeFilterCount =
+    (query ? 1 : 0) + (atsMin > 0 ? 1 : 0) + (methodFilter ? 1 : 0) + (sourceFilter ? 1 : 0) + (focusMode ? 1 : 0);
+
+  const matchesFilters = (a: Application): boolean => {
+    if (query) {
+      const q = query.toLowerCase();
+      if (!`${a.title} ${a.company} ${a.location || ""}`.toLowerCase().includes(q)) return false;
+    }
+    if (atsMin > 0 && !(typeof a.ats_score === "number" && a.ats_score >= atsMin)) return false;
+    if (methodFilter) {
+      const m = a.apply_method === "email" ? "email" : "link";
+      if (m !== methodFilter) return false;
+    }
+    if (sourceFilter && a.source !== sourceFilter) return false;
+    if (focusMode && !needsAction(a)) return false;
+    return true;
   };
 
   const columns: RealColumn[] = statuses.map((status) => {
@@ -1383,7 +1430,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
     // existing (most-recently-updated) order at the bottom.
     const cards = applications
       // reviewed=0 are fresh scout matches — they live in the NEW column, not the normal lanes.
-      .filter((a) => a.status === status && a.reviewed !== 0)
+      .filter((a) => a.status === status && a.reviewed !== 0 && matchesFilters(a))
       .map((a, i) => ({ a, i }))
       .sort((x, y) => {
         const sx = typeof x.a.ats_score === "number" ? x.a.ats_score : -1;
@@ -1517,6 +1564,75 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
               <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
             </button>
           </div>
+        </div>
+      </section>
+
+      {/* Board controls — search / focus / filters (all client-side, no backend calls) */}
+      <section className="max-w-full mx-auto flex flex-wrap items-center gap-2">
+        <div className="relative flex-1 min-w-[180px] max-w-xs">
+          <Search className="w-3.5 h-3.5 text-[#859397] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search title / company…"
+            className="w-full bg-white/5 border border-white/10 rounded-lg pl-9 pr-3 py-2 text-xs font-mono text-[#dfe2f3] placeholder:text-[#859397]/60 focus:outline-none focus:border-[#8aebff]/40"
+          />
+          {query && (
+            <button onClick={() => setQuery("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-[#859397] hover:text-[#dfe2f3] cursor-pointer"><X className="w-3.5 h-3.5" /></button>
+          )}
+        </div>
+
+        <button
+          onClick={() => setFocusMode((v) => !v)}
+          title="Show only cards that need action today"
+          className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-mono font-semibold border transition-all cursor-pointer ${focusMode ? "bg-[#a3e635]/15 border-[#a3e635]/40 text-[#a3e635]" : "bg-white/5 border-white/10 text-[#bbc9cd] hover:bg-white/10"}`}
+        >
+          <Eye className="w-3.5 h-3.5" /> FOCUS
+        </button>
+
+        <div className="relative">
+          <button
+            onClick={() => setFiltersOpen((v) => !v)}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-mono font-semibold border transition-all cursor-pointer ${filtersOpen || activeFilterCount > 0 ? "bg-[#8aebff]/10 border-[#8aebff]/40 text-[#8aebff]" : "bg-white/5 border-white/10 text-[#bbc9cd] hover:bg-white/10"}`}
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5" /> FILTERS
+            {activeFilterCount > 0 && (
+              <span className="min-w-[16px] h-4 px-1 rounded-full bg-[#8aebff] text-[#0a0e1a] text-[9px] font-bold flex items-center justify-center">{activeFilterCount}</span>
+            )}
+          </button>
+          {filtersOpen && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setFiltersOpen(false)} />
+              <div className="absolute left-0 top-full mt-2 w-64 z-50 glass-panel rounded-xl border border-white/10 shadow-2xl p-4 space-y-4">
+                <div>
+                  <label className="text-[10px] font-mono uppercase tracking-wider text-[#859397] flex items-center justify-between">
+                    Min ATS <span className="text-[#8aebff]">{atsMin || "any"}</span>
+                  </label>
+                  <input type="range" min={0} max={90} step={5} value={atsMin} onChange={(e) => setAtsMin(Number(e.target.value))} className="w-full mt-1.5 accent-[#8aebff]" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-mono uppercase tracking-wider text-[#859397] block mb-1.5">Apply method</label>
+                  <div className="flex gap-1.5">
+                    {([["", "All"], ["email", "Email"], ["link", "On site"]] as const).map(([v, l]) => (
+                      <button key={v} onClick={() => setMethodFilter(v as "" | "email" | "link")} className={`flex-1 px-2 py-1 rounded text-[10px] font-mono border cursor-pointer transition-all ${methodFilter === v ? "bg-[#8aebff]/15 border-[#8aebff]/40 text-[#8aebff]" : "border-white/10 text-[#859397] hover:text-[#dfe2f3]"}`}>{l}</button>
+                    ))}
+                  </div>
+                </div>
+                {sourceFacets.length > 0 && (
+                  <div>
+                    <label className="text-[10px] font-mono uppercase tracking-wider text-[#859397] block mb-1.5">Source</label>
+                    <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)} className="w-full bg-white/5 border border-white/10 rounded px-2 py-1.5 text-[11px] font-mono text-[#dfe2f3] focus:outline-none focus:border-[#8aebff]/40 cursor-pointer">
+                      <option value="" className="bg-[#0a0e1a]">All sources</option>
+                      {sourceFacets.map((s) => <option key={s} value={s} className="bg-[#0a0e1a]">{s}</option>)}
+                    </select>
+                  </div>
+                )}
+                {activeFilterCount > 0 && (
+                  <button onClick={() => { setQuery(""); setAtsMin(0); setMethodFilter(""); setSourceFilter(""); setFocusMode(false); }} className="w-full text-[10px] font-mono text-[#ffb4ab] hover:underline cursor-pointer">Clear all filters</button>
+                )}
+              </div>
+            </>
+          )}
         </div>
       </section>
 
@@ -1698,214 +1814,175 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                 </div>
               </div>
             )}
-            {columns.map((col) => (
-              <div
-                key={col.status}
-                className={`flex-shrink-0 w-80 glass-column flex flex-col rounded-xl min-h-[500px] ${
-                  col.opacityClass || ""
-                } ${col.grayscale ? "grayscale" : ""}`}
-              >
-                {/* Column Header */}
-                <div className="p-4 border-b border-white/5 flex justify-between items-center bg-white/5">
-                  <span className="text-xs font-bold font-mono text-[#859397] tracking-widest">
-                    {col.title}
-                  </span>
-                  <span className={`text-xs font-mono px-2.5 py-0.5 rounded border ${col.accentClass}`}>
-                    {col.count}
-                  </span>
-                </div>
+            {columns.map((col) => {
+              const canCollapse = col.status === "accepted" || col.status === "rejected";
+              // Collapsed terminal lane → thin vertical strip that expands on click.
+              if (canCollapse && collapsedCols[col.status]) {
+                return (
+                  <button
+                    key={col.status}
+                    onClick={() => setCollapsedCols((m) => ({ ...m, [col.status]: false }))}
+                    title={`Expand ${col.title}`}
+                    className={`flex-shrink-0 w-12 glass-column rounded-xl min-h-[500px] flex flex-col items-center gap-3 pt-4 cursor-pointer hover:bg-white/5 transition-colors ${col.grayscale ? "grayscale" : ""} ${col.opacityClass || ""}`}
+                  >
+                    <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${col.accentClass}`}>{col.count}</span>
+                    <span className="text-[10px] font-bold font-mono text-[#859397] tracking-widest [writing-mode:vertical-rl] rotate-180">{col.title}</span>
+                  </button>
+                );
+              }
+              const cap = expandedCols[col.status] ? col.cards.length : COLUMN_CAP;
+              const shown = col.cards.slice(0, cap);
+              const hidden = col.cards.length - shown.length;
+              return (
+                <div
+                  key={col.status}
+                  className={`flex-shrink-0 w-80 glass-column flex flex-col rounded-xl min-h-[500px] ${
+                    col.opacityClass || ""
+                  } ${col.grayscale ? "grayscale" : ""}`}
+                >
+                  {/* Column Header */}
+                  <div className="p-4 border-b border-white/5 flex justify-between items-center bg-white/5">
+                    <span className="text-xs font-bold font-mono text-[#859397] tracking-widest flex items-center gap-1.5">
+                      {canCollapse && (
+                        <button onClick={() => setCollapsedCols((m) => ({ ...m, [col.status]: true }))} title="Collapse lane" className="text-[#859397] hover:text-[#dfe2f3] cursor-pointer -ml-1">
+                          <ChevronDown className="w-3.5 h-3.5 rotate-90" />
+                        </button>
+                      )}
+                      {col.title}
+                    </span>
+                    <span className={`text-xs font-mono px-2.5 py-0.5 rounded border ${col.accentClass}`}>
+                      {col.count}
+                    </span>
+                  </div>
 
-                {/* Column Cards Container */}
-                <div className="p-4 space-y-4 flex-1">
-                  {col.cards.length === 0 ? (
-                    <p className="text-[10px] font-mono text-[#859397]/60 uppercase tracking-widest text-center py-6">
-                      Empty
-                    </p>
-                  ) : (
-                    col.cards.map((card) => {
-                      const isAction = card.status === "offer";
-                      const isClosed = card.status === "accepted";
-                      return (
-                        <div
-                          key={card.id}
-                          className={`glass-card p-5 rounded-xl group relative overflow-hidden ${
-                            isAction ? "border-[#ffd6a3]/40 shadow-lg" : ""
-                          }`}
-                        >
-                          <div className="flex justify-between items-start mb-2">
-                            <h3 className="text-base font-bold text-[#dfe2f3] group-hover:text-[#8aebff] transition-colors leading-snug">
-                              {card.url ? (
-                                <a
-                                  href={card.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="hover:underline"
+                  {/* Column Cards Container */}
+                  <div className="p-4 space-y-3 flex-1">
+                    {col.cards.length === 0 ? (
+                      <p className="text-[10px] font-mono text-[#859397]/60 uppercase tracking-widest text-center py-6">
+                        Empty
+                      </p>
+                    ) : (
+                      <>
+                        {shown.map((card) => {
+                          const isAction = card.status === "offer";
+                          const pa = primaryAction(card);
+                          return (
+                            <div
+                              key={card.id}
+                              className={`glass-card p-4 rounded-xl group relative ${isAction ? "border-[#ffd6a3]/40 shadow-lg" : ""}`}
+                            >
+                              {/* Row 1 — title · ATS · overflow */}
+                              <div className="flex justify-between items-start gap-2 mb-1.5">
+                                <h3 className="text-sm font-bold text-[#dfe2f3] group-hover:text-[#8aebff] transition-colors leading-snug min-w-0">
+                                  {card.url ? (
+                                    <a href={card.url} target="_blank" rel="noreferrer" className="hover:underline">{card.title}</a>
+                                  ) : card.title}
+                                </h3>
+                                <div className="flex items-center gap-1 shrink-0">
+                                  {typeof card.ats_score === "number" && (() => {
+                                    const c = atsColor(card.ats_score);
+                                    return (
+                                      <span
+                                        title={`ATS — keyword match with the job description${card.ats_scored_at ? `, as of ${new Date(card.ats_scored_at).toLocaleDateString()}` : ""}`}
+                                        className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold font-mono border cursor-help"
+                                        style={{ color: c.text, borderColor: `${c.border}55`, backgroundColor: `${c.bg}1a` }}
+                                      >
+                                        <Gauge className="w-3 h-3" />{card.ats_score}
+                                      </span>
+                                    );
+                                  })()}
+                                  <button
+                                    onClick={(e) => {
+                                      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                                      setCardMenu(cardMenu?.id === card.id ? null : { id: card.id, x: r.right, y: r.bottom });
+                                    }}
+                                    aria-label={`More actions for ${card.title}`}
+                                    className="p-1 rounded text-[#859397] hover:text-[#8aebff] hover:bg-white/5 transition-all cursor-pointer"
+                                  >
+                                    <MoreHorizontal className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* Row 2 — company • location */}
+                              <p className="text-[11px] font-mono text-[#859397] mb-2.5 truncate">
+                                {card.company}{card.location ? ` • ${card.location}` : ""}
+                              </p>
+
+                              {/* Row 3 — the single stage-appropriate action */}
+                              {pa && (
+                                <button
+                                  onClick={pa.onClick}
+                                  disabled={!pa.onClick || atsLoadingId === card.id}
+                                  title="Suggested next step"
+                                  className="inline-flex items-center gap-1 text-[10px] font-mono font-bold px-2.5 py-1 rounded-md border transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-default"
+                                  style={{ color: pa.tint, borderColor: `${pa.tint}55`, background: `${pa.tint}14` }}
                                 >
-                                  {card.title}
-                                </a>
-                              ) : (
-                                card.title
-                              )}
-                            </h3>
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              {typeof card.ats_score === "number" && (() => {
-                                const c = atsColor(card.ats_score);
-                                return (
-                                  <span
-                                    title={`ATS — keyword match with the job description${card.ats_scored_at ? `, as of ${new Date(card.ats_scored_at).toLocaleDateString()}` : ""}`}
-                                    className="flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-bold font-mono border cursor-help"
-                                    style={{ color: c.text, borderColor: `${c.border}55`, backgroundColor: `${c.bg}1a` }}
-                                  >
-                                    <Gauge className="w-3 h-3" />
-                                    <span className="text-[8px] tracking-wider opacity-70">ATS</span>
-                                    {card.ats_score}
-                                  </span>
-                                );
-                              })()}
-                              {typeof card.recruiter_score === "number" && (() => {
-                                const c = atsColor(card.recruiter_score);
-                                return (
-                                  <span
-                                    title={`REC — recruiter's fit read for this role${card.recruiter_scored_at ? `, as of ${new Date(card.recruiter_scored_at).toLocaleDateString()}` : ""}`}
-                                    className="flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] font-bold font-mono border cursor-help"
-                                    style={{ color: c.text, borderColor: `${c.border}55`, backgroundColor: `${c.bg}1a` }}
-                                  >
-                                    <UserCheck className="w-3 h-3" />
-                                    <span className="text-[8px] tracking-wider opacity-70">REC</span>
-                                    {card.recruiter_score}
-                                  </span>
-                                );
-                              })()}
-                              {isAction ? (
-                                <ShieldCheck className="w-4 h-4 text-[#ffd6a3] group-hover:scale-110 transition-transform" />
-                              ) : (
-                                <ArrowUpRight className="w-4 h-4 text-[#8aebff]/40 group-hover:text-[#8aebff] group-hover:translate-x-0.5 transition-all" />
+                                  <ArrowUpRight className="w-3 h-3" />
+                                  {atsLoadingId === card.id && card.status === "interested" ? "Analyzing…" : pa.label}
+                                </button>
                               )}
                             </div>
-                          </div>
-
-                          <div className="flex items-center gap-2 flex-wrap mb-4">
-                            <p className="text-xs font-mono text-[#859397]">
-                              {card.company}
-                              {card.location ? ` • ${card.location}` : ""}
-                            </p>
-                            {card.source ? (
-                              <span
-                                title={`Source: ${card.source}`}
-                                className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#8aebff]/10 border border-[#8aebff]/25 text-[#8aebff] whitespace-nowrap"
-                              >
-                                {card.source}
-                              </span>
-                            ) : null}
-                            <ApplyTag method={card.apply_method} />
-                          </div>
-
-                          {/* Phase 3 — the one suggested next step for this stage */}
-                          {(() => {
-                            const ns = nextStep(card);
-                            if (!ns) return null;
-                            return (
-                              <button
-                                onClick={ns.onClick}
-                                disabled={!ns.onClick}
-                                title="Suggested next step"
-                                className="mb-3 inline-flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded-md border transition-colors disabled:cursor-default cursor-pointer"
-                                style={{ color: ns.tint, borderColor: `${ns.tint}55`, background: `${ns.tint}14` }}
-                              >
-                                <ArrowUpRight className="w-3 h-3" /> {ns.label}
-                              </button>
-                            );
-                          })()}
-
-                          {/* Status selector + tags + inline next-step cues */}
-                          <div className="flex items-center flex-wrap gap-2 mb-4">
-                            {isClosed && (
-                              <span className="text-[10px] font-bold font-mono text-[#859397] uppercase tracking-wider">
-                                Closed
-                              </span>
-                            )}
-                            {isAction && (
-                              <span className="text-[10px] font-bold font-mono text-[#ffd6a3] px-2.5 py-0.5 bg-[#ffd6a3]/10 rounded border border-[#ffd6a3]/20 uppercase">
-                                Action Required
-                              </span>
-                            )}
-                            {/* Guided cue: stale in "applied" → nudge a follow-up */}
-                            {card.status === "applied" && (daysSince(card.applied_at || card.updated_at) ?? 0) >= 7 && (
-                              <button
-                                onClick={openFollowups}
-                                title={`No reply in ${daysSince(card.applied_at || card.updated_at)} days — draft a follow-up`}
-                                className="text-[10px] font-bold font-mono text-[#ffd6a3] px-2.5 py-0.5 bg-[#ffd6a3]/10 rounded border border-[#ffd6a3]/30 hover:bg-[#ffd6a3]/20 transition-all cursor-pointer flex items-center gap-1"
-                              >
-                                <Clock className="w-3 h-3" /> Follow up →
-                              </button>
-                            )}
-                            {/* Guided cue: interviewing → jump to prep */}
-                            {card.status === "interviewing" && (
-                              <button
-                                onClick={openPrep}
-                                title="Build your interview prep brief"
-                                className="text-[10px] font-bold font-mono text-[#5eead4] px-2.5 py-0.5 bg-[#5eead4]/10 rounded border border-[#5eead4]/30 hover:bg-[#5eead4]/20 transition-all cursor-pointer flex items-center gap-1"
-                              >
-                                <CalendarClock className="w-3 h-3" /> Prep →
-                              </button>
-                            )}
-                          </div>
-
-                          {/* Actions */}
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <button
-                              onClick={() => runAts(card.id)}
-                              disabled={atsLoadingId === card.id}
-                              className="ats-chip px-2.5 py-1 rounded text-[10px] font-bold font-mono text-[#8aebff] border border-[#8aebff]/30 hover:bg-[#8aebff]/10 transition-all cursor-pointer disabled:opacity-50"
-                            >
-                              {atsLoadingId === card.id ? "ANALYZING…" : "ATS ANALYSIS"}
-                            </button>
-
-                            <button
-                              onClick={() => openEmails(card)}
-                              title={`Recent email with ${card.company || "this company"}`}
-                              className="px-2.5 py-1 rounded text-[10px] font-bold font-mono text-[#a3e635] border border-[#a3e635]/30 hover:bg-[#a3e635]/10 transition-all cursor-pointer flex items-center gap-1"
-                            >
-                              <Mail className="w-3 h-3" /> EMAILS
-                            </button>
-
-                            <div className="relative inline-flex items-center">
-                              <select
-                                value={card.status}
-                                onChange={(e) => changeStatus(card.id, e.target.value)}
-                                aria-label={`Change status for ${card.title}`}
-                                className="appearance-none bg-white/5 border border-white/10 rounded text-[10px] font-mono text-[#bbc9cd] pl-2.5 pr-6 py-1 uppercase tracking-wider cursor-pointer hover:border-[#8aebff]/30 focus:outline-none focus:border-[#8aebff]/50"
-                              >
-                                {statuses.map((s) => (
-                                  <option key={s} value={s} className="bg-[#0a0e1a] text-[#dfe2f3]">
-                                    {s.toUpperCase()}
-                                  </option>
-                                ))}
-                              </select>
-                              <ChevronDown className="w-3 h-3 text-[#859397] absolute right-1.5 pointer-events-none" />
-                            </div>
-
-                            <button
-                              onClick={() => {
-                                if (confirm(`Remove "${card.title}" from tracking?`)) {
-                                  removeCard(card.id);
-                                }
-                              }}
-                              aria-label={`Remove ${card.title}`}
-                              className="ml-auto p-1.5 rounded text-[#859397] hover:text-[#ffb4ab] hover:bg-[#ffb4ab]/5 transition-all cursor-pointer"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
+                          );
+                        })}
+                        {hidden > 0 && (
+                          <button onClick={() => setExpandedCols((m) => ({ ...m, [col.status]: true }))} className="w-full text-center text-[10px] font-mono text-[#8aebff]/80 hover:text-[#8aebff] py-2 cursor-pointer">
+                            show {hidden} more ↓
+                          </button>
+                        )}
+                        {expandedCols[col.status] && col.cards.length > COLUMN_CAP && (
+                          <button onClick={() => setExpandedCols((m) => ({ ...m, [col.status]: false }))} className="w-full text-center text-[10px] font-mono text-[#859397] hover:text-[#dfe2f3] py-1 cursor-pointer">
+                            show less ↑
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
+
+        {/* Per-card overflow (⋯) menu — fixed-positioned so the card's clipping doesn't crop it */}
+        {cardMenu && (() => {
+          const card = applications.find((a) => a.id === cardMenu.id);
+          if (!card) return null;
+          const rc = typeof card.recruiter_score === "number" ? atsColor(card.recruiter_score) : null;
+          return (
+            <>
+              <div className="fixed inset-0 z-[60]" onClick={() => setCardMenu(null)} />
+              <div className="fixed z-[61] w-52 glass-panel rounded-xl border border-white/10 shadow-2xl p-1.5" style={{ top: cardMenu.y + 6, left: Math.max(8, cardMenu.x - 208) }}>
+                {(rc || card.source || card.apply_method) && (
+                  <div className="px-2 py-1.5 flex flex-wrap items-center gap-1.5 border-b border-white/5 mb-1">
+                    {rc && <span className="text-[9px] font-mono px-1.5 py-0.5 rounded border inline-flex items-center gap-0.5" style={{ color: rc.text, borderColor: `${rc.border}55` }}><UserCheck className="w-3 h-3" />REC {card.recruiter_score}</span>}
+                    {card.source && <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#8aebff]/10 border border-[#8aebff]/25 text-[#8aebff]">{card.source}</span>}
+                    <ApplyTag method={card.apply_method} />
+                  </div>
+                )}
+                <button onClick={() => { setCardMenu(null); runAts(card.id); }} className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-[11px] font-mono text-[#8aebff] hover:bg-white/5 cursor-pointer transition-colors">
+                  <Gauge className="w-3.5 h-3.5" /> ATS analysis
+                </button>
+                <button onClick={() => { setCardMenu(null); openEmails(card); }} className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-[11px] font-mono text-[#a3e635] hover:bg-white/5 cursor-pointer transition-colors">
+                  <Mail className="w-3.5 h-3.5" /> Emails
+                </button>
+                <div className="px-2.5 py-1.5">
+                  <label className="text-[9px] font-mono uppercase tracking-wider text-[#859397] block mb-1">Move to</label>
+                  <select
+                    value={card.status}
+                    onChange={(e) => { changeStatus(card.id, e.target.value); setCardMenu(null); }}
+                    className="w-full appearance-none bg-white/5 border border-white/10 rounded text-[10px] font-mono text-[#bbc9cd] px-2 py-1 uppercase tracking-wider cursor-pointer hover:border-[#8aebff]/30 focus:outline-none focus:border-[#8aebff]/50"
+                  >
+                    {statuses.map((s) => <option key={s} value={s} className="bg-[#0a0e1a] text-[#dfe2f3]">{s.toUpperCase()}</option>)}
+                  </select>
+                </div>
+                <button onClick={() => { setCardMenu(null); if (confirm(`Remove "${card.title}" from tracking?`)) removeCard(card.id); }} className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-[11px] font-mono text-[#ffb4ab] hover:bg-[#ffb4ab]/5 cursor-pointer transition-colors border-t border-white/5 mt-1">
+                  <Trash2 className="w-3.5 h-3.5" /> Remove
+                </button>
+              </div>
+            </>
+          );
+        })()}
       </section>
 
       {/* Slide-Up ATS Analysis Modal Overlay */}
