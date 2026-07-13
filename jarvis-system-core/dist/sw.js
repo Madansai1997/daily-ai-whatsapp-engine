@@ -1,7 +1,41 @@
-/* JARVIS service worker — handles Web Push delivery + notification clicks. */
+/* JARVIS service worker — Web Push delivery + notification clicks + PWA app-shell cache. */
 
-self.addEventListener("install", () => self.skipWaiting());
-self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
+const CACHE = "jarvis-shell-v1";
+const SHELL = ["/console/", "/console/index.html", "/console/manifest.webmanifest",
+               "/console/icon-192.png", "/console/icon-512.png"];
+
+self.addEventListener("install", (event) => {
+  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).catch(() => {}));
+  self.skipWaiting();
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+  );
+  self.clients.claim();
+});
+
+/* Serve the console shell offline; NEVER intercept API/auth (anything outside /console/). */
+self.addEventListener("fetch", (event) => {
+  const url = new URL(event.request.url);
+  if (event.request.method !== "GET" || !url.pathname.startsWith("/console/")) return; // backend passes through
+  if (event.request.mode === "navigate") {
+    // Network-first so new deploys are picked up; fall back to the cached shell when offline.
+    event.respondWith(fetch(event.request).catch(() => caches.match("/console/index.html")));
+    return;
+  }
+  // Hashed static assets: cache-first, then network (and cache the fresh copy).
+  event.respondWith(
+    caches.match(event.request).then((hit) =>
+      hit || fetch(event.request).then((res) => {
+        const copy = res.clone();
+        caches.open(CACHE).then((c) => c.put(event.request, copy)).catch(() => {});
+        return res;
+      }).catch(() => hit)
+    )
+  );
+});
 
 self.addEventListener("push", (event) => {
   let data = { title: "JARVIS", body: "New notification" };

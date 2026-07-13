@@ -79,6 +79,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `e60aab4` feat(watchers): People Watch → CRM nudges + Unified Trends Pulse _(2026-07-13)_
 - `6711281` feat(company-watch): slice 1b — news on Kanban cards + interview-prep briefs _(2026-07-13)_
 - `b869f49` feat(jobs): declutter the Kanban — compact cards, overflow menu, board filters _(2026-07-13)_
 - `5b919f4` feat(watchers): shared relevance engine + Company Watch + "Watch these" in Daily _(2026-07-13)_
@@ -90,7 +91,6 @@ npm install && npm run build     # served by the engine at /console
 - `9417c93` feat(daily): "Rewrite to run offline" — turn un-runnable snippets into stdlib-only that runs _(2026-07-08)_
 - `c25ce59` feat(daily): visual Deep Dive + interactive Go Deeper; fix in-browser Run hang _(2026-07-08)_
 - `253d97a` feat(daily): interactive study flow — richer Deep Dive, chatty Go Deeper, no code dupes _(2026-07-08)_
-- `3c735f3` fix(daily): Turso-safe Go-Deeper + Deep Dive explainer + 4-step study hint _(2026-07-08)_
 <!-- /AUTO:changelog -->
 
 ---
