@@ -820,11 +820,14 @@ def init_db_tables():
         is_read INTEGER DEFAULT 0,
         published_at TEXT,
         domain TEXT DEFAULT '',
+        contact_id INTEGER,
         seen_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-    try:
-        cursor.execute("ALTER TABLE influencer_posts ADD COLUMN domain TEXT DEFAULT ''")
-    except Exception:
-        pass
+    for _ddl in ("ALTER TABLE influencer_posts ADD COLUMN domain TEXT DEFAULT ''",
+                 "ALTER TABLE influencer_posts ADD COLUMN contact_id INTEGER"):
+        try:
+            cursor.execute(_ddl)
+        except Exception:
+            pass
 
     conn.commit()
     conn.close()
@@ -913,6 +916,8 @@ init_trend_lab_tables()
 init_daily_web_tables()
 from company_watch_agent import init_company_watch_tables
 init_company_watch_tables()
+from people_watch_agent import init_people_watch_tables
+init_people_watch_tables()
 
 
 # ==========================================
@@ -6636,6 +6641,49 @@ async def trends_stats_api():
     return JSONResponse(await trend_lab_stats())
 
 
+@app.get("/api/trends/pulse")
+async def trends_pulse_api(domain: str = "", limit: int = 40):
+    """Unified 'what's hot in my domains' — a read-time UNION of Trend Lab ideas (Reddit/HN) and
+    the influencer feed (YouTube/RSS), normalized and blended into one ranked list. No new table."""
+    dom = (domain or "").strip().lower()
+    ideas = await list_trend_ideas(limit=30)
+    from influencer_agent import get_feed
+    posts = await get_feed(limit=30, only_relevant=True, domain=domain.strip())
+
+    items = []
+    for it in ideas:
+        if dom:
+            hay = f"{it.get('title','')} {it.get('pain','')}".lower()
+            if not any(tok in hay for tok in dom.split()):
+                continue
+        items.append({
+            "type": "idea", "title": it.get("title", ""), "summary": it.get("pain", ""),
+            "url": "", "source": ", ".join(it.get("sources", [])) or "reddit", "domain": "",
+            "score": min(100, int(it.get("total_score") or 0)), "when": it.get("created_at") or "",
+            "status": it.get("status"), "id": it.get("id"),
+        })
+
+    now = dt.datetime.now(dt.timezone.utc)
+    for p in posts:
+        score = 55
+        try:
+            seen = dt.datetime.fromisoformat((p.get("seen_at") or "").replace("Z", "+00:00"))
+            if seen.tzinfo is None:
+                seen = seen.replace(tzinfo=dt.timezone.utc)
+            age_days = (now - seen).total_seconds() / 86400.0
+            score = int(max(50, 74 - age_days * 2))
+        except Exception:
+            pass
+        items.append({
+            "type": "post", "title": p.get("title", ""), "summary": p.get("relevance_note", ""),
+            "url": p.get("url", ""), "source": p.get("name") or p.get("platform") or "feed",
+            "domain": p.get("domain", ""), "score": score, "when": p.get("seen_at") or "",
+        })
+
+    items.sort(key=lambda x: x["score"], reverse=True)
+    return JSONResponse({"items": items[:limit]})
+
+
 @app.post("/api/trends/scan")
 async def trends_scan_api():
     """Manual 'scan now' from the console. Runs the full fetch→cluster→score pipeline."""
@@ -6886,6 +6934,55 @@ async def api_contacts_contacted(cid: int):
 async def api_contacts_delete(cid: int):
     await delete_contact(cid)
     return JSONResponse({"ok": True})
+
+
+# ── People Watch — watch a contact's free feeds → networking nudges ──
+@app.get("/api/contacts/{cid}/feeds")
+async def api_contact_feeds(cid: int):
+    from people_watch_agent import list_contact_feeds
+    return JSONResponse(await list_contact_feeds(cid))
+
+
+@app.post("/api/contacts/{cid}/feeds")
+async def api_contact_feeds_add(cid: int, request: Request):
+    from people_watch_agent import add_contact_feed
+    body = await request.json()
+    res = await add_contact_feed(cid, body.get("platform", ""), body.get("handle", ""), body.get("name", ""))
+    return JSONResponse(res, status_code=200 if res.get("ok") else 400)
+
+
+@app.post("/api/contacts/feeds/{feed_id}/delete")
+async def api_contact_feed_delete(feed_id: int):
+    from people_watch_agent import delete_contact_feed
+    return JSONResponse(await delete_contact_feed(feed_id))
+
+
+@app.get("/api/contacts/nudges")
+async def api_contacts_nudges():
+    from people_watch_agent import get_nudges
+    return JSONResponse(await get_nudges())
+
+
+@app.post("/api/contacts/nudges/{post_id}/dismiss")
+async def api_contacts_nudge_dismiss(post_id: str):
+    from people_watch_agent import dismiss_nudge
+    return JSONResponse(await dismiss_nudge(post_id))
+
+
+@app.post("/cron/people-watch")
+async def cron_people_watch(token: str = ""):
+    """Daily: scrape watched contacts' free feeds → networking nudges. Fire once/day."""
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    from people_watch_agent import run_people_watch
+    _run_bg_job("people-watch", lambda: run_people_watch(call_llm))
+    return JSONResponse({"status": "people watch triggered"}, status_code=202)
+
+
+@app.post("/api/people-watch/run")
+async def api_people_watch_run():
+    from people_watch_agent import run_people_watch
+    return JSONResponse({"ok": True, "result": await run_people_watch(call_llm)})
 
 
 # ── Profile-Freshness ──

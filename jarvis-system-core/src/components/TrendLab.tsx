@@ -1,8 +1,10 @@
 import { useEffect, useState, useCallback } from "react";
 import {
   FlaskConical, RefreshCw, TrendingUp, Star, Hammer, X, ChevronDown, ChevronUp,
-  MessageSquare, ExternalLink, FileText,
+  MessageSquare, ExternalLink, FileText, Activity, Lightbulb, Radio,
 } from "lucide-react";
+
+interface PulseItem { type: string; title: string; summary: string; url: string; source: string; domain: string; score: number; when: string; }
 
 interface Quote { text: string; url: string; }
 interface Idea {
@@ -53,6 +55,17 @@ export default function TrendLab() {
   const [brief, setBrief] = useState<Brief | null>(null);
   const [briefLoading, setBriefLoading] = useState(false);
   const [briefError, setBriefError] = useState("");
+  // Unified cross-source pulse (Trend Lab ideas + influencer feed)
+  const [pulse, setPulse] = useState<PulseItem[]>([]);
+  const [pulseOpen, setPulseOpen] = useState(false);
+  const [pulseLoading, setPulseLoading] = useState(false);
+
+  const loadPulse = useCallback(async () => {
+    setPulseLoading(true);
+    try { const d = await fetch("/api/trends/pulse", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)); setPulse(d?.items || []); }
+    catch { setPulse([]); } finally { setPulseLoading(false); }
+  }, []);
+  const togglePulse = () => { const n = !pulseOpen; setPulseOpen(n); if (n && pulse.length === 0) loadPulse(); };
 
   const load = useCallback(async () => {
     try {
@@ -143,15 +156,59 @@ export default function TrendLab() {
               </p>
             </div>
           </div>
-          <button
-            onClick={scan}
-            disabled={scanning}
-            className="bg-[#8aebff]/10 border border-[#8aebff]/40 text-[#8aebff] hover:bg-[#8aebff] hover:text-[#00363e] px-4 py-2.5 rounded-lg text-sm font-bold flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50"
-          >
-            <RefreshCw className={`w-4.5 h-4.5 ${scanning ? "animate-spin" : ""}`} />
-            {scanning ? "SCANNING…" : "SCAN NOW"}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={togglePulse}
+              className={`px-4 py-2.5 rounded-lg text-sm font-bold flex items-center gap-2 transition-all cursor-pointer border ${pulseOpen ? "bg-[#a3e635]/15 border-[#a3e635]/40 text-[#a3e635]" : "bg-white/5 border-white/10 text-[#bbc9cd] hover:bg-white/10"}`}
+              title="Cross-source pulse: Trend Lab ideas + your influencer feed in one ranked view"
+            >
+              <Activity className="w-4.5 h-4.5" /> PULSE
+            </button>
+            <button
+              onClick={scan}
+              disabled={scanning}
+              className="bg-[#8aebff]/10 border border-[#8aebff]/40 text-[#8aebff] hover:bg-[#8aebff] hover:text-[#00363e] px-4 py-2.5 rounded-lg text-sm font-bold flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50"
+            >
+              <RefreshCw className={`w-4.5 h-4.5 ${scanning ? "animate-spin" : ""}`} />
+              {scanning ? "SCANNING…" : "SCAN NOW"}
+            </button>
+          </div>
         </div>
+
+        {/* Unified cross-source pulse */}
+        {pulseOpen && (
+          <div className="mt-5 rounded-xl border border-[#a3e635]/20 bg-[#a3e635]/[0.03] p-4">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-[11px] font-mono uppercase tracking-widest text-[#a3e635] flex items-center gap-1.5"><Activity className="w-3.5 h-3.5" /> What's hot — ideas + creators</span>
+              <button onClick={loadPulse} className="text-[10px] font-mono text-[#859397] hover:text-[#a3e635] cursor-pointer flex items-center gap-1"><RefreshCw className={`w-3 h-3 ${pulseLoading ? "animate-spin" : ""}`} /> refresh</button>
+            </div>
+            {pulseLoading ? (
+              <p className="text-[11px] font-mono text-[#859397] py-4 text-center">Loading pulse…</p>
+            ) : pulse.length === 0 ? (
+              <p className="text-[11px] font-mono text-[#859397] py-4 text-center">No signals yet — run a Trend scan or sync your influencer feeds.</p>
+            ) : (
+              <div className="space-y-1.5 max-h-[420px] overflow-y-auto">
+                {pulse.map((it, i) => (
+                  <div key={i} className="flex items-start gap-2.5 p-2.5 rounded-lg bg-white/[0.02] border border-white/5 hover:border-white/15 transition-colors group">
+                    <span className={`mt-0.5 shrink-0 w-6 h-6 rounded flex items-center justify-center ${it.type === "idea" ? "bg-[#8aebff]/10 text-[#8aebff]" : "bg-[#a3e635]/10 text-[#a3e635]"}`} title={it.type}>
+                      {it.type === "idea" ? <Lightbulb className="w-3.5 h-3.5" /> : <Radio className="w-3.5 h-3.5" />}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      {it.url ? (
+                        <a href={it.url} target="_blank" rel="noreferrer" className="text-[12px] text-[#dfe2f3] font-medium group-hover:text-[#a3e635] flex items-start gap-1"><span className="min-w-0">{it.title}</span><ExternalLink className="w-3 h-3 opacity-40 shrink-0 mt-0.5" /></a>
+                      ) : (
+                        <p className="text-[12px] text-[#dfe2f3] font-medium">{it.title}</p>
+                      )}
+                      {it.summary && <p className="text-[10px] text-[#859397] leading-relaxed mt-0.5 line-clamp-1">{it.summary}</p>}
+                      <span className="text-[9px] font-mono text-[#5c6a6d] uppercase">{it.source}</span>
+                    </div>
+                    <span className="shrink-0 text-[10px] font-mono font-bold text-[#8aebff] mt-0.5">{it.score}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Stats + filters */}
         <div className="mt-5 flex items-center gap-2 flex-wrap font-mono text-[10px]">

@@ -53,6 +53,7 @@ Gmail & Google Calendar APIs · Web Push. Deployed on Render (free tier).
 - **`networking_crm.py`** — Thin Networking CRM — track the people behind the applications.
 - **`pattern_learning.py`** — Pattern Learning Agent — self-contained skill module.
 - **`pdf_import.py`** — PDF Import — self-contained skill module.
+- **`people_watch_agent.py`** — People Watch — turns a Networking CRM contact into a watchable feed.
 - **`profile_freshness.py`** — Profile-Freshness Nudge — keep your shop-window current.
 - **`relevance.py`** — Shared LLM relevance ranker — the reusable "brain" behind every content watcher.
 - **`reminders.py`** — Reminders Agent — self-contained skill module.
@@ -78,6 +79,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `6711281` feat(company-watch): slice 1b — news on Kanban cards + interview-prep briefs _(2026-07-13)_
 - `b869f49` feat(jobs): declutter the Kanban — compact cards, overflow menu, board filters _(2026-07-13)_
 - `5b919f4` feat(watchers): shared relevance engine + Company Watch + "Watch these" in Daily _(2026-07-13)_
 - `1c2e3df` feat(influencer): group feed by channel (collapsible) + assign domain on manual add _(2026-07-13)_
@@ -89,7 +91,6 @@ npm install && npm run build     # served by the engine at /console
 - `c25ce59` feat(daily): visual Deep Dive + interactive Go Deeper; fix in-browser Run hang _(2026-07-08)_
 - `253d97a` feat(daily): interactive study flow — richer Deep Dive, chatty Go Deeper, no code dupes _(2026-07-08)_
 - `3c735f3` fix(daily): Turso-safe Go-Deeper + Deep Dive explainer + 4-step study hint _(2026-07-08)_
-- `66df91b` fix(daily): Briefing shows lesson prose only — strip news list + legacy project scaffolding _(2026-07-08)_
 <!-- /AUTO:changelog -->
 
 ---

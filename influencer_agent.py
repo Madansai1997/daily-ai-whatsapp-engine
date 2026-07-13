@@ -36,11 +36,16 @@ async def _ensure_tables(db):
         is_read INTEGER DEFAULT 0,
         published_at TEXT,
         domain TEXT DEFAULT '',
+        contact_id INTEGER,
         seen_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-    try:
-        await db.execute("ALTER TABLE influencer_posts ADD COLUMN domain TEXT DEFAULT ''")
-    except Exception:
-        pass
+    for _ddl in (
+        "ALTER TABLE influencer_posts ADD COLUMN domain TEXT DEFAULT ''",
+        "ALTER TABLE influencer_posts ADD COLUMN contact_id INTEGER",
+    ):
+        try:
+            await db.execute(_ddl)
+        except Exception:
+            pass
 
 
 async def fetch_instagram_posts(handle: str) -> list:
@@ -229,9 +234,10 @@ async def _scrape(platform: str, handle: str, yt_content: str = "all") -> list:
     return []
 
 
-async def store_new_posts(db, platform: str, handle: str, name: str, posts: list, domain: str = "") -> list:
+async def store_new_posts(db, platform: str, handle: str, name: str, posts: list, domain: str = "", contact_id=None) -> list:
     """Insert posts that haven't been seen before into influencer_posts; return only the new ones.
-    influencer_posts (post_id PK) doubles as the dedup ledger AND the persistent feed."""
+    influencer_posts (post_id PK) doubles as the dedup ledger AND the persistent feed. A non-null
+    contact_id marks a People-Watch post (a networking contact's feed), kept OUT of the creator feed."""
     new_posts = []
     for post in posts:
         post_id = post["post_id"]
@@ -240,9 +246,9 @@ async def store_new_posts(db, platform: str, handle: str, name: str, posts: list
         if row:
             continue
         await db.execute(
-            "INSERT INTO influencer_posts (post_id, platform, handle, name, title, url, published_at, domain) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (post_id, platform, handle, name, post.get("text", ""), post.get("url", ""), post.get("published_at", ""), domain or ""),
+            "INSERT INTO influencer_posts (post_id, platform, handle, name, title, url, published_at, domain, contact_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (post_id, platform, handle, name, post.get("text", ""), post.get("url", ""), post.get("published_at", ""), domain or "", contact_id),
         )
         new_posts.append({**post, "name": name, "platform": platform})
     return new_posts
@@ -466,13 +472,13 @@ async def get_feed(limit: int = 60, only_relevant: bool = True, domain: str = ""
     async with aiosqlite.connect(DB_PATH) as db:
         await _ensure_tables(db)
         db.row_factory = aiosqlite.Row
-        clauses, params = [], []
+        clauses, params = ["contact_id IS NULL"], []  # creator feed only; People-Watch posts are separate
         if only_relevant:
             clauses.append("relevant = 1")
         if domain:
             clauses.append("domain = ?")
             params.append(domain)
-        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        where = "WHERE " + " AND ".join(clauses)
         params.append(limit)
         cursor = await db.execute(
             f"SELECT post_id, platform, handle, name, title, url, relevant, relevance_note, "
@@ -488,7 +494,7 @@ async def get_unread_count() -> int:
     """Relevant, unread posts — drives the nav badge."""
     async with aiosqlite.connect(DB_PATH) as db:
         await _ensure_tables(db)
-        cursor = await db.execute("SELECT COUNT(*) FROM influencer_posts WHERE is_read = 0 AND relevant = 1")
+        cursor = await db.execute("SELECT COUNT(*) FROM influencer_posts WHERE is_read = 0 AND relevant = 1 AND contact_id IS NULL")
         row = await cursor.fetchone()
         return int(row[0]) if row else 0
 
@@ -504,7 +510,7 @@ async def mark_feed_read(post_ids=None) -> int:
                 n += 1
             await db.commit()
             return n
-        await db.execute("UPDATE influencer_posts SET is_read = 1 WHERE relevant = 1")
+        await db.execute("UPDATE influencer_posts SET is_read = 1 WHERE relevant = 1 AND contact_id IS NULL")
         await db.commit()
         return -1
 
@@ -516,7 +522,7 @@ async def get_recent_for_daily(limit: int = 5) -> list:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT name, platform, title, url, relevance_note FROM influencer_posts "
-            "WHERE relevant = 1 AND is_read = 0 ORDER BY seen_at DESC, rowid DESC LIMIT ?",
+            "WHERE relevant = 1 AND is_read = 0 AND contact_id IS NULL ORDER BY seen_at DESC, rowid DESC LIMIT ?",
             (limit,),
         )
         rows = await cursor.fetchall()

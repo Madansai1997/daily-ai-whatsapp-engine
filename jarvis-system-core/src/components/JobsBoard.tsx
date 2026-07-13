@@ -16,6 +16,7 @@ import {
   SlidersHorizontal,
   Eye,
   Newspaper,
+  Radio,
   Upload,
   ClipboardCheck,
   Gauge,
@@ -334,6 +335,12 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
   const [activeContact, setActiveContact] = useState<any | null>(null); // null=list, {id:null}=new, obj=edit
   const [contactDraft, setContactDraft] = useState({ ...emptyContact });
   const [contactSaving, setContactSaving] = useState(false);
+  // People Watch — watch a contact's free feeds → networking nudges
+  const [contactFeeds, setContactFeeds] = useState<any[]>([]);
+  const [feedForm, setFeedForm] = useState({ platform: "rss", handle: "", name: "" });
+  const [feedBusy, setFeedBusy] = useState(false);
+  const [feedErr, setFeedErr] = useState("");
+  const [nudges, setNudges] = useState<any[]>([]);
 
   // Voice daily standup (LLM briefing + browser TTS, optional Gemini natural voice)
   const [standupOpen, setStandupOpen] = useState(false);
@@ -664,18 +671,46 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
     if (Array.isArray(data?.relationships)) setContactRels(data.relationships);
   };
 
+  const loadNudges = async () => {
+    try { const d = await fetch("/api/contacts/nudges", { cache: "no-store" }).then((r) => r.json()); setNudges(Array.isArray(d) ? d : []); } catch { setNudges([]); }
+  };
+
   const openNetwork = async () => {
     setNetworkOpen(true);
     setActiveContact(null);
     setContactsLoading(true);
-    try { await loadContacts(); } catch { setContacts([]); } finally { setContactsLoading(false); }
+    try { await loadContacts(); await loadNudges(); } catch { setContacts([]); } finally { setContactsLoading(false); }
+  };
+
+  const loadContactFeeds = async (cid: number) => {
+    try { const d = await fetch(`/api/contacts/${cid}/feeds`, { cache: "no-store" }).then((r) => r.json()); setContactFeeds(Array.isArray(d) ? d : []); } catch { setContactFeeds([]); }
   };
 
   const editContact = (c: any) => {
     setActiveContact(c);
     setContactDraft({ name: c.name || "", role: c.role || "", company: c.company || "", email: c.email || "", linkedin: c.linkedin || "", relationship: c.relationship || "recruiter", follow_up_days: c.follow_up_days || 14, notes: c.notes || "" });
+    setContactFeeds([]); setFeedForm({ platform: "rss", handle: "", name: "" }); setFeedErr("");
+    if (c.id) loadContactFeeds(c.id);
   };
-  const newContact = () => { setActiveContact({ id: null }); setContactDraft({ ...emptyContact }); };
+  const newContact = () => { setActiveContact({ id: null }); setContactDraft({ ...emptyContact }); setContactFeeds([]); };
+
+  const addContactFeed = async () => {
+    if (!activeContact?.id || !feedForm.handle.trim()) { setFeedErr("Feed URL / channel required."); return; }
+    setFeedBusy(true); setFeedErr("");
+    try {
+      const res = await fetch(`/api/contacts/${activeContact.id}/feeds`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(feedForm) });
+      const d = await res.json();
+      if (!res.ok || !d?.ok) throw new Error(d?.result || "Failed to add feed");
+      setFeedForm({ platform: "rss", handle: "", name: "" });
+      await loadContactFeeds(activeContact.id);
+    } catch (e) { setFeedErr(e instanceof Error ? e.message : String(e)); } finally { setFeedBusy(false); }
+  };
+  const deleteContactFeed = async (fid: number) => {
+    try { await fetch(`/api/contacts/feeds/${fid}/delete`, { method: "POST" }); if (activeContact?.id) await loadContactFeeds(activeContact.id); } catch { /* ignore */ }
+  };
+  const dismissNudge = async (postId: string) => {
+    try { await fetch(`/api/contacts/nudges/${encodeURIComponent(postId)}/dismiss`, { method: "POST" }); await loadNudges(); } catch { /* ignore */ }
+  };
 
   const saveContact = async () => {
     setContactSaving(true);
@@ -3776,6 +3811,20 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                 </div>
                 <button onClick={() => setNetworkOpen(false)} aria-label="Close" className="p-2 hover:bg-white/5 text-[#bbc9cd] hover:text-[#ffd6a3] rounded-full border border-white/5 cursor-pointer"><X className="w-5 h-5" /></button>
               </div>
+              {nudges.length > 0 && (
+                <div className="px-5 py-2.5 border-b border-[#a3e635]/15 bg-[#a3e635]/5 max-h-32 overflow-y-auto">
+                  <div className="flex items-center gap-1.5 mb-1.5"><Sparkles className="w-3.5 h-3.5 text-[#a3e635]" /><span className="text-[10px] font-mono uppercase tracking-widest text-[#a3e635]">{nudges.length} networking nudge{nudges.length > 1 ? "s" : ""} · your contacts just posted</span></div>
+                  <div className="space-y-1">
+                    {nudges.slice(0, 6).map((n) => (
+                      <div key={n.post_id} className="flex items-center gap-2 text-[11px] font-mono group">
+                        <span className="text-[#ffd6a3] shrink-0">{n.contact_name}:</span>
+                        <a href={n.url || "#"} target="_blank" rel="noreferrer" className="text-[#dfe2f3] hover:text-[#a3e635] truncate flex-1" title={n.relevance_note || n.title}>{n.title}</a>
+                        <button onClick={() => dismissNudge(n.post_id)} title="Dismiss" className="text-[#859397] hover:text-[#ffb4ab] opacity-0 group-hover:opacity-100 shrink-0 cursor-pointer"><X className="w-3 h-3" /></button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="flex-1 flex min-h-0">
                 {/* list */}
                 <div className="w-72 shrink-0 border-r border-white/5 flex flex-col">
@@ -3835,9 +3884,39 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                       </div>
                       <div>
                         <label className="text-[10px] font-mono uppercase tracking-widest text-[#859397]">Notes</label>
-                        <textarea value={contactDraft.notes} onChange={(e) => setContactDraft({ ...contactDraft, notes: e.target.value })} rows={4}
+                        <textarea value={contactDraft.notes} onChange={(e) => setContactDraft({ ...contactDraft, notes: e.target.value })} rows={3}
                           className="w-full mt-1 bg-white/5 border border-white/10 rounded px-3 py-2 text-sm text-[#dfe2f3] resize-none focus:outline-none focus:border-[#ffd6a3]/40" />
                       </div>
+
+                      {/* People Watch — watch this contact's free feeds (RSS/YouTube; no LinkedIn) */}
+                      {activeContact?.id && (
+                        <div className="pt-1 border-t border-white/5">
+                          <label className="text-[10px] font-mono uppercase tracking-widest text-[#a3e635] flex items-center gap-1"><Radio className="w-3 h-3" /> Watch feeds</label>
+                          <p className="text-[9px] font-mono text-[#859397] mt-0.5 mb-2">Get a nudge when they post. RSS / blog / Substack / YouTube only — no LinkedIn.</p>
+                          {contactFeeds.length > 0 && (
+                            <div className="space-y-1 mb-2">
+                              {contactFeeds.map((f) => (
+                                <div key={f.id} className="flex items-center gap-2 text-[11px] font-mono bg-white/5 rounded px-2 py-1">
+                                  <span className="text-[#8aebff] uppercase text-[9px] shrink-0">{f.platform}</span>
+                                  <span className="text-[#bbc9cd] truncate flex-1">{f.name || f.handle}</span>
+                                  <button onClick={() => deleteContactFeed(f.id)} className="text-[#859397] hover:text-[#ffb4ab] cursor-pointer shrink-0"><Trash2 className="w-3 h-3" /></button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          <div className="flex items-center gap-1.5">
+                            <select value={feedForm.platform} onChange={(e) => setFeedForm({ ...feedForm, platform: e.target.value })} className="bg-white/5 border border-white/10 rounded px-2 py-1.5 text-[11px] font-mono text-[#bbc9cd] focus:outline-none focus:border-[#a3e635]/40 cursor-pointer">
+                              <option value="rss" className="bg-[#0a0e1a]">RSS</option>
+                              <option value="youtube" className="bg-[#0a0e1a]">YouTube</option>
+                            </select>
+                            <input value={feedForm.handle} onChange={(e) => setFeedForm({ ...feedForm, handle: e.target.value })} placeholder={feedForm.platform === "youtube" ? "@handle or channel ID" : "feed URL"}
+                              className="flex-1 bg-white/5 border border-white/10 rounded px-2 py-1.5 text-[11px] font-mono text-[#dfe2f3] placeholder:text-[#859397]/50 focus:outline-none focus:border-[#a3e635]/40" />
+                            <button onClick={addContactFeed} disabled={feedBusy} className="px-2.5 py-1.5 rounded text-[11px] font-bold font-mono bg-[#a3e635]/10 border border-[#a3e635]/30 text-[#a3e635] hover:bg-[#a3e635]/20 cursor-pointer disabled:opacity-50 shrink-0">{feedBusy ? "…" : "WATCH"}</button>
+                          </div>
+                          {feedErr && <p className="text-[10px] font-mono text-[#ffb4ab] mt-1">{feedErr}</p>}
+                        </div>
+                      )}
+
                       <div className="flex items-center gap-2 pt-1">
                         <button onClick={saveContact} disabled={contactSaving} className="px-4 py-2 rounded-lg text-sm font-bold bg-[#ffd6a3] hover:bg-[#ffe0b8] text-[#0a0e1a] cursor-pointer disabled:opacity-50">{contactSaving ? "SAVING…" : "SAVE"}</button>
                         {activeContact?.id && <button onClick={() => markContacted(activeContact)} className="px-4 py-2 rounded-lg text-sm font-bold bg-[#5eead4]/10 border border-[#5eead4]/30 text-[#5eead4] hover:bg-[#5eead4]/20 cursor-pointer">Mark contacted today</button>}
