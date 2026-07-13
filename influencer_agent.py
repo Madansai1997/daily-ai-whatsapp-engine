@@ -34,7 +34,12 @@ async def _ensure_tables(db):
         relevance_note TEXT,
         is_read INTEGER DEFAULT 0,
         published_at TEXT,
+        domain TEXT DEFAULT '',
         seen_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+    try:
+        await db.execute("ALTER TABLE influencer_posts ADD COLUMN domain TEXT DEFAULT ''")
+    except Exception:
+        pass
 
 
 async def fetch_instagram_posts(handle: str) -> list:
@@ -115,8 +120,12 @@ async def fetch_twitter_tweets(handle: str) -> list:
         return []
 
 
-async def fetch_youtube_videos(channel_id: str) -> list:
-    """Fetch recent YouTube video titles via the public RSS feed (free, no API key)."""
+async def fetch_youtube_videos(channel_id: str, content_filter: str = "all") -> list:
+    """Fetch recent YouTube uploads via the public RSS feed (free, no API key).
+
+    content_filter: 'videos' (skip Shorts), 'shorts' (only Shorts), or 'all' (both).
+    The feed's <link href> distinguishes them — Shorts use /shorts/<id>, long-form uses /watch?v=."""
+    content_filter = (content_filter or "all").lower()
     url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -139,6 +148,12 @@ async def fetch_youtube_videos(channel_id: str) -> list:
                 vid_title = title.text if title is not None else ""
                 vid_url = link.attrib.get("href", "") if link is not None else ""
                 vid_pub = published.text if published is not None else ""
+
+                is_short = "/shorts/" in vid_url
+                if content_filter == "videos" and is_short:
+                    continue
+                if content_filter == "shorts" and not is_short:
+                    continue
 
                 if vid_id:
                     videos.append({
@@ -199,7 +214,7 @@ async def fetch_rss(feed_url: str) -> list:
         return []
 
 
-async def _scrape(platform: str, handle: str) -> list:
+async def _scrape(platform: str, handle: str, yt_content: str = "all") -> list:
     """Dispatch to the right source for a platform. Returns raw posts (may be empty)."""
     platform = (platform or "").lower()
     if platform == "instagram":
@@ -207,13 +222,13 @@ async def _scrape(platform: str, handle: str) -> list:
     if platform in ("twitter", "x"):
         return await fetch_twitter_tweets(handle)
     if platform == "youtube":
-        return await fetch_youtube_videos(handle)
+        return await fetch_youtube_videos(handle, yt_content)
     if platform == "rss":
         return await fetch_rss(handle)
     return []
 
 
-async def store_new_posts(db, platform: str, handle: str, name: str, posts: list) -> list:
+async def store_new_posts(db, platform: str, handle: str, name: str, posts: list, domain: str = "") -> list:
     """Insert posts that haven't been seen before into influencer_posts; return only the new ones.
     influencer_posts (post_id PK) doubles as the dedup ledger AND the persistent feed."""
     new_posts = []
@@ -224,9 +239,9 @@ async def store_new_posts(db, platform: str, handle: str, name: str, posts: list
         if row:
             continue
         await db.execute(
-            "INSERT INTO influencer_posts (post_id, platform, handle, name, title, url, published_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (post_id, platform, handle, name, post.get("text", ""), post.get("url", ""), post.get("published_at", "")),
+            "INSERT INTO influencer_posts (post_id, platform, handle, name, title, url, published_at, domain) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (post_id, platform, handle, name, post.get("text", ""), post.get("url", ""), post.get("published_at", ""), domain or ""),
         )
         new_posts.append({**post, "name": name, "platform": platform})
     return new_posts
@@ -261,11 +276,13 @@ async def rank_relevance(call_llm_fn, posts: list) -> list:
         listing += f"{i}. [{p.get('platform','')}] {p.get('name','')}: {p.get('text','')[:220]}\n"
 
     system = (
-        "You triage a social/RSS feed for Madan. His interests: " + INTERESTS + ". "
-        "For each numbered item decide if it is worth his attention. Reply with ONLY a JSON array; "
-        "one object per item IN THE SAME ORDER, shaped {\"i\": <index>, \"keep\": true|false, "
-        "\"why\": \"<max 12 words on why it matters, or empty>\"}. Keep items that are substantive "
-        "(launches, research, strong takes, career-relevant); drop pure promo, giveaways, and filler."
+        "You curate a feed for Madan. His interests: " + INTERESTS + ". "
+        "Judge each item by its SUBJECT/TOPIC ONLY — ignore clickbait wording, hype, emojis and "
+        "promotional tone. A hyped or sensational title about AI, LLMs, data, tech or career is "
+        "STILL relevant and should be kept. Drop an item ONLY if its subject is clearly unrelated "
+        "to his interests (e.g. cooking, sports, pure unrelated giveaways). When unsure, KEEP it. "
+        "Reply with ONLY a JSON array, one object per item IN THE SAME ORDER, shaped "
+        "{\"i\": <index>, \"keep\": true|false, \"why\": \"<max 10 words naming the topic, or empty>\"}."
     )
     try:
         raw = await call_llm_fn(system, listing)
@@ -303,7 +320,10 @@ async def get_watched_influencers() -> list:
     """Retrieve the list of watched influencers from the database."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute("SELECT id, handle, platform, name, added_at FROM watched_influencers")
+        cursor = await db.execute(
+            "SELECT id, handle, platform, name, COALESCE(yt_content, 'all') AS yt_content, "
+            "COALESCE(domain, '') AS domain, added_at FROM watched_influencers"
+        )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
@@ -326,8 +346,8 @@ async def run_influencer_watcher_digest(call_llm_fn) -> str:
             name = influencer["name"] or handle
 
             print(f"🔍 Scraping {name} on {platform}...")
-            raw_posts = await _scrape(platform, handle)
-            new_posts = await store_new_posts(db, platform, handle, name, raw_posts)
+            raw_posts = await _scrape(platform, handle, influencer.get("yt_content", "all"))
+            new_posts = await store_new_posts(db, platform, handle, name, raw_posts, influencer.get("domain", ""))
             if new_posts:
                 print(f"✨ Found {len(new_posts)} new posts for {name}.")
                 collected.extend(new_posts)
@@ -412,7 +432,10 @@ async def run_single_influencer_sync(inf_id: int, call_llm_fn) -> str:
     async with aiosqlite.connect(DB_PATH) as db:
         await _ensure_tables(db)
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute("SELECT handle, platform, name FROM watched_influencers WHERE id = ?", (inf_id,))
+        cursor = await db.execute(
+            "SELECT handle, platform, name, COALESCE(yt_content, 'all') AS yt_content, "
+            "COALESCE(domain, '') AS domain FROM watched_influencers WHERE id = ?", (inf_id,)
+        )
         row = await cursor.fetchone()
         if not row:
             return "Influencer not found."
@@ -423,13 +446,36 @@ async def run_single_influencer_sync(inf_id: int, call_llm_fn) -> str:
         name = influencer["name"] or handle
 
         print(f"🔍 Scraping single profile: {name} on {platform}...")
-        raw_posts = await _scrape(platform, handle)
-        new_posts = await store_new_posts(db, platform, handle, name, raw_posts)
+        raw_posts = await _scrape(platform, handle, influencer.get("yt_content", "all"))
+        new_posts = await store_new_posts(db, platform, handle, name, raw_posts, influencer.get("domain", ""))
         kept = await _apply_relevance(db, new_posts, call_llm_fn) if new_posts else []
         await db.commit()
 
     if not new_posts:
-        return f"No new updates found for {name} ({platform})."
+        # Nothing new — but re-rank recent stored posts so a re-sync heals stale/over-aggressive
+        # verdicts (e.g. after a filter recalibration). Bounded, on-demand, user-triggered.
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT post_id, platform, name, title FROM influencer_posts WHERE handle = ? "
+                "ORDER BY seen_at DESC, rowid DESC LIMIT 15",
+                (handle,),
+            )
+            rows = [dict(r) for r in await cur.fetchall()]
+            if not rows:
+                return f"No new updates found for {name} ({platform})."
+            reposts = [{"post_id": r["post_id"], "platform": r["platform"], "name": r["name"], "text": r["title"]} for r in rows]
+            verdicts = await rank_relevance(call_llm_fn, reposts)
+            relevant_now = 0
+            for r, v in zip(reposts, verdicts):
+                rel = 1 if v.get("relevant", True) else 0
+                await db.execute(
+                    "UPDATE influencer_posts SET relevant = ?, relevance_note = ? WHERE post_id = ?",
+                    (rel, v.get("note", ""), r["post_id"]),
+                )
+                relevant_now += rel
+            await db.commit()
+        return f"No new posts for {name} — re-checked {len(rows)} recent, {relevant_now} relevant to your interests."
     if not kept:
         return f"Found {len(new_posts)} new post(s) for {name}, but none were relevant to your interests."
 
@@ -455,17 +501,24 @@ async def run_single_influencer_sync(inf_id: int, call_llm_fn) -> str:
 
 # ─────────────────────────── feed read model (console) ───────────────────────────
 
-async def get_feed(limit: int = 60, only_relevant: bool = True) -> list:
-    """Persistent post history for the console feed view, newest first."""
+async def get_feed(limit: int = 60, only_relevant: bool = True, domain: str = "") -> list:
+    """Persistent post history for the console feed view, newest first. Optional domain filter."""
     async with aiosqlite.connect(DB_PATH) as db:
         await _ensure_tables(db)
         db.row_factory = aiosqlite.Row
-        where = "WHERE relevant = 1" if only_relevant else ""
+        clauses, params = [], []
+        if only_relevant:
+            clauses.append("relevant = 1")
+        if domain:
+            clauses.append("domain = ?")
+            params.append(domain)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
         cursor = await db.execute(
             f"SELECT post_id, platform, handle, name, title, url, relevant, relevance_note, "
-            f"is_read, published_at, seen_at FROM influencer_posts {where} "
+            f"is_read, published_at, COALESCE(domain,'') AS domain, seen_at FROM influencer_posts {where} "
             f"ORDER BY seen_at DESC, rowid DESC LIMIT ?",
-            (limit,),
+            tuple(params),
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
@@ -508,3 +561,114 @@ async def get_recent_for_daily(limit: int = 5) -> list:
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
+
+
+# ─────────────────────────── domains + creator discovery ───────────────────────────
+
+async def get_domains() -> list:
+    """Distinct domains currently in use, each with its watched-creator count."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT COALESCE(domain,'') AS domain, COUNT(*) AS n FROM watched_influencers "
+            "WHERE COALESCE(domain,'') != '' GROUP BY domain ORDER BY domain"
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def _existing_handles() -> set:
+    """Channel IDs / handles already watched, so discovery doesn't re-suggest them."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT handle FROM watched_influencers")
+        rows = await cursor.fetchall()
+        return {(r[0] or "").strip().lower() for r in rows}
+
+
+async def _validate_candidate(cand: dict) -> dict | None:
+    """Resolve a suggested @handle to a real channel ID and confirm its RSS returns videos.
+    Drops hallucinated / dead / non-YouTube suggestions. Returns an enriched candidate or None."""
+    handle = (cand.get("handle") or "").strip()
+    name = (cand.get("name") or handle).strip()
+    why = (cand.get("why") or "").strip()
+    if not handle:
+        return None
+    channel_id = await resolve_youtube_channel_id(handle)
+    if not (channel_id.startswith("UC") and len(channel_id) >= 20):
+        return None  # couldn't resolve to a real channel
+    posts = await fetch_youtube_videos(channel_id, "all")
+    if not posts:
+        return None  # channel exists but feed is empty/unreachable
+    return {"name": name, "handle": channel_id, "display_handle": handle, "why": why, "recent": posts[0]["text"][:80]}
+
+
+DISCOVERY_MODE = os.environ.get("INFLUENCER_DISCOVERY_MODE", "llm")  # 'llm' now; 'youtube_api' hook later
+
+
+async def _discover_via_llm(domain: str, call_llm_fn, limit: int) -> list:
+    system = (
+        "You are a YouTube expert curating creators by niche. For the domain given, list the best, "
+        "most active, currently-popular YouTube channels a serious learner should follow. "
+        "Reply with ONLY a JSON array of objects shaped "
+        "{\"name\": \"<channel name>\", \"handle\": \"<exact @handle from youtube.com/@handle>\", "
+        "\"why\": \"<max 12 words>\"}. The handle MUST be the real @handle used in the channel URL. "
+        "If you are not confident of the exact handle, omit that creator rather than guessing."
+    )
+    raw = await call_llm_fn(system, f"Domain: {domain}\nList up to {limit} channels.")
+    arr = _extract_json_array(raw) or []
+    return arr[: limit + 5]  # a few extra to survive validation drops
+
+
+async def discover_creators_for_domain(domain: str, call_llm_fn, limit: int = 15) -> dict:
+    """Suggest ~`limit` real, working YouTube channels for a domain (LLM-curated + validated).
+    Returns {"domain", "candidates": [...]} — candidates are review-ready, none are added yet."""
+    import asyncio
+    domain = (domain or "").strip()
+    if not domain:
+        return {"domain": "", "candidates": []}
+
+    if DISCOVERY_MODE == "youtube_api":
+        # Hook for later: subscriber-ranked results via the YouTube Data API (needs a key).
+        suggestions = await _discover_via_youtube_api(domain, limit)  # noqa: F821 (defined when enabled)
+    else:
+        suggestions = await _discover_via_llm(domain, call_llm_fn, limit)
+
+    existing = await _existing_handles()
+    # Validate concurrently; drop hallucinations, dead channels, and dupes.
+    results = await asyncio.gather(*[_validate_candidate(c) for c in suggestions], return_exceptions=True)
+    seen, candidates = set(), []
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        h = r["handle"].lower()
+        if h in existing or h in seen or (r.get("display_handle", "").strip().lower() in existing):
+            continue
+        seen.add(h)
+        candidates.append(r)
+        if len(candidates) >= limit:
+            break
+    return {"domain": domain, "candidates": candidates}
+
+
+async def bulk_add_creators(domain: str, creators: list, yt_content: str = "videos") -> dict:
+    """Add reviewed creators to a domain as YouTube feeds. Skips dupes. Returns counts."""
+    domain = (domain or "").strip()
+    added, skipped = 0, 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        for c in creators:
+            handle = (c.get("handle") or "").strip()
+            name = (c.get("name") or handle).strip()
+            if not handle:
+                skipped += 1
+                continue
+            try:
+                await db.execute(
+                    "INSERT INTO watched_influencers (handle, platform, name, yt_content, domain) "
+                    "VALUES (?, 'youtube', ?, ?, ?)",
+                    (handle, name, yt_content, domain),
+                )
+                added += 1
+            except aiosqlite.IntegrityError:
+                skipped += 1
+        await db.commit()
+    return {"added": added, "skipped": skipped, "domain": domain}

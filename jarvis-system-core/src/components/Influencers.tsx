@@ -1,14 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { RefreshCw, Plus, X, Trash2, Radio, Youtube, Instagram, Twitter, Rss, CheckCircle2, AlertTriangle, ExternalLink, CheckCheck } from "lucide-react";
+import { RefreshCw, Plus, X, Trash2, Radio, Youtube, Instagram, Twitter, Rss, CheckCircle2, AlertTriangle, ExternalLink, CheckCheck, Compass, Sparkles } from "lucide-react";
 
 interface Influencer {
   id: number;
   handle: string;
   platform: string;
   name: string;
+  yt_content?: string;
+  domain?: string;
   added_at: string;
 }
+
+interface Domain { domain: string; n: number; }
+interface Candidate { name: string; handle: string; display_handle: string; why: string; recent: string; }
 
 interface FeedPost {
   post_id: string;
@@ -17,6 +22,7 @@ interface FeedPost {
   name: string;
   title: string;
   url: string;
+  relevant: number;
   relevance_note: string;
   is_read: number;
   published_at: string;
@@ -34,21 +40,47 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
 
-  const [feed, setFeed] = useState<FeedPost[]>([]);
+  const [posts, setPosts] = useState<FeedPost[]>([]);
   const [feedLoading, setFeedLoading] = useState(true);
+  const [showFiltered, setShowFiltered] = useState(false);
 
-  const emptyForm = { handle: "", platform: "youtube", name: "" };
+  const [domains, setDomains] = useState<Domain[]>([]);
+  const [activeDomain, setActiveDomain] = useState("");
+
+  // Discovery flow (create a domain -> find creators -> review -> add).
+  const [discOpen, setDiscOpen] = useState(false);
+  const [discDomain, setDiscDomain] = useState("");
+  const [discYt, setDiscYt] = useState("videos");
+  const [discLoading, setDiscLoading] = useState(false);
+  const [discCands, setDiscCands] = useState<Candidate[] | null>(null);
+  const [discChecked, setDiscChecked] = useState<Record<string, boolean>>({});
+  const [discMsg, setDiscMsg] = useState("");
+  const [discAdding, setDiscAdding] = useState(false);
+
+  const emptyForm = { handle: "", platform: "youtube", name: "", yt_content: "videos" };
   const [form, setForm] = useState({ ...emptyForm });
 
-  const loadFeed = useCallback(async () => {
+  const loadFeed = useCallback(async (domain = "") => {
     setFeedLoading(true);
     try {
-      const res = await fetch("/api/influencers/feed?limit=40", { cache: "no-store" });
-      if (res.ok) setFeed(await res.json());
+      // Pull everything (all=1); we curate to the relevant subset client-side so the "filtered"
+      // items can be revealed on demand instead of silently vanishing.
+      const q = domain ? `&domain=${encodeURIComponent(domain)}` : "";
+      const res = await fetch(`/api/influencers/feed?all=1&limit=60${q}`, { cache: "no-store" });
+      if (res.ok) setPosts(await res.json());
     } catch {
       /* ignore */
     } finally {
       setFeedLoading(false);
+    }
+  }, []);
+
+  const loadDomains = useCallback(async () => {
+    try {
+      const res = await fetch("/api/influencers/domains", { cache: "no-store" });
+      if (res.ok) setDomains(await res.json());
+    } catch {
+      /* ignore */
     }
   }, []);
 
@@ -67,9 +99,75 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
   useEffect(() => {
     load();
     loadFeed();
-  }, [load, loadFeed]);
+    loadDomains();
+  }, [load, loadFeed, loadDomains]);
 
-  const unread = feed.filter((p) => p.is_read === 0).length;
+  const selectDomain = (d: string) => {
+    setActiveDomain(d);
+    setShowFiltered(false);
+    loadFeed(d);
+  };
+
+  const openDiscover = () => {
+    setDiscOpen(true);
+    setDiscDomain("");
+    setDiscYt("videos");
+    setDiscCands(null);
+    setDiscChecked({});
+    setDiscMsg("");
+  };
+
+  const runDiscover = async () => {
+    if (!discDomain.trim()) { setDiscMsg("Enter a domain first."); return; }
+    setDiscLoading(true);
+    setDiscMsg("");
+    setDiscCands(null);
+    try {
+      const res = await fetch("/api/influencers/discover", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domain: discDomain.trim(), limit: 15 }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) throw new Error(data?.result || `HTTP ${res.status}`);
+      const cands: Candidate[] = data.candidates || [];
+      setDiscCands(cands);
+      setDiscChecked(Object.fromEntries(cands.map((c) => [c.handle, true])));
+      if (cands.length === 0) setDiscMsg("No verifiable channels found — try a broader domain name.");
+    } catch (e) {
+      setDiscMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDiscLoading(false);
+    }
+  };
+
+  const addDiscovered = async () => {
+    const chosen = (discCands || []).filter((c) => discChecked[c.handle]);
+    if (chosen.length === 0) { setDiscMsg("Select at least one creator."); return; }
+    setDiscAdding(true);
+    try {
+      const res = await fetch("/api/influencers/bulk-add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domain: discDomain.trim(), yt_content: discYt, creators: chosen }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) throw new Error(data?.result || `HTTP ${res.status}`);
+      setDiscOpen(false);
+      await load();
+      await loadDomains();
+      setSyncResult(`Added ${data.added} creator(s) to "${discDomain.trim()}". Hit SYNC ALL FEEDS to pull their latest.`);
+    } catch (e) {
+      setDiscMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDiscAdding(false);
+    }
+  };
+
+  const relevant = posts.filter((p) => p.relevant);
+  const filtered = posts.filter((p) => !p.relevant);
+  const visible = showFiltered ? posts : relevant;
+  const unread = relevant.filter((p) => p.is_read === 0).length;
 
   const markAllRead = async () => {
     try {
@@ -78,7 +176,7 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
-      setFeed((f) => f.map((p) => ({ ...p, is_read: 1 })));
+      setPosts((f) => f.map((p) => ({ ...p, is_read: 1 })));
       onRead?.();
     } catch {
       /* ignore */
@@ -92,7 +190,7 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
       const res = await fetch(`/api/influencers/${id}/sync`, { method: "POST" });
       const data = await res.json();
       setSyncResult(res.ok && data?.ok ? (data.result || `No new updates found for ${name}.`) : `Failed to sync updates for ${name}.`);
-      await loadFeed();
+      await loadFeed(activeDomain);
     } catch {
       setSyncResult("Failed to contact backend scraper.");
     } finally {
@@ -115,6 +213,7 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
           handle: form.handle.trim(),
           platform: form.platform,
           name: form.name.trim() || form.handle.trim(),
+          yt_content: form.platform === "youtube" ? form.yt_content : "all",
         }),
       });
       const data = await res.json();
@@ -147,7 +246,7 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
       const res = await fetch("/api/influencers/sync", { method: "POST" });
       const data = await res.json();
       setSyncResult(res.ok && data?.ok ? (data.result || "No new updates found.") : "Scrape completed, but failed to compile summary digest.");
-      await loadFeed();
+      await loadFeed(activeDomain);
     } catch {
       setSyncResult("Failed to contact backend scraper. Make sure the server is running.");
     } finally {
@@ -208,6 +307,45 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
         </div>
       </div>
 
+      {/* ── Domains: auto-discover the top creators in a topic ── */}
+      <div className="glass-panel rounded-xl border border-[#3c494c] p-6 space-y-4">
+        <div className="flex justify-between items-center">
+          <div className="flex items-center gap-2">
+            <Compass className="w-4 h-4 text-[#8aebff]" />
+            <h3 className="text-lg font-bold text-[#dfe2f3]">Domains</h3>
+          </div>
+          <button
+            onClick={openDiscover}
+            className="flex items-center gap-1.5 py-1.5 px-3 bg-[#8aebff]/10 hover:bg-[#8aebff]/20 border border-[#8aebff]/30 text-[#8aebff] rounded-lg text-xs font-mono font-bold cursor-pointer transition-all"
+          >
+            <Sparkles className="w-3.5 h-3.5" /> NEW DOMAIN
+          </button>
+        </div>
+        <p className="text-xs text-[#859397] -mt-1">
+          Name a topic and JARVIS finds & verifies the top YouTube creators in it — then analyzes their uploads.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() => selectDomain("")}
+            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-bold border transition-all cursor-pointer ${activeDomain === "" ? "bg-[#8aebff]/15 border-[#8aebff]/50 text-[#8aebff]" : "border-white/10 text-[#859397] hover:text-[#dfe2f3]"}`}
+          >
+            All
+          </button>
+          {domains.map((d) => (
+            <button
+              key={d.domain}
+              onClick={() => selectDomain(d.domain)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-mono font-bold border transition-all cursor-pointer ${activeDomain === d.domain ? "bg-[#8aebff]/15 border-[#8aebff]/50 text-[#8aebff]" : "border-white/10 text-[#859397] hover:text-[#dfe2f3]"}`}
+            >
+              {d.domain} <span className="opacity-60">· {d.n}</span>
+            </button>
+          ))}
+          {domains.length === 0 && (
+            <span className="text-[11px] text-[#5c6a6d] font-mono py-1.5">No domains yet — create one to auto-build a feed.</span>
+          )}
+        </div>
+      </div>
+
       {/* Scraped Sync Output Block */}
       <AnimatePresence>
         {syncResult && (
@@ -248,39 +386,62 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
           <div className="text-center py-10 text-[#859397] font-mono text-sm">
             <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 opacity-50" /> Loading feed…
           </div>
-        ) : feed.length === 0 ? (
+        ) : posts.length === 0 ? (
           <div className="text-center py-10 text-[#859397] text-xs">
             No updates yet. Add a feed below and hit <span className="text-[#8aebff]">SYNC ALL FEEDS</span> to pull the latest.
           </div>
         ) : (
-          <div className="space-y-2">
-            {feed.map((p) => (
-              <a
-                key={p.post_id}
-                href={p.url || "#"}
-                target={p.url ? "_blank" : undefined}
-                rel="noreferrer"
-                className={`flex items-start gap-3 p-3 rounded-lg border transition-all group ${platformStyle(p.platform)} ${p.is_read === 0 ? "" : "opacity-60"} hover:opacity-100 hover:border-white/20`}
-              >
-                {p.is_read === 0 && <span className="w-2 h-2 rounded-full bg-[#a3e635] mt-1.5 shrink-0" title="unread" />}
-                <span className="mt-0.5 shrink-0">{platformIcon(p.platform, "w-3.5 h-3.5")}</span>
-                <div className="min-w-0 flex-1">
-                  <p className="text-[13px] text-[#dfe2f3] font-medium leading-snug group-hover:text-[#8aebff] flex items-start gap-1">
-                    <span className="min-w-0">{p.title || p.url}</span>
-                    {p.url && <ExternalLink className="w-3 h-3 opacity-40 shrink-0 mt-1" />}
-                  </p>
-                  <div className="flex items-center gap-2 mt-1 flex-wrap">
-                    <span className="text-[10px] font-mono text-[#859397]">{p.name}</span>
-                    {p.relevance_note && (
-                      <span className="text-[10px] font-mono text-[#a3e635]/80 bg-[#a3e635]/10 px-1.5 py-0.5 rounded">
-                        {p.relevance_note}
-                      </span>
-                    )}
+          <>
+            <div className="space-y-2">
+              {visible.map((p) => (
+                <a
+                  key={p.post_id}
+                  href={p.url || "#"}
+                  target={p.url ? "_blank" : undefined}
+                  rel="noreferrer"
+                  className={`flex items-start gap-3 p-3 rounded-lg border transition-all group ${platformStyle(p.platform)} ${p.relevant ? "" : "opacity-45 grayscale-[0.4]"} ${p.is_read === 0 && p.relevant ? "" : "opacity-60"} hover:opacity-100 hover:border-white/20`}
+                >
+                  {p.is_read === 0 && p.relevant ? (
+                    <span className="w-2 h-2 rounded-full bg-[#a3e635] mt-1.5 shrink-0" title="unread" />
+                  ) : (
+                    <span className="w-2 h-2 mt-1.5 shrink-0" />
+                  )}
+                  <span className="mt-0.5 shrink-0">{platformIcon(p.platform, "w-3.5 h-3.5")}</span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[13px] text-[#dfe2f3] font-medium leading-snug group-hover:text-[#8aebff] flex items-start gap-1">
+                      <span className="min-w-0">{p.title || p.url}</span>
+                      {p.url && <ExternalLink className="w-3 h-3 opacity-40 shrink-0 mt-1" />}
+                    </p>
+                    <div className="flex items-center gap-2 mt-1 flex-wrap">
+                      <span className="text-[10px] font-mono text-[#859397]">{p.name}</span>
+                      {p.relevant && p.relevance_note && (
+                        <span className="text-[10px] font-mono text-[#a3e635]/80 bg-[#a3e635]/10 px-1.5 py-0.5 rounded">
+                          {p.relevance_note}
+                        </span>
+                      )}
+                      {!p.relevant && (
+                        <span className="text-[10px] font-mono text-[#859397]/70 bg-white/5 px-1.5 py-0.5 rounded">off-topic</span>
+                      )}
+                    </div>
                   </div>
-                </div>
-              </a>
-            ))}
-          </div>
+                </a>
+              ))}
+            </div>
+
+            {relevant.length === 0 && !showFiltered && filtered.length > 0 && (
+              <p className="text-center text-[11px] text-[#859397] pt-1">
+                Nothing ranked as relevant to your interests yet.
+              </p>
+            )}
+            {filtered.length > 0 && (
+              <button
+                onClick={() => setShowFiltered((s) => !s)}
+                className="w-full text-center text-[11px] font-mono text-[#8aebff]/80 hover:text-[#8aebff] py-1.5 cursor-pointer transition-colors"
+              >
+                {showFiltered ? "Hide filtered" : `Show ${filtered.length} filtered (off-topic) →`}
+              </button>
+            )}
+          </>
         )}
       </div>
 
@@ -323,6 +484,11 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
                   <div className="flex items-center gap-2">
                     {platformIcon(item.platform)}
                     <span className="font-bold text-sm text-[#dfe2f3] truncate block">{item.name}</span>
+                    {item.platform.toLowerCase() === "youtube" && item.yt_content && item.yt_content !== "all" && (
+                      <span className="text-[9px] font-mono text-[#859397] bg-white/5 px-1.5 py-0.5 rounded shrink-0 uppercase">
+                        {item.yt_content === "videos" ? "videos" : "shorts"}
+                      </span>
+                    )}
                   </div>
                   <span className="text-xs font-mono text-[#859397] block truncate">{item.handle}</span>
                 </div>
@@ -408,6 +574,24 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
                   </div>
                 )}
 
+                {form.platform === "youtube" && (
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-mono text-[#859397] tracking-wider uppercase block">Content type</label>
+                    <select
+                      value={form.yt_content}
+                      onChange={(e) => setForm({ ...form, yt_content: e.target.value })}
+                      className="w-full py-2 px-3 bg-[#1b1f2c]/85 border border-[#3c494c] rounded-lg text-sm text-[#dfe2f3] font-mono focus:border-[#8aebff] outline-none"
+                    >
+                      <option value="videos">Full videos only</option>
+                      <option value="shorts">Shorts only</option>
+                      <option value="all">Both</option>
+                    </select>
+                    <span className="text-[9px] text-[#859397] font-mono mt-1 block">
+                      Skips Shorts by default — flip to include the channel's rapid-fire clips.
+                    </span>
+                  </div>
+                )}
+
                 <div className="space-y-1">
                   <label className="text-[10px] font-mono text-[#859397] tracking-wider uppercase block">
                     {form.platform === "youtube" ? "YouTube Handle or Channel ID" : form.platform === "rss" ? "Feed URL" : "Username Handle"}
@@ -454,6 +638,129 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
                   {saving ? "SAVING..." : "REGISTER FEED"}
                 </button>
               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Discover-a-Domain Modal */}
+      <AnimatePresence>
+        {discOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              onClick={() => !discLoading && !discAdding && setDiscOpen(false)}
+              className="absolute inset-0 bg-[#0a0e1a]/80 backdrop-blur-sm"
+            ></motion.div>
+
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="relative w-full max-w-lg p-6 glass-panel border border-[#3c494c] rounded-xl shadow-2xl space-y-5 max-h-[85vh] overflow-y-auto"
+            >
+              <div className="flex justify-between items-center border-b border-white/10 pb-3">
+                <h4 className="text-md font-bold text-[#dfe2f3] flex items-center gap-2">
+                  <Compass className="w-4 h-4 text-[#8aebff]" /> Build a Domain Feed
+                </h4>
+                <button onClick={() => !discLoading && !discAdding && setDiscOpen(false)} className="p-1 hover:bg-white/5 rounded cursor-pointer transition-colors">
+                  <X className="w-4 h-4 text-[#859397]" />
+                </button>
+              </div>
+
+              <div className="flex gap-2 items-end">
+                <div className="flex-1 space-y-1">
+                  <label className="text-[10px] font-mono text-[#859397] tracking-wider uppercase block">Domain / topic</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. AI & LLMs, Data Analytics, Startup growth"
+                    value={discDomain}
+                    onChange={(e) => setDiscDomain(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !discLoading) runDiscover(); }}
+                    className="w-full py-2 px-3 bg-[#1b1f2c]/85 border border-[#3c494c] rounded-lg text-sm text-[#dfe2f3] font-mono focus:border-[#8aebff] outline-none placeholder:text-white/20"
+                  />
+                </div>
+                <button
+                  onClick={runDiscover}
+                  disabled={discLoading}
+                  className="py-2 px-4 bg-[#8aebff]/10 hover:bg-[#8aebff]/20 border border-[#8aebff]/30 text-[#8aebff] rounded-lg text-xs font-mono font-bold cursor-pointer transition-all disabled:opacity-50 flex items-center gap-1.5"
+                >
+                  {discLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                  {discLoading ? "FINDING…" : "FIND CREATORS"}
+                </button>
+              </div>
+
+              {discMsg && (
+                <div className="p-2.5 border border-[#ffd6a3]/25 bg-[#ffd6a3]/5 rounded-lg text-[11px] text-[#ffd6a3] font-mono">{discMsg}</div>
+              )}
+
+              {discLoading && (
+                <div className="text-center py-8 text-[#859397] font-mono text-xs">
+                  <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-3 opacity-50" />
+                  Curating creators & verifying their channels…
+                </div>
+              )}
+
+              {discCands && discCands.length > 0 && (
+                <>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-mono text-[#859397]">
+                      {discCands.filter((c) => discChecked[c.handle]).length}/{discCands.length} selected · verified channels
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <label className="text-[10px] font-mono text-[#859397]">Content</label>
+                      <select
+                        value={discYt}
+                        onChange={(e) => setDiscYt(e.target.value)}
+                        className="py-1 px-2 bg-[#1b1f2c]/85 border border-[#3c494c] rounded text-[11px] text-[#dfe2f3] font-mono focus:border-[#8aebff] outline-none"
+                      >
+                        <option value="videos">Videos only</option>
+                        <option value="shorts">Shorts only</option>
+                        <option value="all">Both</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2 max-h-[38vh] overflow-y-auto pr-1">
+                    {discCands.map((c) => (
+                      <label
+                        key={c.handle}
+                        className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${discChecked[c.handle] ? "border-[#8aebff]/40 bg-[#8aebff]/5" : "border-white/10 bg-white/[0.02] opacity-70"}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={!!discChecked[c.handle]}
+                          onChange={(e) => setDiscChecked((m) => ({ ...m, [c.handle]: e.target.checked }))}
+                          className="mt-1 accent-[#8aebff]"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <Youtube className="w-3.5 h-3.5 text-red-500 shrink-0" />
+                            <span className="text-[13px] font-bold text-[#dfe2f3] truncate">{c.name}</span>
+                            <span className="text-[10px] font-mono text-[#859397] truncate">{c.display_handle}</span>
+                          </div>
+                          {c.why && <p className="text-[11px] text-[#a3e635]/80 mt-0.5">{c.why}</p>}
+                          {c.recent && <p className="text-[10px] font-mono text-[#5c6a6d] mt-0.5 truncate">latest: {c.recent}</p>}
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+
+                  <div className="flex gap-3 justify-end pt-1 border-t border-white/10">
+                    <button onClick={() => setDiscOpen(false)} className="py-2 px-4 bg-white/5 border border-transparent hover:border-white/10 rounded-lg text-xs font-mono text-[#bbc9cd] cursor-pointer transition-all">
+                      CANCEL
+                    </button>
+                    <button
+                      onClick={addDiscovered}
+                      disabled={discAdding}
+                      className="py-2 px-4 bg-[#a3e635]/10 hover:bg-[#a3e635]/20 border border-[#a3e635]/30 text-[#a3e635] rounded-lg text-xs font-mono font-bold cursor-pointer transition-all disabled:opacity-50 flex items-center gap-1.5"
+                    >
+                      {discAdding ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                      ADD {discCands.filter((c) => discChecked[c.handle]).length} CREATOR(S)
+                    </button>
+                  </div>
+                </>
+              )}
             </motion.div>
           </div>
         )}

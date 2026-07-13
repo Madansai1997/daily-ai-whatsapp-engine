@@ -785,8 +785,20 @@ def init_db_tables():
         handle TEXT NOT NULL,
         platform TEXT NOT NULL,
         name TEXT,
+        yt_content TEXT DEFAULT 'all',
+        domain TEXT DEFAULT '',
         added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(handle, platform))''')
+
+    # Migrations for pre-existing tables (yt_content = YouTube type filter; domain = topic grouping).
+    for _col, _ddl in (
+        ("yt_content", "ALTER TABLE watched_influencers ADD COLUMN yt_content TEXT DEFAULT 'all'"),
+        ("domain", "ALTER TABLE watched_influencers ADD COLUMN domain TEXT DEFAULT ''"),
+    ):
+        try:
+            cursor.execute(_ddl)
+        except Exception:
+            pass
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS seen_influencer_posts (
         post_id TEXT PRIMARY KEY,
@@ -807,7 +819,12 @@ def init_db_tables():
         relevance_note TEXT,
         is_read INTEGER DEFAULT 0,
         published_at TEXT,
+        domain TEXT DEFAULT '',
         seen_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+    try:
+        cursor.execute("ALTER TABLE influencer_posts ADD COLUMN domain TEXT DEFAULT ''")
+    except Exception:
+        pass
 
     conn.commit()
     conn.close()
@@ -9200,6 +9217,9 @@ async def api_influencers_add(request: Request):
     platform = body.get("platform", "").strip().lower()
     handle = body.get("handle", "").strip()
     name = body.get("name", "").strip() or handle
+    yt_content = (body.get("yt_content", "all") or "all").strip().lower()
+    if yt_content not in ("all", "videos", "shorts"):
+        yt_content = "all"
 
     if not platform or not handle:
         return JSONResponse({"ok": False, "result": "Platform and handle are required."}, status_code=400)
@@ -9207,12 +9227,14 @@ async def api_influencers_add(request: Request):
     if platform == "youtube":
         from influencer_agent import resolve_youtube_channel_id
         handle = await resolve_youtube_channel_id(handle)
+    else:
+        yt_content = "all"  # only meaningful for YouTube
 
     async with aiosqlite.connect(DB_PATH) as db:
         try:
             await db.execute(
-                "INSERT INTO watched_influencers (handle, platform, name) VALUES (?, ?, ?)",
-                (handle, platform, name)
+                "INSERT INTO watched_influencers (handle, platform, name, yt_content) VALUES (?, ?, ?, ?)",
+                (handle, platform, name, yt_content)
             )
             await db.commit()
             return JSONResponse({"ok": True, "result": f"Added {name} ({platform})"})
@@ -9243,11 +9265,46 @@ async def api_influencers_sync_single(inf_id: int):
 
 
 @app.get("/api/influencers/feed")
-async def api_influencers_feed(limit: int = 60, all: int = 0):
+async def api_influencers_feed(limit: int = 60, all: int = 0, domain: str = ""):
     """Persistent, relevance-ranked post history for the console feed view."""
     from influencer_agent import get_feed
-    posts = await get_feed(limit=limit, only_relevant=(all == 0))
+    posts = await get_feed(limit=limit, only_relevant=(all == 0), domain=domain.strip())
     return JSONResponse(posts)
+
+
+@app.get("/api/influencers/domains")
+async def api_influencers_domains():
+    from influencer_agent import get_domains
+    return JSONResponse(await get_domains())
+
+
+@app.post("/api/influencers/discover")
+async def api_influencers_discover(request: Request):
+    """LLM-curate + validate the top YouTube creators for a domain. Adds nothing — review first."""
+    body = await request.json()
+    domain = (body.get("domain") or "").strip()
+    if not domain:
+        return JSONResponse({"ok": False, "result": "Domain is required."}, status_code=400)
+    limit = int(body.get("limit") or 15)
+    from influencer_agent import discover_creators_for_domain
+    result = await discover_creators_for_domain(domain, call_llm, limit=limit)
+    return JSONResponse({"ok": True, **result})
+
+
+@app.post("/api/influencers/bulk-add")
+async def api_influencers_bulk_add(request: Request):
+    """Add reviewed creators to a domain (from the discovery review step)."""
+    body = await request.json()
+    domain = (body.get("domain") or "").strip()
+    creators = body.get("creators") or []
+    yt_content = (body.get("yt_content") or "videos").strip().lower()
+    if yt_content not in ("all", "videos", "shorts"):
+        yt_content = "videos"
+    if not creators:
+        return JSONResponse({"ok": False, "result": "No creators selected."}, status_code=400)
+    from influencer_agent import bulk_add_creators
+    result = await bulk_add_creators(domain, creators, yt_content)
+    return JSONResponse({"ok": True, **result})
 
 
 @app.get("/api/influencers/unread-count")

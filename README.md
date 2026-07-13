@@ -76,6 +76,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `7c77459` feat(influencer): finish the watcher upgrade — feed view, RSS, unread badge, Home strip _(2026-07-12)_
 - `c9b1db2` feat: Add Social Media Influencer Watcher Agent with console UI _(2026-07-12)_
 - `e587052` feat(jobs): multi-source scouting + guided triage funnel (NEW lane, inline Assess, next-step cues) _(2026-07-12)_
 - `9417c93` feat(daily): "Rewrite to run offline" — turn un-runnable snippets into stdlib-only that runs _(2026-07-08)_
@@ -87,10 +88,9 @@ npm install && npm run build     # served by the engine at /console
 - `93501c5` feat(daily): web-first Daily AI Update + DISCOVER nav consolidation _(2026-07-07)_
 - `60e5d85` feat(trends): Hacker News source (free, no key) + per-idea Build Brief _(2026-07-07)_
 - `0687871` feat(trends): add subreddit mode for the RapidAPI Reddit path _(2026-07-07)_
-- `1509d7a` fix(trends): use RAPIDAPI_KEY1 env for the Reddit RapidAPI call _(2026-07-07)_
 <!-- /AUTO:changelog -->
 
 ---
 
-_Last updated: 2026-07-12 · this README's inventory and changelog are auto-maintained by
+_Last updated: 2026-07-13 · this README's inventory and changelog are auto-maintained by
 `scripts/gen_readme.py` on every commit._
