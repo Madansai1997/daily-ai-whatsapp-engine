@@ -78,6 +78,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `b869f49` feat(jobs): declutter the Kanban — compact cards, overflow menu, board filters _(2026-07-13)_
 - `5b919f4` feat(watchers): shared relevance engine + Company Watch + "Watch these" in Daily _(2026-07-13)_
 - `1c2e3df` feat(influencer): group feed by channel (collapsible) + assign domain on manual add _(2026-07-13)_
 - `b4fa0d7` feat(influencer): domains (auto-discover creators), topic filter fix, Shorts filter _(2026-07-13)_
@@ -89,7 +90,6 @@ npm install && npm run build     # served by the engine at /console
 - `253d97a` feat(daily): interactive study flow — richer Deep Dive, chatty Go Deeper, no code dupes _(2026-07-08)_
 - `3c735f3` fix(daily): Turso-safe Go-Deeper + Deep Dive explainer + 4-step study hint _(2026-07-08)_
 - `66df91b` fix(daily): Briefing shows lesson prose only — strip news list + legacy project scaffolding _(2026-07-08)_
-- `2808551` feat(daily): threaded tutor + knowledge base + in-browser run; drop weekly project; Home front-page _(2026-07-07)_
 <!-- /AUTO:changelog -->
 
 ---

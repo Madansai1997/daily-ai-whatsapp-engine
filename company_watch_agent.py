@@ -23,7 +23,8 @@ _INACTIVE = ("rejected", "accepted")
 
 
 def init_company_watch_tables():
-    """company_news doubles as the dedup ledger (item_id PK) AND the stored signal history."""
+    """company_news doubles as the dedup ledger (item_id PK) AND the stored signal history.
+    interview_briefs caches one prep brief per calendar event (event_id PK = dedup)."""
     conn = aiosqlite.connect_sync(DB_PATH, check_same_thread=False)
     cur = conn.cursor()
     cur.execute('''CREATE TABLE IF NOT EXISTS company_news (
@@ -38,6 +39,14 @@ def init_company_watch_tables():
         created_at TEXT,
         app_id INTEGER,
         seen INTEGER DEFAULT 0)''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS interview_briefs (
+        event_id TEXT PRIMARY KEY,
+        app_id INTEGER,
+        company TEXT,
+        title TEXT,
+        brief TEXT,
+        event_start TEXT,
+        created_at TEXT)''')
     conn.commit()
     conn.close()
     print("✅ Company Watch tables ready.")
@@ -155,3 +164,139 @@ async def list_company_news(company: str = None, limit: int = 50) -> list:
                 "SELECT * FROM company_news WHERE relevant = 1 "
                 "ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,))
         return [dict(r) for r in await cur.fetchall()]
+
+
+async def news_counts_by_company() -> dict:
+    """{normalized company -> relevant-signal count} — cheap enrichment for the Kanban board."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT company, COUNT(*) FROM company_news WHERE relevant = 1 GROUP BY company")
+        return {(r[0] or "").strip().lower(): int(r[1]) for r in await cur.fetchall()}
+
+
+# ─────────────────────────── interview prep (Part B) ───────────────────────────
+
+def _match_event_to_app(ev: dict, apps: list):
+    """Best-effort: does this calendar event look like an interview with a tracked company?
+    Matches the company name in the event title or an attendee's email domain."""
+    summary = (ev.get("summary") or "").lower()
+    domains = [e.split("@")[-1].lower() for e in (ev.get("attendees") or []) if "@" in e]
+    for a in apps:
+        company = (a.get("company") or "").strip().lower()
+        if not company:
+            continue
+        token = company.split()[0]  # first word, e.g. "google" from "Google India"
+        if len(token) < 3:
+            token = company
+        if company in summary or token in summary:
+            return a
+        if any(token in d for d in domains):
+            return a
+    return None
+
+
+async def _active_apps(db) -> list:
+    db.row_factory = aiosqlite.Row
+    cur = await db.execute(
+        "SELECT id, title, company, description, job_key, status FROM applications "
+        "WHERE LOWER(COALESCE(status,'')) NOT IN ('rejected','accepted')")
+    return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_interview_brief(app_id: int):
+    """Most recent stored brief for a card (surfaced in the ⋯ menu / Prep view)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM interview_briefs WHERE app_id = ? ORDER BY created_at DESC LIMIT 1", (app_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def run_interview_prep(call_llm_fn) -> str:
+    """Scan upcoming calendar events; for any that match a tracked company, assemble a prep brief
+    from the role JD + recent company news + résumé-fit gaps. One brief per event (event_id dedup)."""
+    init_company_watch_tables()
+    try:
+        from calendar_agent import list_upcoming_events
+        events = await list_upcoming_events(max_results=15)
+    except Exception as e:
+        print(f"⚠️ interview prep: calendar unavailable ({e})")
+        return "Calendar unavailable — skipped interview prep."
+    if not events:
+        return "No upcoming calendar events."
+
+    try:
+        from resume_ats_agent import get_scores_map
+    except Exception:
+        get_scores_map = None
+
+    now = datetime.now(timezone.utc).isoformat()
+    prepared = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        apps = await _active_apps(db)
+        if not apps:
+            return "No active applications to match against upcoming events."
+        for ev in events:
+            eid = ev.get("id")
+            if not eid:
+                continue
+            cur = await db.execute("SELECT 1 FROM interview_briefs WHERE event_id = ?", (eid,))
+            if await cur.fetchone():
+                continue  # already briefed
+            app = _match_event_to_app(ev, apps)
+            if not app:
+                continue
+
+            news = await list_company_news(app["company"], limit=5)
+            news_block = "\n".join(f"- {n['title']}" + (f" ({n['why']})" if n.get("why") else "") for n in news) or "(no recent news)"
+            ats_line = ""
+            if get_scores_map:
+                try:
+                    smap = await get_scores_map([app.get("job_key") or f"app:{app['id']}"])
+                    s = smap.get(app.get("job_key") or f"app:{app['id']}")
+                    if s:
+                        ats_line = f"Résumé ATS match for this role: {s.get('ats_score')}/100."
+                except Exception:
+                    pass
+
+            context = (
+                f"Role: {app.get('title')} at {app.get('company')}\n"
+                f"Interview event: {ev.get('summary')} (starts {ev.get('start')})\n"
+                f"{ats_line}\n\n"
+                f"Role description:\n{(app.get('description') or '(none on file)')[:1500]}\n\n"
+                f"Recent company news:\n{news_block}"
+            )
+            system = (
+                f"You are JARVIS, prepping Madan for an interview at {app.get('company')} for the "
+                f"{app.get('title')} role. From the role description, recent company news, and his "
+                "résumé-fit, write a TIGHT prep brief: 3 likely focus areas, 2 sharp questions he "
+                "should ask, and 1 gap to shore up beforehand. Composed, specific, no filler."
+            )
+            try:
+                brief = await call_llm_fn(system, context)
+            except Exception as e:
+                print(f"⚠️ interview brief LLM failed for {app.get('company')}: {e}")
+                continue
+
+            await db.execute(
+                "INSERT OR IGNORE INTO interview_briefs (event_id, app_id, company, title, brief, event_start, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (eid, app["id"], app["company"], app.get("title"), brief.strip(), ev.get("start"), now))
+            await db.execute(
+                "INSERT INTO notifications (body, category) VALUES (?, 'interview_prep')",
+                (f"🎯 Interview prep — {app.get('title')} @ {app.get('company')}\n\n{brief.strip()}",))
+            prepared.append(f"{app.get('title')} @ {app.get('company')}")
+        await db.commit()
+
+    if not prepared:
+        return "No upcoming events matched a tracked company."
+    print(f"✅ Interview prep: {len(prepared)} brief(s) prepared.")
+    return "Prepared briefs for: " + "; ".join(prepared)
+
+
+async def run_company_watch_and_prep(call_llm_fn) -> str:
+    """Combined daily job: company news scan + interview-prep briefs (fired from /cron/company-watch)."""
+    news = await run_company_watch(call_llm_fn)
+    prep = await run_interview_prep(call_llm_fn)
+    return f"{news}\n\n{prep}"

@@ -4382,20 +4382,28 @@ async def cron_scan_applications(token: str = ""):
 @app.post("/cron/company-watch")
 async def cron_company_watch(token: str = ""):
     """Daily: scan Google News for hiring/funding/layoff signals about the companies on the
-    active Kanban board, LLM-filter, and drop a briefing in the inbox. Fire once/day."""
+    active Kanban board AND prep interview briefs for upcoming calendar events. Fire once/day."""
     if (deny := _cron_guard(token)) is not None:
         return deny
-    from company_watch_agent import run_company_watch
-    _run_bg_job("company-watch", lambda: run_company_watch(call_llm))
-    return JSONResponse({"status": "company watch triggered"}, status_code=202)
+    from company_watch_agent import run_company_watch_and_prep
+    _run_bg_job("company-watch", lambda: run_company_watch_and_prep(call_llm))
+    return JSONResponse({"status": "company watch + interview prep triggered"}, status_code=202)
 
 
 @app.post("/api/company-watch/run")
 async def api_company_watch_run():
-    """Manual on-demand run from the console (returns the briefing text)."""
-    from company_watch_agent import run_company_watch
-    digest = await run_company_watch(call_llm)
+    """Manual on-demand run from the console (news scan + interview prep; returns the text)."""
+    from company_watch_agent import run_company_watch_and_prep
+    digest = await run_company_watch_and_prep(call_llm)
     return JSONResponse({"ok": True, "result": digest})
+
+
+@app.post("/api/company-watch/interview-prep")
+async def api_company_watch_prep():
+    """Manual: generate interview-prep briefs for upcoming calendar events matching tracked companies."""
+    from company_watch_agent import run_interview_prep
+    result = await run_interview_prep(call_llm)
+    return JSONResponse({"ok": True, "result": result})
 
 
 @app.get("/api/company-watch/news")
@@ -6585,6 +6593,11 @@ async def applications_list_api():
     keys = [(a.get("job_key") or f"app:{a.get('id')}") for a in apps]
     scores = await get_ats_scores_map(keys)
     rec_scores = await get_recruiter_scores_map(keys)
+    try:
+        from company_watch_agent import news_counts_by_company
+        news_counts = await news_counts_by_company()
+    except Exception:
+        news_counts = {}
     for a in apps:
         k = a.get("job_key") or f"app:{a.get('id')}"
         s = scores.get(k)
@@ -6594,7 +6607,21 @@ async def applications_list_api():
         a["recruiter_score"] = rs["recruiter_score"] if rs else None
         a["recruiter_scored_at"] = rs["created_at"] if rs else None
         a["apply_method"] = apply_method(a)  # 'email' (can auto-send) or 'link' (apply on site)
+        a["news_count"] = news_counts.get((a.get("company") or "").strip().lower(), 0)
     return JSONResponse({"applications": apps, "statuses": APPLICATION_STATUSES})
+
+
+@app.get("/api/applications/{app_id}/intel")
+async def api_application_intel(app_id: int):
+    """Company intel for a card's ⋯ menu: recent news signals + any interview-prep brief."""
+    from company_watch_agent import list_company_news, get_interview_brief
+    apps = await list_applications()
+    app = next((a for a in apps if a.get("id") == app_id), None)
+    if not app:
+        return JSONResponse({"news": [], "brief": None})
+    news = await list_company_news(app.get("company"), limit=8)
+    brief = await get_interview_brief(app_id)
+    return JSONResponse({"company": app.get("company"), "news": news, "brief": brief})
 
 
 # ── Trend Lab — weekly app-idea discovery from Reddit + YouTube ──

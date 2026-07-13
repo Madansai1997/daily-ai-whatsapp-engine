@@ -15,6 +15,7 @@ import {
   MoreHorizontal,
   SlidersHorizontal,
   Eye,
+  Newspaper,
   Upload,
   ClipboardCheck,
   Gauge,
@@ -62,6 +63,7 @@ interface Application {
   ats_scored_at?: string | null;
   recruiter_score?: number | null;
   recruiter_scored_at?: string | null;
+  news_count?: number;
   applied_at?: string | null;
   updated_at?: string | null;
 }
@@ -363,6 +365,8 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
   const [expandedCols, setExpandedCols] = useState<Record<string, boolean>>({});
   // Per-card overflow (⋯) menu — positioned fixed so it escapes the card's overflow-hidden.
   const [cardMenu, setCardMenu] = useState<{ id: number; x: number; y: number } | null>(null);
+  // Company intel (news + interview brief) lazy-loaded when a card's ⋯ menu opens.
+  const [cardIntel, setCardIntel] = useState<{ news: any[]; brief: any | null; loading: boolean } | null>(null);
   const COLUMN_CAP = 8;
 
   /* ---- Data loading ---- */
@@ -445,6 +449,24 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
     loadReviewQueue();
     loadFollowCount();
   }, [loadApplications, loadPending, loadReviewCount, loadReviewQueue, loadFollowCount]);
+
+  // When a card's ⋯ menu opens, lazy-load its company intel (news + interview brief).
+  useEffect(() => {
+    if (!cardMenu) { setCardIntel(null); return; }
+    const card = applications.find((a) => a.id === cardMenu.id);
+    if (!card || (!(card.news_count && card.news_count > 0) && card.status !== "interviewing")) {
+      setCardIntel(null);
+      return;
+    }
+    let alive = true;
+    setCardIntel({ news: [], brief: null, loading: true });
+    fetch(`/api/applications/${cardMenu.id}/intel`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (alive) setCardIntel(d ? { news: d.news || [], brief: d.brief || null, loading: false } : null); })
+      .catch(() => { if (alive) setCardIntel(null); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cardMenu?.id]);
 
   // Deep-link: when arriving from the Home cockpit with an intent, open the matching tool.
   useEffect(() => {
@@ -1891,6 +1913,11 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                                       </span>
                                     );
                                   })()}
+                                  {(card.news_count ?? 0) > 0 && (
+                                    <span title={`${card.news_count} company news signal(s) — open ⋯`} className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold font-mono border border-[#a3e635]/40 text-[#a3e635] bg-[#a3e635]/10 cursor-help">
+                                      <Newspaper className="w-3 h-3" />{card.news_count}
+                                    </span>
+                                  )}
                                   <button
                                     onClick={(e) => {
                                       const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -1958,6 +1985,25 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                     {rc && <span className="text-[9px] font-mono px-1.5 py-0.5 rounded border inline-flex items-center gap-0.5" style={{ color: rc.text, borderColor: `${rc.border}55` }}><UserCheck className="w-3 h-3" />REC {card.recruiter_score}</span>}
                     {card.source && <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#8aebff]/10 border border-[#8aebff]/25 text-[#8aebff]">{card.source}</span>}
                     <ApplyTag method={card.apply_method} />
+                  </div>
+                )}
+                {cardIntel && (cardIntel.loading || cardIntel.news.length > 0 || cardIntel.brief) && (
+                  <div className="px-2.5 py-2 border-b border-white/5 mb-1 space-y-2 max-h-56 overflow-y-auto">
+                    {cardIntel.loading && <p className="text-[10px] font-mono text-[#859397]">Loading intel…</p>}
+                    {cardIntel.brief && (
+                      <div>
+                        <span className="text-[9px] font-mono uppercase tracking-wider text-[#5eead4] flex items-center gap-1"><Target className="w-3 h-3" /> Interview brief</span>
+                        <p className="text-[10px] text-[#bbc9cd] leading-relaxed mt-1 line-clamp-5 whitespace-pre-wrap">{cardIntel.brief.brief}</p>
+                      </div>
+                    )}
+                    {cardIntel.news.length > 0 && (
+                      <div>
+                        <span className="text-[9px] font-mono uppercase tracking-wider text-[#a3e635] flex items-center gap-1"><Newspaper className="w-3 h-3" /> Company news</span>
+                        {cardIntel.news.slice(0, 5).map((n: any, i: number) => (
+                          <a key={i} href={n.url || "#"} target="_blank" rel="noreferrer" className="block text-[10px] text-[#dfe2f3] hover:text-[#a3e635] leading-snug mt-1 truncate" title={n.why || n.title}>• {n.title}</a>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
                 <button onClick={() => { setCardMenu(null); runAts(card.id); }} className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-[11px] font-mono text-[#8aebff] hover:bg-white/5 cursor-pointer transition-colors">
