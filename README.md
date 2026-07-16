@@ -119,6 +119,7 @@ whole console from bundled sample fixtures. Shareable as a live demo with zero d
 - **`pdf_rag_agent.py`** — PDF RAG — chat with an uploaded document, with citation-verified answers.
 - **`people_watch_agent.py`** — People Watch — turns a Networking CRM contact into a watchable feed.
 - **`profile_freshness.py`** — Profile-Freshness Nudge — keep your shop-window current.
+- **`prompts.py`** — JARVIS prompt library — one versioned home for the app's key LLM prompts.
 - **`relevance.py`** — Shared LLM relevance ranker — the reusable "brain" behind every content watcher.
 - **`reminders.py`** — Reminders Agent — self-contained skill module.
 - **`resume_ats_agent.py`** — Resume ATS Alignment Agent — self-contained skill module (Phase 4).
@@ -143,6 +144,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `cd95317` feat: PDF-RAG Docs, conversational voice agent, richer influencer insights, PWA refresh + memory trims _(2026-07-16)_
 - `2dd27e1` fix(chat): route "job portal / how many applications" to the real tracker _(2026-07-16)_
 - `5e99cbb` feat(home): cinematic JARVIS energy-sphere hero + audio-reactive voice loop _(2026-07-16)_
 - `58f3c47` feat(reliability): LLM gateway (breaker + rate limiter + metrics), demo mode, README architecture _(2026-07-16)_
@@ -154,7 +156,6 @@ npm install && npm run build     # served by the engine at /console
 - `1c2e3df` feat(influencer): group feed by channel (collapsible) + assign domain on manual add _(2026-07-13)_
 - `b4fa0d7` feat(influencer): domains (auto-discover creators), topic filter fix, Shorts filter _(2026-07-13)_
 - `7c77459` feat(influencer): finish the watcher upgrade — feed view, RSS, unread badge, Home strip _(2026-07-12)_
-- `c9b1db2` feat: Add Social Media Influencer Watcher Agent with console UI _(2026-07-12)_
 <!-- /AUTO:changelog -->
 
 ---

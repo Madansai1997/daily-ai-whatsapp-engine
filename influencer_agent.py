@@ -6,6 +6,7 @@ import db_compat as aiosqlite  # routes to Turso in prod, local file in dev — 
 from datetime import datetime, timezone
 import json
 from relevance import extract_json_array as _extract_json_array, rank_relevance as _rank_relevance
+from prompts import insight_system
 
 DB_PATH = os.environ.get("DB_PATH", "agent_memory.db")
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "")
@@ -499,17 +500,6 @@ async def get_feed(limit: int = 60, only_relevant: bool = True, domain: str = ""
         return [dict(r) for r in rows]
 
 
-# Compact description of Madan's project, so the "use it" insight is concrete and on-brand
-# rather than generic advice. Keep it short — it's prepended to the insight prompt.
-_PROJECT_CONTEXT = (
-    "Madan is a data analyst moving into AI engineering. His project 'JARVIS' is a production, "
-    "100%-free-tier, multi-agent AI career copilot: a FastAPI backend + React console (PWA) with "
-    "~15 intent-routed agents (job scout, resume/ATS, email triage, calendar, content watchers), a "
-    "multi-provider LLM gateway (Groq->Gemini failover, circuit breaker, rate limiting), BM25 RAG, a "
-    "PDF document-RAG with citation-verified answers, and an app-wide voice agent."
-)
-
-
 def _youtube_video_id(post_id: str, url: str = "") -> str:
     """Pull the 11-char video id from an atom id ('yt:video:ID'), a watch/shorts/youtu.be URL,
     or a bare id. Returns '' if none found."""
@@ -625,17 +615,7 @@ async def generate_post_insight(call_llm_fn, post_id: str, force: bool = False) 
 
     kind = "video (from its transcript)" if source == "transcript" else \
            "article (its full text)" if source == "article" else "post"
-    system = (
-        f"You summarize an AI/tech creator's {kind} for a specific builder, and say how to use it. "
-        "Respond in STRICT JSON only: {\"brief\": string, \"apply\": string}. "
-        "'brief' = 2-4 plain sentences on what it actually SAYS end to end — the real substance and "
-        "takeaways of the whole thing, not hype, no 'the author discusses'. "
-        "'apply' = 2-3 sentences of CONCRETE action for Madan's project below: a specific feature to "
-        "build, a technique to adopt, or something to add/change in his agents — name the part of his "
-        "system it touches. If it genuinely doesn't apply, say so plainly and suggest the closest "
-        "useful angle. No markdown, no bullet symbols, JSON only.\n\n"
-        f"MADAN'S PROJECT:\n{_PROJECT_CONTEXT}"
-    )
+    system = insight_system(kind)
     user = f"{kind.upper()} by {name}:\n{source_text}\n\nJSON:"
     try:
         raw = await call_llm_fn(system, user, max_tokens=450, temperature=0.3)

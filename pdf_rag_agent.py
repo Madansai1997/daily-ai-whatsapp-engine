@@ -19,6 +19,7 @@ import json
 
 import db_compat as aiosqlite  # Turso in prod, local in dev — MUST match V3_updates
 from rag_engine import tokenize, compute_bm25
+from prompts import PDF_RAG_ANSWER_SYSTEM, PDF_RAG_ASSESS_SYSTEM
 
 DB_PATH = os.environ.get("DB_PATH", "agent_memory.db")
 
@@ -188,10 +189,7 @@ async def answer_question(doc_id: int, question: str, call_llm) -> dict:
 
     block = _passage_block(passages)
     draft = await call_llm(
-        "You answer questions using ONLY the numbered passages from a document. Cite the passage "
-        "number(s) in square brackets after each claim, e.g. [1] or [2][3]. If the passages do not "
-        "contain the answer, say exactly: 'The document doesn't cover that.' Never use outside "
-        "knowledge. Be concise (1-4 sentences).",
+        PDF_RAG_ANSWER_SYSTEM,
         f"PASSAGES:\n{block}\n\nQUESTION: {question}\n\nCited answer:",
         max_tokens=500, temperature=0.2,
     )
@@ -243,10 +241,7 @@ async def assess_document(doc_id: int, criteria: list[str], call_llm) -> dict:
         passages = await _retrieve(doc_id, crit, k=4)
         block = _passage_block(passages) if passages else "(no passages)"
         raw = await call_llm(
-            "You assess whether a document satisfies ONE criterion, using ONLY the numbered passages. "
-            "Return STRICT JSON {\"met\": true|false, \"evidence\": string, \"cite\": number|null}. "
-            "'evidence' quotes/paraphrases the supporting passage (or says what's missing); 'cite' is the "
-            "passage number you used, or null if none supports it. Never use outside knowledge. JSON only.",
+            PDF_RAG_ASSESS_SYSTEM,
             f"PASSAGES:\n{block}\n\nCRITERION: {crit}\n\nJSON:",
             max_tokens=300, temperature=0.0,
         )

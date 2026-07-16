@@ -40,6 +40,7 @@ from openai import AsyncOpenAI
 load_dotenv()
 
 from llm_gateway import GATEWAY
+from prompts import INTENT_FEWSHOT
 from rag_engine import retrieve_relevant_context, search_user_facts
 from email_triage import (
     init_email_tables,
@@ -447,6 +448,8 @@ MEMORY_INTENT_PROMPT = (
     "force a general-knowledge question into SAVE_FACT, RECALL_FACT, LIST_FACTS, or SET_REMINDER just because it "
     "contains a noun that could be mistaken for a fact or task. content = null, reminder = null, "
     "email = null, calendar = null."
+    # "Show, don't tell" — concrete few-shot examples of the trickiest routing calls, from prompts.py.
+    + INTENT_FEWSHOT
 )
 
 def get_llm_client() -> AsyncOpenAI:
