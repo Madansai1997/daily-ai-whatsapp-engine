@@ -40,7 +40,7 @@ from openai import AsyncOpenAI
 load_dotenv()
 
 from llm_gateway import GATEWAY
-from prompts import INTENT_FEWSHOT, ANALYST_SYSTEM
+from prompts import INTENT_FEWSHOT, ANALYST_SYSTEM, ANALYST_HYPOTHESES_SYSTEM, ANALYST_SCR_SYSTEM
 from rag_engine import retrieve_relevant_context, search_user_facts
 from email_triage import (
     init_email_tables,
@@ -7801,21 +7801,40 @@ async def pdf_rag_upload(file: UploadFile = File(...)):
     return JSONResponse({"ok": True, "document": meta})
 
 
+# pandas/numpy/matplotlib code runs client-side in Pyodide (no host os/fs/network reachable). This
+# denylist is defense-in-depth on the *generated* text — it keeps the model honest and blocks
+# obviously-unsafe output. matplotlib/scipy imports are harmless in the WASM sandbox.
+_ANALYST_DENY = ("__import__", "subprocess", "socket", "os.system", "os.popen", "eval(", "exec(",
+                 "open(", "requests", "urllib", "sys.", "savefig", "pickle", "shutil")
+
+
+def _analyst_blocked(code: str) -> bool:
+    lowered = code.lower()
+    return any(bad in lowered for bad in _ANALYST_DENY)
+
+
 @app.post("/api/analyst/code")
 async def analyst_code(request: Request):
-    """AI Data Analyst: natural-language question + a DataFrame schema -> pandas code (+ optional
-    chart spec). The code is RUN CLIENT-SIDE in the browser's Pyodide sandbox — the server only
-    generates it and never executes it, so a 512MB instance is never at risk."""
+    """AI Data Analyst: natural-language question + a DataFrame profile -> pandas/matplotlib code
+    (+ optional Recharts spec). The code is RUN CLIENT-SIDE in the browser's Pyodide sandbox — the
+    server only generates it and never executes it, so a 512MB instance is never at risk.
+    Self-correcting: if the browser's run threw, the client re-POSTs with previous_code + error and
+    the model returns a corrected version."""
     body = await request.json()
     question = (body.get("question") or "").strip()
     schema = (body.get("schema") or "").strip()
+    prev_code = (body.get("previous_code") or "").strip()
+    run_error = (body.get("error") or "").strip()
     if not question or not schema:
-        return JSONResponse({"error": "Upload a CSV and ask a question."}, status_code=400)
+        return JSONResponse({"error": "Upload a dataset and ask a question."}, status_code=400)
+    if prev_code and run_error:
+        user_turn = (f"PROFILE: {schema[:2200]}\n\nQUESTION: {question}\n\n"
+                     f"Your previous code raised an error when it ran. Fix it and return corrected "
+                     f"JSON.\nPREVIOUS CODE:\n{prev_code[:1500]}\n\nERROR:\n{run_error[:600]}\n\nJSON:")
+    else:
+        user_turn = f"PROFILE: {schema[:2200]}\n\nQUESTION: {question}\n\nJSON:"
     try:
-        raw = await call_llm(
-            ANALYST_SYSTEM,
-            f"SCHEMA: {schema[:2000]}\n\nQUESTION: {question}\n\nJSON:",
-            max_tokens=600, temperature=0.1)
+        raw = await call_llm(ANALYST_SYSTEM, user_turn, max_tokens=900, temperature=0.1)
     except Exception as e:
         return JSONResponse({"error": f"Analysis failed: {e}"}, status_code=502)
     from influencer_agent import extract_json_object
@@ -7823,14 +7842,58 @@ async def analyst_code(request: Request):
     code = (parsed.get("code") or "").strip()
     if not code:
         return JSONResponse({"error": "Couldn't turn that into an analysis — try rephrasing."}, status_code=422)
-    # Defense-in-depth denylist (execution is already sandboxed client-side; this keeps the model
-    # honest and blocks obviously-unsafe output). pandas/numpy imports are harmless in Pyodide.
-    lowered = code.lower()
-    if any(bad in lowered for bad in ("__import__", "subprocess", "socket", "os.system", "eval(", "exec(",
-                                      "open(", "requests", "urllib", "sys.")):
+    if _analyst_blocked(code):
         return JSONResponse({"error": "Generated code was blocked by the safety filter."}, status_code=422)
     chart = parsed.get("chart") if isinstance(parsed.get("chart"), dict) else None
     return JSONResponse({"code": code, "explanation": (parsed.get("explanation") or "").strip(), "chart": chart})
+
+
+@app.post("/api/analyst/hypotheses")
+async def analyst_hypotheses(request: Request):
+    """Phase 1 reconnaissance: given a deterministic client-computed profile, return an analyst's
+    opening read — hypotheses, domain KPIs, and clickable starter questions. No code execution."""
+    body = await request.json()
+    profile = (body.get("profile") or "").strip()
+    if not profile:
+        return JSONResponse({"error": "No profile provided."}, status_code=400)
+    try:
+        raw = await call_llm(ANALYST_HYPOTHESES_SYSTEM,
+                             f"PROFILE:\n{profile[:3500]}\n\nJSON:", max_tokens=700, temperature=0.3)
+    except Exception as e:
+        return JSONResponse({"error": f"Reconnaissance failed: {e}"}, status_code=502)
+    from influencer_agent import extract_json_object
+    parsed = extract_json_object(raw) or {}
+    return JSONResponse({
+        "read": (parsed.get("read") or "").strip(),
+        "hypotheses": [str(h) for h in (parsed.get("hypotheses") or []) if str(h).strip()][:5],
+        "kpis": [k for k in (parsed.get("kpis") or []) if isinstance(k, dict) and k.get("name")][:4],
+        "questions": [str(q) for q in (parsed.get("questions") or []) if str(q).strip()][:6],
+    })
+
+
+@app.post("/api/analyst/synthesis")
+async def analyst_synthesis(request: Request):
+    """Phase 6: given the question + the actual (small) computed result, produce a decision-ready
+    SCR / Descriptive-Diagnostic-Prescriptive executive brief."""
+    body = await request.json()
+    question = (body.get("question") or "").strip()
+    result = (body.get("result") or "").strip()
+    if not question or not result:
+        return JSONResponse({"error": "Nothing to synthesize."}, status_code=400)
+    try:
+        raw = await call_llm(ANALYST_SCR_SYSTEM,
+                             f"QUESTION: {question}\n\nRESULT:\n{result[:2500]}\n\nJSON:",
+                             max_tokens=550, temperature=0.35)
+    except Exception as e:
+        return JSONResponse({"error": f"Synthesis failed: {e}"}, status_code=502)
+    from influencer_agent import extract_json_object
+    parsed = extract_json_object(raw) or {}
+    return JSONResponse({
+        "scorecard": [str(s) for s in (parsed.get("scorecard") or []) if str(s).strip()][:3],
+        "descriptive": (parsed.get("descriptive") or "").strip(),
+        "diagnostic": (parsed.get("diagnostic") or "").strip(),
+        "prescriptive": (parsed.get("prescriptive") or "").strip(),
+    })
 
 
 @app.get("/api/pdf-rag/docs")
