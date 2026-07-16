@@ -1,11 +1,12 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { ScreenId } from "../types";
 import {
   Volume2, Square, RefreshCw, ArrowRight, Sparkles, Clock, CalendarClock,
   Wallet, Users, AlertTriangle, MessageSquare, Sun, Coffee, Moon, CheckCircle2,
-  Newspaper, ExternalLink, BookOpen, Radio,
+  Newspaper, ExternalLink, BookOpen, Radio, Mic,
 } from "lucide-react";
+import JarvisGlobe from "./JarvisGlobe";
 
 interface CockpitStep {
   key: string; severity: string; icon: string; label: string;
@@ -37,8 +38,15 @@ export default function HomeCockpit({ onNavigate }: Props) {
   const [data, setData] = useState<Cockpit | null>(null);
   const [loading, setLoading] = useState(true);
   const [speaking, setSpeaking] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [voiceMsg, setVoiceMsg] = useState<string>("");
   const [daily, setDaily] = useState<DailySnapshot | null>(null);
   const [watch, setWatch] = useState<FeedHighlight[]>([]);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const recogRef = useRef<any>(null);
+  const levelRef = useRef(-1);            // live audio envelope for the globe (-1 = no signal)
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const levelRafRef = useRef(0);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -53,7 +61,14 @@ export default function HomeCockpit({ onNavigate }: Props) {
   useEffect(() => {
     load();
     const t = setInterval(() => { if (!document.hidden) load(true); }, 30000);
-    return () => { clearInterval(t); try { window.speechSynthesis?.cancel(); } catch { /* */ } };
+    return () => {
+      clearInterval(t);
+      try { window.speechSynthesis?.cancel(); } catch { /* */ }
+      try { audioRef.current?.pause(); } catch { /* */ }
+      try { recogRef.current?.stop(); } catch { /* */ }
+      try { cancelAnimationFrame(levelRafRef.current); } catch { /* */ }
+      try { audioCtxRef.current?.close(); } catch { /* */ }
+    };
   }, [load]);
 
   // Today's AI headlines — the "front page" strip (read-only; full lesson lives on the Daily tab).
@@ -72,22 +87,128 @@ export default function HomeCockpit({ onNavigate }: Props) {
       .catch(() => { /* leave empty */ });
   }, []);
 
-  // ▶ reads the full JARVIS standup aloud (browser voice; the natural Gemini voice lives on the Standup tool).
-  const speakBriefing = async () => {
-    if (speaking) { try { window.speechSynthesis?.cancel(); } catch { /* */ } setSpeaking(false); return; }
+  // Stop whatever's currently talking (natural audio or browser voice).
+  const stopSpeaking = useCallback(() => {
+    try { cancelAnimationFrame(levelRafRef.current); } catch { /* */ }
+    levelRef.current = -1;
+    try { audioRef.current?.pause(); audioRef.current = null; } catch { /* */ }
+    try { window.speechSynthesis?.cancel(); } catch { /* */ }
+    setSpeaking(false);
+  }, []);
+
+  // Drive the globe's pulse from the REAL audio via a Web Audio analyser (natural voice only;
+  // the browser fallback can't be tapped, so the globe uses its synthetic envelope there).
+  const attachAnalyser = useCallback((audio: HTMLAudioElement) => {
     try {
-      const d = await fetch("/api/standup").then((r) => r.json());
-      const text = d?.ok ? d.text : `${data?.greeting}, ${data?.name}. ${data?.headline}`;
+      const AC = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AC) return;
+      const ctx: AudioContext = audioCtxRef.current || new AC();
+      audioCtxRef.current = ctx;
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      const srcNode = ctx.createMediaElementSource(audio);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      const buf = new Uint8Array(analyser.frequencyBinCount);
+      srcNode.connect(analyser);
+      analyser.connect(ctx.destination);
+      const tick = () => {
+        analyser.getByteFrequencyData(buf);
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) sum += buf[i];
+        levelRef.current = Math.min(1, (sum / buf.length / 255) * 1.9); // 0..1, scaled for punch
+        levelRafRef.current = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch { /* analyser is a nice-to-have; ignore if the browser blocks it */ }
+  }, []);
+
+  // Speak text — prefer the natural Gemini voice (/api/tts → WAV), fall back to the free
+  // browser voice on 204/quota/error. Keeps `speaking` true for the whole utterance so the
+  // globe pulses in time with the actual playback.
+  const speak = useCallback(async (text: string) => {
+    if (!text) return;
+    setSpeaking(true);
+    try {
+      const res = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (res.ok && res.status !== 204) {
+        const buf = await res.arrayBuffer();
+        const url = URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+        const audio = new Audio(url);
+        audioRef.current = audio;
+        const cleanup = () => {
+          try { cancelAnimationFrame(levelRafRef.current); } catch { /* */ }
+          levelRef.current = -1;
+          setSpeaking(false);
+          URL.revokeObjectURL(url);
+        };
+        audio.onended = cleanup;
+        audio.onerror = cleanup;
+        attachAnalyser(audio);
+        await audio.play();
+        return;
+      }
+    } catch { /* fall through to browser voice */ }
+    // Fallback: free browser voice.
+    try {
       const synth = window.speechSynthesis;
-      if (!synth) return;
+      if (!synth) { setSpeaking(false); return; }
       synth.cancel();
       const u = new SpeechSynthesisUtterance(text);
       u.rate = 1.02;
       u.onend = () => setSpeaking(false);
       u.onerror = () => setSpeaking(false);
-      setSpeaking(true);
       synth.speak(u);
     } catch { setSpeaking(false); }
+  }, []);
+
+  // ▶ reads the full JARVIS standup aloud.
+  const speakBriefing = async () => {
+    if (speaking) { stopSpeaking(); return; }
+    setVoiceMsg("");
+    try {
+      const d = await fetch("/api/standup").then((r) => r.json());
+      const text = d?.ok ? d.text : `${data?.greeting}, ${data?.name}. ${data?.headline}`;
+      await speak(text);
+    } catch { setSpeaking(false); }
+  };
+
+  // 🎙 "Hey JARVIS" — record a question with the browser's Web Speech API, send it through
+  // the same chat brain, then speak the reply while the globe pulses. All free.
+  const askByVoice = () => {
+    if (listening) { try { recogRef.current?.stop(); } catch { /* */ } return; }
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) { setVoiceMsg("Voice input isn't supported in this browser — try Chrome."); return; }
+    stopSpeaking();
+    const recog = new SR();
+    recogRef.current = recog;
+    recog.lang = "en-US";
+    recog.interimResults = false;
+    recog.maxAlternatives = 1;
+    recog.onstart = () => { setListening(true); setVoiceMsg("Listening…"); };
+    recog.onerror = () => { setListening(false); setVoiceMsg("Didn't catch that."); };
+    recog.onend = () => setListening(false);
+    recog.onresult = async (e: any) => {
+      const said = e.results?.[0]?.[0]?.transcript?.trim();
+      setListening(false);
+      if (!said) { setVoiceMsg("Didn't catch that."); return; }
+      setVoiceMsg(`“${said}”`);
+      try {
+        const res = await fetch("/chat-message", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: said }),
+        });
+        const d = await res.json();
+        const reply = (d?.reply || d?.response || d?.message || "").toString().trim();
+        if (reply) { setVoiceMsg(reply); await speak(reply); }
+        else setVoiceMsg("No reply came back.");
+      } catch { setVoiceMsg("Couldn't reach JARVIS just now."); }
+    };
+    try { recog.start(); } catch { setListening(false); }
   };
 
   const go = (target: string) => {
@@ -104,24 +225,43 @@ export default function HomeCockpit({ onNavigate }: Props) {
 
   return (
     <div className="w-full max-w-3xl mx-auto flex flex-col gap-6">
-      {/* Greeting band */}
-      <section className="glass-panel rounded-2xl border border-white/5 p-6">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-2xl sm:text-3xl font-bold text-[#dfe2f3] flex items-center gap-2.5">
-              <GreetIcon className="w-6 h-6 text-[#ffd6a3]" />
-              {data ? `${data.greeting}, ${data.name}.` : "Loading…"}
-            </h1>
-            <p className="text-sm text-[#bbc9cd] mt-2">{data?.headline}</p>
-            <p className="text-[11px] font-mono text-[#5c6a6d] uppercase tracking-widest mt-1">{data?.date}</p>
+      {/* Cinematic hero — the JARVIS energy-sphere reacts to the briefing voice */}
+      <section className="glass-panel rounded-2xl border border-white/5 p-6 sm:p-8 relative overflow-hidden">
+        <div className="flex flex-col items-center text-center">
+          <div className="text-[10px] font-mono tracking-[0.35em] text-[#8aebff]/70 uppercase mb-1">J.A.R.V.I.S</div>
+          <div className="relative w-full max-w-[300px]">
+            <JarvisGlobe speaking={speaking} level={levelRef} />
+            {/* status ring caption */}
+            <div className="absolute -bottom-1 left-0 w-full flex items-center justify-center gap-2 text-[10px] font-mono">
+              <span className={`w-1.5 h-1.5 rounded-full ${speaking ? "bg-[#ffb4ab] animate-pulse" : "bg-[#5eead4]"}`} />
+              <span className={speaking ? "text-[#ffb4ab]" : "text-[#5eead4]/80"}>
+                {speaking ? "SPEAKING" : "SYSTEMS ONLINE"}
+              </span>
+            </div>
           </div>
-          <button
-            onClick={speakBriefing}
-            title="Read my day aloud"
-            className={`shrink-0 flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold font-mono border transition-all cursor-pointer ${speaking ? "bg-[#ffb4ab]/10 border-[#ffb4ab]/30 text-[#ffb4ab]" : "bg-[#8aebff]/10 border-[#8aebff]/30 text-[#8aebff] hover:bg-[#8aebff]/20"}`}
-          >
-            {speaking ? <><Square className="w-4 h-4" /> STOP</> : <><Volume2 className="w-4 h-4" /> BRIEF ME</>}
-          </button>
+          <h1 className="text-2xl sm:text-3xl font-bold text-[#dfe2f3] flex items-center gap-2.5 mt-5">
+            <GreetIcon className="w-6 h-6 text-[#ffd6a3]" />
+            {data ? `${data.greeting}, ${data.name}.` : "Loading…"}
+          </h1>
+          <p className="text-sm text-[#bbc9cd] mt-2 max-w-xl">{data?.headline}</p>
+          <p className="text-[11px] font-mono text-[#5c6a6d] uppercase tracking-widest mt-1">{data?.date}</p>
+          <div className="flex items-center gap-3 mt-5">
+            <button
+              onClick={speakBriefing}
+              title="Read my day aloud"
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold font-mono border transition-all cursor-pointer ${speaking ? "bg-[#ffb4ab]/10 border-[#ffb4ab]/30 text-[#ffb4ab]" : "bg-[#8aebff]/10 border-[#8aebff]/30 text-[#8aebff] hover:bg-[#8aebff]/20"}`}
+            >
+              {speaking ? <><Square className="w-4 h-4" /> STOP</> : <><Volume2 className="w-4 h-4" /> BRIEF ME</>}
+            </button>
+            <button
+              onClick={askByVoice}
+              title="Ask JARVIS out loud"
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold font-mono border transition-all cursor-pointer ${listening ? "bg-[#8aebff]/20 border-[#8aebff]/50 text-[#8aebff]" : "bg-white/5 border-white/10 text-[#bbc9cd] hover:border-[#8aebff]/30 hover:text-[#8aebff]"}`}
+            >
+              <Mic className={`w-4 h-4 ${listening ? "animate-pulse" : ""}`} /> {listening ? "LISTENING…" : "ASK"}
+            </button>
+          </div>
+          {voiceMsg && <p className="text-[11px] font-mono text-[#859397] mt-3 max-w-lg">{voiceMsg}</p>}
         </div>
       </section>
 

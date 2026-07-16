@@ -142,6 +142,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `58f3c47` feat(reliability): LLM gateway (breaker + rate limiter + metrics), demo mode, README architecture _(2026-07-16)_
 - `463c202` feat(console): installable PWA — "Install JARVIS" as a desktop/mobile app _(2026-07-13)_
 - `e60aab4` feat(watchers): People Watch → CRM nudges + Unified Trends Pulse _(2026-07-13)_
 - `6711281` feat(company-watch): slice 1b — news on Kanban cards + interview-prep briefs _(2026-07-13)_
@@ -153,7 +154,6 @@ npm install && npm run build     # served by the engine at /console
 - `c9b1db2` feat: Add Social Media Influencer Watcher Agent with console UI _(2026-07-12)_
 - `e587052` feat(jobs): multi-source scouting + guided triage funnel (NEW lane, inline Assess, next-step cues) _(2026-07-12)_
 - `9417c93` feat(daily): "Rewrite to run offline" — turn un-runnable snippets into stdlib-only that runs _(2026-07-08)_
-- `c25ce59` feat(daily): visual Deep Dive + interactive Go Deeper; fix in-browser Run hang _(2026-07-08)_
 <!-- /AUTO:changelog -->
 
 ---
