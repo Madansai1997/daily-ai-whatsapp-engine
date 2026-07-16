@@ -9,6 +9,7 @@ export enum ScreenId {
   Terminal = "terminal",
   AtsAnalysis = "ats_analysis",
   Insights = "insights",
+  Docs = "docs",
   Bills = "bills",
   Trends = "trends",
   Daily = "daily",

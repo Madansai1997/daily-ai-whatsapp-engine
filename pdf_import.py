@@ -27,3 +27,26 @@ def extract_pdf_text(file_bytes: bytes) -> str:
     if len(full_text) > MAX_CHARS:
         return full_text[:MAX_CHARS] + f"\n\n[...truncated, {len(full_text) - MAX_CHARS} more characters]"
     return full_text
+
+
+# Higher cap for the PDF-RAG index (chunked + stored, not shoved into one prompt), still
+# bounded to protect the free-tier instance's memory.
+MAX_RAG_CHARS = 120000
+
+
+def extract_pdf_pages(file_bytes: bytes) -> list[str]:
+    """Return one text string PER PAGE (empty string for image-only pages), so the RAG
+    layer can tag every chunk with the page it came from for real citations. Total text is
+    bounded by MAX_RAG_CHARS across the document. Raises on a corrupt file — caller catches."""
+    out: list[str] = []
+    total = 0
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        for page in pdf.pages:
+            if total >= MAX_RAG_CHARS:
+                break
+            text = (page.extract_text() or "").strip()
+            if text and total + len(text) > MAX_RAG_CHARS:
+                text = text[: MAX_RAG_CHARS - total]
+            total += len(text)
+            out.append(text)
+    return out

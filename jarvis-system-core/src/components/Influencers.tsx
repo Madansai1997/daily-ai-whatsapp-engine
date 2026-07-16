@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { RefreshCw, Plus, X, Trash2, Radio, Youtube, Instagram, Twitter, Rss, CheckCircle2, AlertTriangle, ExternalLink, CheckCheck, Compass, Sparkles, ChevronDown, ChevronRight } from "lucide-react";
 
@@ -21,13 +21,26 @@ interface FeedPost {
   handle: string;
   name: string;
   title: string;
+  summary?: string;
   url: string;
   relevant: number;
   relevance_note: string;
   is_read: number;
   published_at: string;
   seen_at: string;
+  brief?: string;
+  apply?: string;
+  insight_source?: string;
 }
+interface Insight { open?: boolean; loading?: boolean; brief?: string; apply?: string; source?: string; error?: string; }
+
+const SOURCE_LABEL: Record<string, string> = {
+  transcript: "summarized from the video transcript",
+  article: "summarized from the full article",
+  description: "from the post description (no transcript available)",
+  title: "from the title only (couldn't read the content)",
+  saved: "saved analysis",
+};
 
 export default function Influencers({ onRead }: { onRead?: () => void }) {
   const [influencers, setInfluencers] = useState<Influencer[]>([]);
@@ -43,6 +56,29 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
   const [posts, setPosts] = useState<FeedPost[]>([]);
   const [feedLoading, setFeedLoading] = useState(true);
   const [showFiltered, setShowFiltered] = useState(false);
+  const [insights, setInsights] = useState<Record<string, Insight>>({});
+
+  // "What's in it + use it in your project" — brief summary + a concrete project takeaway,
+  // generated on demand and cached on the server so re-opening is instant.
+  const toggleInsight = async (p: FeedPost) => {
+    const cur = insights[p.post_id];
+    if (cur?.open) { setInsights((s) => ({ ...s, [p.post_id]: { ...cur, open: false } })); return; }
+    // Already have it (from the feed row or a prior fetch)? Just open.
+    const have = cur?.brief || p.brief;
+    if (have) {
+      setInsights((s) => ({ ...s, [p.post_id]: { open: true, brief: cur?.brief || p.brief, apply: cur?.apply || p.apply, source: cur?.source || p.insight_source } }));
+      return;
+    }
+    setInsights((s) => ({ ...s, [p.post_id]: { open: true, loading: true } }));
+    try {
+      const res = await fetch(`/api/influencers/post/${encodeURIComponent(p.post_id)}/insight`, { method: "POST" });
+      const d = await res.json();
+      if (d?.ok) setInsights((s) => ({ ...s, [p.post_id]: { open: true, brief: d.brief, apply: d.apply, source: d.source } }));
+      else setInsights((s) => ({ ...s, [p.post_id]: { open: true, error: d?.error || "Couldn't analyze this one." } }));
+    } catch {
+      setInsights((s) => ({ ...s, [p.post_id]: { open: true, error: "Couldn't reach the analyzer." } }));
+    }
+  };
 
   const [domains, setDomains] = useState<Domain[]>([]);
   const [activeDomain, setActiveDomain] = useState("");
@@ -61,13 +97,16 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
   const [form, setForm] = useState({ ...emptyForm });
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
+  const [showOlder, setShowOlder] = useState(false);
+  const windowDaysRef = useRef(5); // feed shows the last few days by default; 0 = full history
+
   const loadFeed = useCallback(async (domain = "") => {
     setFeedLoading(true);
     try {
       // Pull everything (all=1); we curate to the relevant subset client-side so the "filtered"
-      // items can be revealed on demand instead of silently vanishing.
+      // items can be revealed on demand instead of silently vanishing. days keeps it recent.
       const q = domain ? `&domain=${encodeURIComponent(domain)}` : "";
-      const res = await fetch(`/api/influencers/feed?all=1&limit=60${q}`, { cache: "no-store" });
+      const res = await fetch(`/api/influencers/feed?all=1&limit=60&days=${windowDaysRef.current}${q}`, { cache: "no-store" });
       if (res.ok) setPosts(await res.json());
     } catch {
       /* ignore */
@@ -75,6 +114,13 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
       setFeedLoading(false);
     }
   }, []);
+
+  const toggleOlder = () => {
+    const next = !showOlder;
+    setShowOlder(next);
+    windowDaysRef.current = next ? 0 : 5;
+    loadFeed(activeDomain);
+  };
 
   const loadDomains = useCallback(async () => {
     try {
@@ -390,7 +436,12 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
         <div className="flex justify-between items-center border-b border-white/10 pb-4">
           <div>
             <h3 className="text-lg font-bold text-[#dfe2f3]">Latest Updates {activeDomain && <span className="text-xs font-mono text-[#8aebff]">· {activeDomain}</span>}</h3>
-            <p className="text-xs text-[#859397]">Grouped by channel · relevance-ranked to your interests.</p>
+            <p className="text-xs text-[#859397]">
+              {showOlder ? "Full history · " : "Last 5 days · "}
+              <button onClick={toggleOlder} className="text-[#8aebff] hover:underline cursor-pointer font-mono">
+                {showOlder ? "show recent only" : "show older →"}
+              </button>
+            </p>
           </div>
           <div className="flex items-center gap-2">
             {groups.length > 1 && (
@@ -443,25 +494,26 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
                     </button>
                     {!isCollapsed && (
                       <div className="divide-y divide-white/5">
-                        {items.map((p) => (
-                          <a
+                        {items.map((p) => {
+                          const ins = insights[p.post_id];
+                          const open = !!ins?.open;
+                          return (
+                          <div
                             key={p.post_id}
-                            href={p.url || "#"}
-                            target={p.url ? "_blank" : undefined}
-                            rel="noreferrer"
-                            className={`flex items-start gap-3 px-3 py-2.5 transition-all group hover:bg-white/[0.04] ${p.relevant ? "" : "opacity-45 grayscale-[0.4] hover:opacity-90"}`}
+                            className={`px-3 py-2.5 transition-all ${p.relevant ? "" : "opacity-45 grayscale-[0.4] hover:opacity-90"}`}
                           >
-                            {p.is_read === 0 && p.relevant ? (
-                              <span className="w-2 h-2 rounded-full bg-[#a3e635] mt-1.5 shrink-0" title="unread" />
-                            ) : (
-                              <span className="w-2 h-2 mt-1.5 shrink-0" />
-                            )}
-                            <div className="min-w-0 flex-1">
-                              <p className="text-[13px] text-[#dfe2f3] font-medium leading-snug group-hover:text-[#8aebff] flex items-start gap-1">
-                                <span className="min-w-0">{p.title || p.url}</span>
-                                {p.url && <ExternalLink className="w-3 h-3 opacity-40 shrink-0 mt-1" />}
-                              </p>
-                              {(p.relevance_note || !p.relevant) && (
+                            <div className="flex items-start gap-3 group">
+                              {p.is_read === 0 && p.relevant ? (
+                                <span className="w-2 h-2 rounded-full bg-[#a3e635] mt-1.5 shrink-0" title="unread" />
+                              ) : (
+                                <span className="w-2 h-2 mt-1.5 shrink-0" />
+                              )}
+                              <div className="min-w-0 flex-1">
+                                <a href={p.url || "#"} target={p.url ? "_blank" : undefined} rel="noreferrer"
+                                  className="text-[13px] text-[#dfe2f3] font-medium leading-snug hover:text-[#8aebff] flex items-start gap-1">
+                                  <span className="min-w-0">{p.title || p.url}</span>
+                                  {p.url && <ExternalLink className="w-3 h-3 opacity-40 shrink-0 mt-1" />}
+                                </a>
                                 <div className="flex items-center gap-2 mt-1 flex-wrap">
                                   {p.relevant && p.relevance_note && (
                                     <span className="text-[10px] font-mono text-[#a3e635]/80 bg-[#a3e635]/10 px-1.5 py-0.5 rounded">{p.relevance_note}</span>
@@ -469,11 +521,44 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
                                   {!p.relevant && (
                                     <span className="text-[10px] font-mono text-[#859397]/70 bg-white/5 px-1.5 py-0.5 rounded">off-topic</span>
                                   )}
+                                  <button onClick={() => toggleInsight(p)}
+                                    className="text-[10px] font-mono text-[#8aebff]/90 bg-[#8aebff]/10 hover:bg-[#8aebff]/20 px-1.5 py-0.5 rounded inline-flex items-center gap-1 cursor-pointer transition-all">
+                                    <Sparkles className="w-3 h-3" /> {open ? "hide" : (ins?.brief || p.brief ? "brief + use it" : "what's in it + use it")}
+                                    <ChevronDown className={`w-3 h-3 transition-transform ${open ? "rotate-180" : ""}`} />
+                                  </button>
                                 </div>
-                              )}
+                              </div>
                             </div>
-                          </a>
-                        ))}
+                            {open && (
+                              <div className="mt-2 ml-5 rounded-lg border border-[#8aebff]/15 bg-[#8aebff]/[0.04] p-3 space-y-2">
+                                {ins?.loading ? (
+                                  <div className="flex items-center gap-2 text-[11px] font-mono text-[#859397]">
+                                    <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Reading it and mapping it to your project…
+                                  </div>
+                                ) : ins?.error ? (
+                                  <p className="text-[11px] font-mono text-[#ffb4ab]">{ins.error}</p>
+                                ) : (
+                                  <>
+                                    <div>
+                                      <div className="text-[9px] font-mono uppercase tracking-widest text-[#859397] mb-0.5">What it says</div>
+                                      <p className="text-[12px] text-[#dfe2f3] leading-relaxed">{ins?.brief || p.brief}</p>
+                                    </div>
+                                    <div>
+                                      <div className="text-[9px] font-mono uppercase tracking-widest text-[#5eead4] mb-0.5 flex items-center gap-1"><Compass className="w-3 h-3" /> Use it in your project</div>
+                                      <p className="text-[12px] text-[#bbc9cd] leading-relaxed">{ins?.apply || p.apply}</p>
+                                    </div>
+                                    {(ins?.source || p.insight_source) && (
+                                      <p className="text-[9px] font-mono text-[#859397]/70 pt-1 border-t border-white/5">
+                                        {SOURCE_LABEL[(ins?.source || p.insight_source) as string] || (ins?.source || p.insight_source)}
+                                      </p>
+                                    )}
+                                  </>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>

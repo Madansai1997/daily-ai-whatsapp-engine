@@ -116,6 +116,7 @@ whole console from bundled sample fixtures. Shareable as a live demo with zero d
 - **`networking_crm.py`** — Thin Networking CRM — track the people behind the applications.
 - **`pattern_learning.py`** — Pattern Learning Agent — self-contained skill module.
 - **`pdf_import.py`** — PDF Import — self-contained skill module.
+- **`pdf_rag_agent.py`** — PDF RAG — chat with an uploaded document, with citation-verified answers.
 - **`people_watch_agent.py`** — People Watch — turns a Networking CRM contact into a watchable feed.
 - **`profile_freshness.py`** — Profile-Freshness Nudge — keep your shop-window current.
 - **`relevance.py`** — Shared LLM relevance ranker — the reusable "brain" behind every content watcher.
@@ -142,6 +143,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `2dd27e1` fix(chat): route "job portal / how many applications" to the real tracker _(2026-07-16)_
 - `5e99cbb` feat(home): cinematic JARVIS energy-sphere hero + audio-reactive voice loop _(2026-07-16)_
 - `58f3c47` feat(reliability): LLM gateway (breaker + rate limiter + metrics), demo mode, README architecture _(2026-07-16)_
 - `463c202` feat(console): installable PWA — "Install JARVIS" as a desktop/mobile app _(2026-07-13)_
@@ -153,7 +155,6 @@ npm install && npm run build     # served by the engine at /console
 - `b4fa0d7` feat(influencer): domains (auto-discover creators), topic filter fix, Shorts filter _(2026-07-13)_
 - `7c77459` feat(influencer): finish the watcher upgrade — feed view, RSS, unread badge, Home strip _(2026-07-12)_
 - `c9b1db2` feat: Add Social Media Influencer Watcher Agent with console UI _(2026-07-12)_
-- `e587052` feat(jobs): multi-source scouting + guided triage funnel (NEW lane, inline Assess, next-step cues) _(2026-07-12)_
 <!-- /AUTO:changelog -->
 
 ---

@@ -41,6 +41,9 @@ async def _ensure_tables(db):
     for _ddl in (
         "ALTER TABLE influencer_posts ADD COLUMN domain TEXT DEFAULT ''",
         "ALTER TABLE influencer_posts ADD COLUMN contact_id INTEGER",
+        "ALTER TABLE influencer_posts ADD COLUMN brief TEXT",   # on-demand: what the update says
+        "ALTER TABLE influencer_posts ADD COLUMN apply TEXT",   # on-demand: how to use it in Madan's project
+        "ALTER TABLE influencer_posts ADD COLUMN insight_source TEXT",  # transcript|article|description|title
     ):
         try:
             await db.execute(_ddl)
@@ -467,8 +470,10 @@ async def run_single_influencer_sync(inf_id: int, call_llm_fn) -> str:
 
 # ─────────────────────────── feed read model (console) ───────────────────────────
 
-async def get_feed(limit: int = 60, only_relevant: bool = True, domain: str = "") -> list:
-    """Persistent post history for the console feed view, newest first. Optional domain filter."""
+async def get_feed(limit: int = 60, only_relevant: bool = True, domain: str = "", days: int = 0) -> list:
+    """Persistent post history for the console feed view, newest first. Optional domain filter.
+    days > 0 restricts to posts first seen in the last N days (keeps the feed to recent content
+    instead of a growing 2-week backlog)."""
     async with aiosqlite.connect(DB_PATH) as db:
         await _ensure_tables(db)
         db.row_factory = aiosqlite.Row
@@ -478,16 +483,177 @@ async def get_feed(limit: int = 60, only_relevant: bool = True, domain: str = ""
         if domain:
             clauses.append("domain = ?")
             params.append(domain)
+        if days and days > 0:
+            clauses.append("seen_at >= datetime('now', ?)")
+            params.append(f"-{int(days)} days")
         where = "WHERE " + " AND ".join(clauses)
         params.append(limit)
         cursor = await db.execute(
-            f"SELECT post_id, platform, handle, name, title, url, relevant, relevance_note, "
-            f"is_read, published_at, COALESCE(domain,'') AS domain, seen_at FROM influencer_posts {where} "
+            f"SELECT post_id, platform, handle, name, title, summary, url, relevant, relevance_note, "
+            f"is_read, published_at, COALESCE(domain,'') AS domain, brief, apply, insight_source, seen_at "
+            f"FROM influencer_posts {where} "
             f"ORDER BY seen_at DESC, rowid DESC LIMIT ?",
             tuple(params),
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
+
+
+# Compact description of Madan's project, so the "use it" insight is concrete and on-brand
+# rather than generic advice. Keep it short — it's prepended to the insight prompt.
+_PROJECT_CONTEXT = (
+    "Madan is a data analyst moving into AI engineering. His project 'JARVIS' is a production, "
+    "100%-free-tier, multi-agent AI career copilot: a FastAPI backend + React console (PWA) with "
+    "~15 intent-routed agents (job scout, resume/ATS, email triage, calendar, content watchers), a "
+    "multi-provider LLM gateway (Groq->Gemini failover, circuit breaker, rate limiting), BM25 RAG, a "
+    "PDF document-RAG with citation-verified answers, and an app-wide voice agent."
+)
+
+
+def _youtube_video_id(post_id: str, url: str = "") -> str:
+    """Pull the 11-char video id from an atom id ('yt:video:ID'), a watch/shorts/youtu.be URL,
+    or a bare id. Returns '' if none found."""
+    if post_id and post_id.startswith("yt:video:"):
+        return post_id.split(":")[-1]
+    for pat in (r"[?&]v=([A-Za-z0-9_-]{11})", r"/shorts/([A-Za-z0-9_-]{11})", r"youtu\.be/([A-Za-z0-9_-]{11})"):
+        m = re.search(pat, url or "")
+        if m:
+            return m.group(1)
+    if post_id and re.fullmatch(r"[A-Za-z0-9_-]{11}", post_id):
+        return post_id
+    return ""
+
+
+async def fetch_video_transcript(video_id: str, max_chars: int = 8000) -> str:
+    """The video's actual spoken content, from YouTube captions (free, no key). Returns '' when
+    there are no captions OR the host IP is blocked (common on cloud datacenters) — caller falls
+    back to the description. Runs the sync library off the event loop."""
+    if not video_id:
+        return ""
+    import asyncio as _asyncio
+
+    def _work():
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi
+            fetched = YouTubeTranscriptApi().fetch(video_id, languages=["en", "en-US", "en-GB"])
+            return " ".join(getattr(sn, "text", "") for sn in fetched)
+        except Exception:
+            return ""
+    try:
+        text = await _asyncio.to_thread(_work)
+    except Exception:
+        text = ""
+    return re.sub(r"\s+", " ", text or "").strip()[:max_chars]
+
+
+async def fetch_article_text(url: str, max_chars: int = 6000) -> str:
+    """Main readable text of a blog/Substack/article page (free). Returns '' on failure."""
+    if not url or not url.startswith("http"):
+        return ""
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            r = await client.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; JARVIS-Watcher/1.0)"})
+        if r.status_code != 200:
+            return ""
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(r.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "header", "footer", "aside", "form"]):
+            tag.decompose()
+        node = soup.find("article") or soup.find("main") or soup.body or soup
+        text = node.get_text(" ", strip=True) if node else ""
+        return re.sub(r"\s+", " ", text).strip()[:max_chars]
+    except Exception:
+        return ""
+
+
+def extract_json_object(text: str):
+    """Best-effort parse of a single JSON object from an LLM reply (tolerates ```json fences
+    and stray prose around it)."""
+    if not text:
+        return None
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    raw = m.group(0) if m else text
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+async def generate_post_insight(call_llm_fn, post_id: str, force: bool = False) -> dict:
+    """On-demand: for one feed post, produce {brief, apply} — a plain-language summary of what
+    the update actually says, plus a concrete 'here's what you could build/do in YOUR project'
+    takeaway. Cached on the row so it's a one-time cost per post. Fails soft."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_tables(db)
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT title, summary, name, platform, url, brief, apply, insight_source "
+            "FROM influencer_posts WHERE post_id = ?", (post_id,))
+        row = await cur.fetchone()
+        if not row:
+            return {"ok": False, "error": "post not found"}
+        if row["brief"] and row["apply"] and not force:
+            return {"ok": True, "brief": row["brief"], "apply": row["apply"],
+                    "source": row["insight_source"] or "saved", "cached": True}
+        title = (row["title"] or "").strip()
+        summary = (row["summary"] or "").strip()
+        name = (row["name"] or "a creator").strip()
+        platform = (row["platform"] or "").lower()
+        url = (row["url"] or "").strip()
+
+    # Pull the RICHEST available content: the actual video transcript / full article, not the
+    # title. Falls back down the chain when the real content can't be fetched (e.g. no captions,
+    # or a cloud IP blocked by YouTube).
+    content, source = "", "title"
+    if platform == "youtube":
+        vid = _youtube_video_id(post_id, url)
+        content = await fetch_video_transcript(vid)
+        if content:
+            source = "transcript"
+    elif platform in ("rss", "blog", "substack", "medium"):
+        content = await fetch_article_text(url)
+        if content:
+            source = "article"
+    if not content:
+        if summary:
+            content, source = summary, "description"
+        else:
+            content, source = title, "title"
+    source_text = f"{title}\n\n{content}".strip()[:8000]
+    if not source_text:
+        return {"ok": False, "error": "no content to analyze"}
+
+    kind = "video (from its transcript)" if source == "transcript" else \
+           "article (its full text)" if source == "article" else "post"
+    system = (
+        f"You summarize an AI/tech creator's {kind} for a specific builder, and say how to use it. "
+        "Respond in STRICT JSON only: {\"brief\": string, \"apply\": string}. "
+        "'brief' = 2-4 plain sentences on what it actually SAYS end to end — the real substance and "
+        "takeaways of the whole thing, not hype, no 'the author discusses'. "
+        "'apply' = 2-3 sentences of CONCRETE action for Madan's project below: a specific feature to "
+        "build, a technique to adopt, or something to add/change in his agents — name the part of his "
+        "system it touches. If it genuinely doesn't apply, say so plainly and suggest the closest "
+        "useful angle. No markdown, no bullet symbols, JSON only.\n\n"
+        f"MADAN'S PROJECT:\n{_PROJECT_CONTEXT}"
+    )
+    user = f"{kind.upper()} by {name}:\n{source_text}\n\nJSON:"
+    try:
+        raw = await call_llm_fn(system, user, max_tokens=450, temperature=0.3)
+    except Exception as e:
+        return {"ok": False, "error": f"llm failed: {e}"}
+
+    parsed = extract_json_object(raw)
+    brief = (parsed.get("brief") or "").strip() if parsed else ""
+    apply = (parsed.get("apply") or "").strip() if parsed else ""
+    if not brief and not apply:
+        return {"ok": False, "error": "could not parse insight"}
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE influencer_posts SET brief = ?, apply = ?, insight_source = ? WHERE post_id = ?",
+            (brief, apply, source, post_id))
+        await db.commit()
+    return {"ok": True, "brief": brief, "apply": apply, "source": source, "cached": False}
 
 
 async def get_unread_count() -> int:

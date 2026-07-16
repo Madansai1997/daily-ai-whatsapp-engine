@@ -238,7 +238,7 @@ except Exception as e:
         raise RuntimeError("resume_editor unavailable")
     def append_bullet(b, s, t):
         raise RuntimeError("resume_editor unavailable")
-from pdf_import import extract_pdf_text
+from pdf_import import extract_pdf_text, extract_pdf_pages
 try:
     from google_docs_agent import create_resume_doc
 except Exception as e:
@@ -976,6 +976,11 @@ from company_watch_agent import init_company_watch_tables
 init_company_watch_tables()
 from people_watch_agent import init_people_watch_tables
 init_people_watch_tables()
+from pdf_rag_agent import (
+    init_pdf_rag_tables, ingest_pdf as pdf_rag_ingest, list_docs as pdf_rag_list_docs,
+    delete_doc as pdf_rag_delete, answer_question as pdf_rag_ask, assess_document as pdf_rag_assess,
+)
+init_pdf_rag_tables()
 
 
 # ==========================================
@@ -7747,6 +7752,61 @@ async def upload_pdf(file: UploadFile = File(...)):
     return JSONResponse({"reply": f"📄 *{file.filename}*\n\n{summary}"})
 
 
+# ── PDF RAG — chat with an uploaded document, citation-verified answers ──────────
+@app.post("/api/pdf-rag/upload")
+async def pdf_rag_upload(file: UploadFile = File(...)):
+    """Ingest a PDF into its own searchable, page-tagged index (see pdf_rag_agent.py)."""
+    if not file.filename.lower().endswith(".pdf"):
+        return JSONResponse({"error": "Only PDF files are supported."}, status_code=400)
+    try:
+        file_bytes = await file.read()
+        _mem_probe(f"pdfrag:before {file.filename} ({len(file_bytes)//1024}KB)")
+        pages = extract_pdf_pages(file_bytes)
+        del file_bytes  # drop raw bytes before trimming so the heap can be reclaimed
+        _mem_probe(f"pdfrag:after {file.filename}")
+        _malloc_trim()
+    except Exception as e:
+        print(f"❌ pdf-rag extraction error for {file.filename}: {e}")
+        return JSONResponse({"error": f"Couldn't read that PDF: {e}"}, status_code=400)
+    if not any((p or "").strip() for p in pages):
+        return JSONResponse(
+            {"error": f"{file.filename} has no extractable text (likely a scanned image PDF)."},
+            status_code=422)
+    meta = await pdf_rag_ingest(file.filename, pages)
+    del pages  # the full document text is now in the DB; release it from the heap
+    _malloc_trim()
+    return JSONResponse({"ok": True, "document": meta})
+
+
+@app.get("/api/pdf-rag/docs")
+async def pdf_rag_docs():
+    return JSONResponse({"documents": await pdf_rag_list_docs()})
+
+
+@app.post("/api/pdf-rag/{doc_id}/ask")
+async def pdf_rag_ask_ep(doc_id: int, request: Request):
+    body = await request.json()
+    question = (body.get("question") or "").strip()
+    if not question:
+        return JSONResponse({"error": "Ask a question about the document."}, status_code=400)
+    return JSONResponse(await pdf_rag_ask(doc_id, question, call_llm))
+
+
+@app.post("/api/pdf-rag/{doc_id}/assess")
+async def pdf_rag_assess_ep(doc_id: int, request: Request):
+    body = await request.json()
+    criteria = body.get("criteria") or []
+    if isinstance(criteria, str):
+        criteria = [c.strip() for c in re.split(r"[\n,]", criteria) if c.strip()]
+    return JSONResponse(await pdf_rag_assess(doc_id, criteria, call_llm))
+
+
+@app.delete("/api/pdf-rag/{doc_id}")
+async def pdf_rag_delete_ep(doc_id: int):
+    await pdf_rag_delete(doc_id)
+    return JSONResponse({"ok": True})
+
+
 TTS_SUMMARY_PROMPT = (
     "You are JARVIS, about to speak the verbal version of a longer written answer you already "
     "gave. Read it, actually understand the point being made, then brief it back in 2-3 sentences "
@@ -8420,7 +8480,9 @@ voiceToggleBtn.addEventListener('click', () => {
   localStorage.setItem('jarvis_voice_enabled', String(voiceEnabled));
   voiceToggleBtn.classList.toggle('muted', !voiceEnabled);
   if (!voiceEnabled && hasSpeechSynthesis) {
-    window.speechSynthesis.cancel();
+    wind
+    
+    ow.speechSynthesis.cancel();
     setSpeaking(false);
   }
 });
@@ -9592,11 +9654,22 @@ async def api_influencers_sync_single(inf_id: int):
 
 
 @app.get("/api/influencers/feed")
-async def api_influencers_feed(limit: int = 60, all: int = 0, domain: str = ""):
-    """Persistent, relevance-ranked post history for the console feed view."""
+async def api_influencers_feed(limit: int = 60, all: int = 0, domain: str = "", days: int = 5):
+    """Persistent, relevance-ranked post history for the console feed view. Defaults to the last
+    `days` days of content (recent-only); pass days=0 to see the full history."""
     from influencer_agent import get_feed
-    posts = await get_feed(limit=limit, only_relevant=(all == 0), domain=domain.strip())
+    posts = await get_feed(limit=limit, only_relevant=(all == 0), domain=domain.strip(), days=days)
     return JSONResponse(posts)
+
+
+@app.post("/api/influencers/post/{post_id}/insight")
+async def api_influencer_post_insight(post_id: str):
+    """On-demand: brief summary of what a feed post says + a concrete 'use it in your project'
+    takeaway. Cached on the post row, so repeat opens are free."""
+    from influencer_agent import generate_post_insight
+    result = await generate_post_insight(call_llm, post_id)
+    _malloc_trim()  # release the video transcript / article text pulled during analysis
+    return JSONResponse(result)
 
 
 @app.get("/api/influencers/domains")

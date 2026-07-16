@@ -6,6 +6,7 @@ import HomeCockpit from "./components/HomeCockpit";
 import SecureChat from "./components/SecureChat";
 import JobsBoard from "./components/JobsBoard";
 import Insights from "./components/Insights";
+import DocsRag from "./components/DocsRag";
 import Bills from "./components/Bills";
 import Help from "./components/Help";
 import Discover from "./components/Discover";
@@ -14,6 +15,8 @@ import SearchOverlay from "./components/SearchOverlay";
 import SettingsDrawer from "./components/SettingsDrawer";
 import NotificationsDrawer from "./components/NotificationsDrawer";
 import LockScreen from "./components/LockScreen";
+import VoiceDock from "./components/VoiceDock";
+import { useVoiceAgent } from "./lib/voiceAgent";
 import { authStatus, setUnauthHandler, isDemo } from "./lib/auth";
 import { AnimatePresence, motion } from "motion/react";
 import { LayoutGrid, Bot, Lock, Briefcase, BarChart3, Wallet, Compass } from "lucide-react";
@@ -50,10 +53,18 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  const handleNavigate = (targetScreen: ScreenId, intent?: string) => {
+  const navigate = (targetScreen: ScreenId, intent?: string) => {
     setPrevScreen(activeScreen);
     setActiveScreen(targetScreen);
     setNavIntent(intent ?? null);
+  };
+
+  // App-wide voice agent — voice commands ("open jobs", "stop") drive real navigation.
+  const voice = useVoiceAgent({ onNavigate: navigate });
+
+  const handleNavigate = (targetScreen: ScreenId, intent?: string) => {
+    voice.notifyManualNavigate(); // hush any in-flight speech when you move by hand
+    navigate(targetScreen, intent);
   };
 
   // Automated direction solver to adhere perfectly to spec's push/push_back/slide_up directives
@@ -66,7 +77,7 @@ export default function App() {
     }
 
     // Nav order index to determine forward vs backward push (matches the header order)
-    const screenOrder = [ScreenId.Core, ScreenId.Jobs, ScreenId.Insights, ScreenId.Bills, ScreenId.Assistant, ScreenId.Discover, ScreenId.Terminal, ScreenId.Help];
+    const screenOrder = [ScreenId.Core, ScreenId.Jobs, ScreenId.Insights, ScreenId.Docs, ScreenId.Bills, ScreenId.Assistant, ScreenId.Discover, ScreenId.Terminal, ScreenId.Help];
     const fromIndex = screenOrder.indexOf(from);
     const toIndex = screenOrder.indexOf(to);
 
@@ -140,7 +151,7 @@ export default function App() {
             className="w-full flex-1 flex flex-col justify-start"
           >
             {activeScreen === ScreenId.Core && (
-              <HomeCockpit onNavigate={handleNavigate} />
+              <HomeCockpit onNavigate={handleNavigate} voice={voice} />
             )}
             {activeScreen === ScreenId.Assistant && (
               <SecureChat />
@@ -153,6 +164,9 @@ export default function App() {
             )}
             {activeScreen === ScreenId.Insights && (
               <Insights />
+            )}
+            {activeScreen === ScreenId.Docs && (
+              <DocsRag />
             )}
             {activeScreen === ScreenId.Bills && (
               <Bills />
@@ -187,6 +201,9 @@ export default function App() {
           </button>
         ))}
       </nav>
+
+      {/* App-wide voice conversation control */}
+      <VoiceDock agent={voice} />
 
       {/* Unified Footer details */}
       <Footer />

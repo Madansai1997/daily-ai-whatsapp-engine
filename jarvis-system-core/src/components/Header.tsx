@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { ScreenId } from "../types";
-import { Search, Bell, Settings, HelpCircle, Terminal as TerminalIcon } from "lucide-react";
+import { Search, Bell, Settings, HelpCircle, Terminal as TerminalIcon, RefreshCw } from "lucide-react";
 
 interface HeaderProps {
   activeScreen: ScreenId;
@@ -28,6 +28,24 @@ export default function Header({
   const [weather, setWeather] = useState<Weather | null>(null);
   const [memPct, setMemPct] = useState<number | null>(null);
   const [unread, setUnread] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Force the installed PWA / cached tab to pull the latest deployed build without a reinstall:
+  // drop the service worker + every cache, then hard-reload so fresh HTML + hashed assets load.
+  const forceRefresh = async () => {
+    setRefreshing(true);
+    try {
+      if ("serviceWorker" in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map((r) => r.unregister()));
+      }
+      if ("caches" in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+    } catch { /* ignore — reload anyway */ }
+    window.location.reload();
+  };
 
   // Pull real weather (Hyderabad) + memory usage + unread notification count.
   useEffect(() => {
@@ -103,6 +121,7 @@ export default function Header({
               { screen: ScreenId.Core, label: "HOME", active: activeScreen === ScreenId.Core },
               { screen: ScreenId.Jobs, label: "JOBS", active: activeScreen === ScreenId.Jobs || activeScreen === ScreenId.AtsAnalysis },
               { screen: ScreenId.Insights, label: "INSIGHTS", active: activeScreen === ScreenId.Insights },
+              { screen: ScreenId.Docs, label: "DOCS", active: activeScreen === ScreenId.Docs },
               { screen: ScreenId.Bills, label: "BILLS", active: activeScreen === ScreenId.Bills },
               { screen: ScreenId.Assistant, label: "JARVIS", active: activeScreen === ScreenId.Assistant },
               { screen: ScreenId.Discover, label: "DISCOVER", active: activeScreen === ScreenId.Discover || activeScreen === ScreenId.Trends || activeScreen === ScreenId.Daily },
@@ -145,6 +164,14 @@ export default function Header({
                 {unread > 99 ? "99+" : unread}
               </span>
             )}
+          </button>
+          <button
+            onClick={forceRefresh}
+            disabled={refreshing}
+            className="text-[#bbc9cd] hover:text-[#8aebff] transition-colors p-1 cursor-pointer disabled:opacity-60"
+            title="Update to latest — pulls the newest deployed version (no reinstall needed)"
+          >
+            <RefreshCw className={`w-5 h-5 ${refreshing ? "animate-spin" : ""}`} />
           </button>
           <button
             onClick={() => onNavigate(ScreenId.Terminal)}

@@ -15,3 +15,4 @@ pdfplumber
 pywebpush
 docx2txt
 python-docx
+youtube-transcript-api

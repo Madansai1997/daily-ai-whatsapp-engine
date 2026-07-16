@@ -20,7 +20,23 @@ interface Idea {
   quotes: Quote[];
   status: "new" | "shortlisted" | "building" | "dismissed";
   has_brief?: boolean;
+  created_at?: string;
 }
+
+// Relative age of a discovery, and whether it's "fresh" (found in the last ~36h). This is about
+// WHEN a trend was discovered — distinct from `status` (a workflow state that's also called "new").
+const ideaAge = (ts?: string): { label: string; fresh: boolean } => {
+  if (!ts) return { label: "", fresh: false };
+  const d = new Date(ts);
+  const s = (Date.now() - d.getTime()) / 1000;
+  if (isNaN(s)) return { label: "", fresh: false };
+  const fresh = s <= 36 * 3600;
+  let label = "just now";
+  if (s >= 86400) label = `${Math.floor(s / 86400)}d ago`;
+  else if (s >= 3600) label = `${Math.floor(s / 3600)}h ago`;
+  else if (s >= 60) label = `${Math.floor(s / 60)}m ago`;
+  return { label, fresh };
+};
 interface Brief {
   mvp_features: string[];
   stack: string[];
@@ -275,12 +291,20 @@ export default function TrendLab() {
                   {/* Body */}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap mb-1">
+                      {(() => { const a = ideaAge(idea.created_at); return a.fresh ? (
+                        <span className="text-[8px] font-mono font-bold uppercase tracking-wide px-1.5 py-0.5 rounded border border-[#a3e635]/40 bg-[#a3e635]/15 text-[#a3e635] flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#a3e635] animate-pulse" /> JUST FOUND
+                        </span>
+                      ) : null; })()}
                       <h3 className="text-[#dfe2f3] font-bold text-base">{idea.title}</h3>
                       {idea.sources.map((s) => (
                         <span key={s} className="text-[8px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded border border-white/10 bg-white/5 text-[#859397]">{s}</span>
                       ))}
                       {idea.status !== "new" && (
                         <span className="text-[8px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded border border-[#8aebff]/30 bg-[#8aebff]/10 text-[#8aebff]">{idea.status}</span>
+                      )}
+                      {idea.created_at && (
+                        <span className="text-[9px] font-mono text-[#859397]/70 ml-auto">{ideaAge(idea.created_at).label}</span>
                       )}
                     </div>
                     {idea.pain && <p className="text-[13px] text-[#bbc9cd] leading-relaxed mb-1"><span className="text-[#859397]">Pain: </span>{idea.pain}</p>}

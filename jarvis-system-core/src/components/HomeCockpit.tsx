@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { motion } from "motion/react";
 import { ScreenId } from "../types";
 import {
@@ -20,6 +20,7 @@ interface Cockpit {
 
 interface Props {
   onNavigate: (screen: ScreenId, intent?: string) => void;
+  voice: import("../lib/voiceAgent").VoiceAgent;
 }
 
 interface Headline { title: string; url: string; snippet: string; }
@@ -34,19 +35,13 @@ const ICONS: Record<string, React.ElementType> = {
   clock: Clock, wallet: Wallet, users: Users, refresh: RefreshCw,
 };
 
-export default function HomeCockpit({ onNavigate }: Props) {
+export default function HomeCockpit({ onNavigate, voice }: Props) {
   const [data, setData] = useState<Cockpit | null>(null);
   const [loading, setLoading] = useState(true);
-  const [speaking, setSpeaking] = useState(false);
-  const [listening, setListening] = useState(false);
-  const [voiceMsg, setVoiceMsg] = useState<string>("");
   const [daily, setDaily] = useState<DailySnapshot | null>(null);
   const [watch, setWatch] = useState<FeedHighlight[]>([]);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const recogRef = useRef<any>(null);
-  const levelRef = useRef(-1);            // live audio envelope for the globe (-1 = no signal)
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const levelRafRef = useRef(0);
+  const speaking = voice.speaking;          // shared with the app-wide voice agent
+  const listening = voice.state === "listening";
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -61,14 +56,7 @@ export default function HomeCockpit({ onNavigate }: Props) {
   useEffect(() => {
     load();
     const t = setInterval(() => { if (!document.hidden) load(true); }, 30000);
-    return () => {
-      clearInterval(t);
-      try { window.speechSynthesis?.cancel(); } catch { /* */ }
-      try { audioRef.current?.pause(); } catch { /* */ }
-      try { recogRef.current?.stop(); } catch { /* */ }
-      try { cancelAnimationFrame(levelRafRef.current); } catch { /* */ }
-      try { audioCtxRef.current?.close(); } catch { /* */ }
-    };
+    return () => clearInterval(t);
   }, [load]);
 
   // Today's AI headlines — the "front page" strip (read-only; full lesson lives on the Daily tab).
@@ -87,129 +75,19 @@ export default function HomeCockpit({ onNavigate }: Props) {
       .catch(() => { /* leave empty */ });
   }, []);
 
-  // Stop whatever's currently talking (natural audio or browser voice).
-  const stopSpeaking = useCallback(() => {
-    try { cancelAnimationFrame(levelRafRef.current); } catch { /* */ }
-    levelRef.current = -1;
-    try { audioRef.current?.pause(); audioRef.current = null; } catch { /* */ }
-    try { window.speechSynthesis?.cancel(); } catch { /* */ }
-    setSpeaking(false);
-  }, []);
-
-  // Drive the globe's pulse from the REAL audio via a Web Audio analyser (natural voice only;
-  // the browser fallback can't be tapped, so the globe uses its synthetic envelope there).
-  const attachAnalyser = useCallback((audio: HTMLAudioElement) => {
-    try {
-      const AC = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AC) return;
-      const ctx: AudioContext = audioCtxRef.current || new AC();
-      audioCtxRef.current = ctx;
-      if (ctx.state === "suspended") ctx.resume().catch(() => {});
-      const srcNode = ctx.createMediaElementSource(audio);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 256;
-      const buf = new Uint8Array(analyser.frequencyBinCount);
-      srcNode.connect(analyser);
-      analyser.connect(ctx.destination);
-      const tick = () => {
-        analyser.getByteFrequencyData(buf);
-        let sum = 0;
-        for (let i = 0; i < buf.length; i++) sum += buf[i];
-        levelRef.current = Math.min(1, (sum / buf.length / 255) * 1.9); // 0..1, scaled for punch
-        levelRafRef.current = requestAnimationFrame(tick);
-      };
-      tick();
-    } catch { /* analyser is a nice-to-have; ignore if the browser blocks it */ }
-  }, []);
-
-  // Speak text — prefer the natural Gemini voice (/api/tts → WAV), fall back to the free
-  // browser voice on 204/quota/error. Keeps `speaking` true for the whole utterance so the
-  // globe pulses in time with the actual playback.
-  const speak = useCallback(async (text: string) => {
-    if (!text) return;
-    setSpeaking(true);
-    try {
-      const res = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
-      if (res.ok && res.status !== 204) {
-        const buf = await res.arrayBuffer();
-        const url = URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
-        const audio = new Audio(url);
-        audioRef.current = audio;
-        const cleanup = () => {
-          try { cancelAnimationFrame(levelRafRef.current); } catch { /* */ }
-          levelRef.current = -1;
-          setSpeaking(false);
-          URL.revokeObjectURL(url);
-        };
-        audio.onended = cleanup;
-        audio.onerror = cleanup;
-        attachAnalyser(audio);
-        await audio.play();
-        return;
-      }
-    } catch { /* fall through to browser voice */ }
-    // Fallback: free browser voice.
-    try {
-      const synth = window.speechSynthesis;
-      if (!synth) { setSpeaking(false); return; }
-      synth.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.rate = 1.02;
-      u.onend = () => setSpeaking(false);
-      u.onerror = () => setSpeaking(false);
-      synth.speak(u);
-    } catch { setSpeaking(false); }
-  }, []);
-
-  // ▶ reads the full JARVIS standup aloud.
+  // ▶ reads the full JARVIS standup aloud through the shared voice agent (natural Gemini
+  // voice → browser fallback; the globe pulses to the real audio via voice.level).
   const speakBriefing = async () => {
-    if (speaking) { stopSpeaking(); return; }
-    setVoiceMsg("");
+    if (speaking) { voice.stopSpeaking(); return; }
     try {
       const d = await fetch("/api/standup").then((r) => r.json());
       const text = d?.ok ? d.text : `${data?.greeting}, ${data?.name}. ${data?.headline}`;
-      await speak(text);
-    } catch { setSpeaking(false); }
+      await voice.speak(text);
+    } catch { /* voice agent handles its own state */ }
   };
 
-  // 🎙 "Hey JARVIS" — record a question with the browser's Web Speech API, send it through
-  // the same chat brain, then speak the reply while the globe pulses. All free.
-  const askByVoice = () => {
-    if (listening) { try { recogRef.current?.stop(); } catch { /* */ } return; }
-    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) { setVoiceMsg("Voice input isn't supported in this browser — try Chrome."); return; }
-    stopSpeaking();
-    const recog = new SR();
-    recogRef.current = recog;
-    recog.lang = "en-US";
-    recog.interimResults = false;
-    recog.maxAlternatives = 1;
-    recog.onstart = () => { setListening(true); setVoiceMsg("Listening…"); };
-    recog.onerror = () => { setListening(false); setVoiceMsg("Didn't catch that."); };
-    recog.onend = () => setListening(false);
-    recog.onresult = async (e: any) => {
-      const said = e.results?.[0]?.[0]?.transcript?.trim();
-      setListening(false);
-      if (!said) { setVoiceMsg("Didn't catch that."); return; }
-      setVoiceMsg(`“${said}”`);
-      try {
-        const res = await fetch("/chat-message", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: said }),
-        });
-        const d = await res.json();
-        const reply = (d?.reply || d?.response || d?.message || "").toString().trim();
-        if (reply) { setVoiceMsg(reply); await speak(reply); }
-        else setVoiceMsg("No reply came back.");
-      } catch { setVoiceMsg("Couldn't reach JARVIS just now."); }
-    };
-    try { recog.start(); } catch { setListening(false); }
-  };
+  // 🎙 ASK → start/stop the app-wide voice conversation (commands + Q&A, hands-free).
+  const askByVoice = () => voice.toggle();
 
   const go = (target: string) => {
     if (target.startsWith("jobs:")) onNavigate(ScreenId.Jobs, target.slice(5));
@@ -230,7 +108,7 @@ export default function HomeCockpit({ onNavigate }: Props) {
         <div className="flex flex-col items-center text-center">
           <div className="text-[10px] font-mono tracking-[0.35em] text-[#8aebff]/70 uppercase mb-1">J.A.R.V.I.S</div>
           <div className="relative w-full max-w-[300px]">
-            <JarvisGlobe speaking={speaking} level={levelRef} />
+            <JarvisGlobe speaking={speaking} level={voice.level} />
             {/* status ring caption */}
             <div className="absolute -bottom-1 left-0 w-full flex items-center justify-center gap-2 text-[10px] font-mono">
               <span className={`w-1.5 h-1.5 rounded-full ${speaking ? "bg-[#ffb4ab] animate-pulse" : "bg-[#5eead4]"}`} />
@@ -255,13 +133,13 @@ export default function HomeCockpit({ onNavigate }: Props) {
             </button>
             <button
               onClick={askByVoice}
-              title="Ask JARVIS out loud"
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold font-mono border transition-all cursor-pointer ${listening ? "bg-[#8aebff]/20 border-[#8aebff]/50 text-[#8aebff]" : "bg-white/5 border-white/10 text-[#bbc9cd] hover:border-[#8aebff]/30 hover:text-[#8aebff]"}`}
+              title="Talk to JARVIS — say “open jobs”, ask a question, or “stop”"
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold font-mono border transition-all cursor-pointer ${voice.active ? "bg-[#8aebff]/20 border-[#8aebff]/50 text-[#8aebff]" : "bg-white/5 border-white/10 text-[#bbc9cd] hover:border-[#8aebff]/30 hover:text-[#8aebff]"}`}
             >
-              <Mic className={`w-4 h-4 ${listening ? "animate-pulse" : ""}`} /> {listening ? "LISTENING…" : "ASK"}
+              <Mic className={`w-4 h-4 ${listening ? "animate-pulse" : ""}`} /> {voice.active ? (listening ? "LISTENING…" : "TALKING…") : "ASK"}
             </button>
           </div>
-          {voiceMsg && <p className="text-[11px] font-mono text-[#859397] mt-3 max-w-lg">{voiceMsg}</p>}
+          {voice.caption && <p className="text-[11px] font-mono text-[#859397] mt-3 max-w-lg">{voice.caption}</p>}
         </div>
       </section>
 

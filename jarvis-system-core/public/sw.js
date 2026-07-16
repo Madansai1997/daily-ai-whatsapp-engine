@@ -1,6 +1,6 @@
 /* JARVIS service worker — Web Push delivery + notification clicks + PWA app-shell cache. */
 
-const CACHE = "jarvis-shell-v1";
+const CACHE = "jarvis-shell-v2";
 const SHELL = ["/console/", "/console/index.html", "/console/manifest.webmanifest",
                "/console/icon-192.png", "/console/icon-512.png"];
 
