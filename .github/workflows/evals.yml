@@ -1,0 +1,28 @@
+name: golden-evals
+
+# Regression gate: runs the deterministic golden evals on every push / PR. No API key is
+# required — the deterministic layer (reliability + parsing + prompt invariants) is the hard
+# gate and is fast, free and flake-free. If a GROQ_API_KEY repo secret is present, the full
+# LLM-judged suite runs too.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run golden evals
+        env:
+          SAFE_MODE: "1"
+          # Optional — set this repo secret to also run the LLM-judged suite in CI.
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python run_evals.py

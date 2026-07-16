@@ -145,6 +145,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `db9690d` feat: AI Data Analyst + PDF doc summary; security/reliability hardening; mobile+UI fixes _(2026-07-16)_
 - `40d837b` refactor(prompts): prompt library + few-shot examples on the highest-stakes prompts _(2026-07-16)_
 - `cd95317` feat: PDF-RAG Docs, conversational voice agent, richer influencer insights, PWA refresh + memory trims _(2026-07-16)_
 - `2dd27e1` fix(chat): route "job portal / how many applications" to the real tracker _(2026-07-16)_
@@ -156,7 +157,6 @@ npm install && npm run build     # served by the engine at /console
 - `b869f49` feat(jobs): declutter the Kanban — compact cards, overflow menu, board filters _(2026-07-13)_
 - `5b919f4` feat(watchers): shared relevance engine + Company Watch + "Watch these" in Daily _(2026-07-13)_
 - `1c2e3df` feat(influencer): group feed by channel (collapsible) + assign domain on manual add _(2026-07-13)_
-- `b4fa0d7` feat(influencer): domains (auto-discover creators), topic filter fix, Shorts filter _(2026-07-13)_
 <!-- /AUTO:changelog -->
 
 ---
