@@ -403,9 +403,15 @@ MEMORY_INTENT_PROMPT = (
     "to the user in this conversation — those are separate explicit commands and should be OTHER. content = null, "
     "reminder = null, email = null.\n"
     "Use APPLICATION_ACTION when the user wants to see or update their tracked job APPLICATIONS (not search "
-    'for new jobs). application.action="list" to view their pipeline (e.g. "show my applications", "what jobs '
-    'have I applied to", "my job pipeline"); fill application.status_filter only if they ask for a specific stage '
-    '(e.g. "which ones am I interviewing for"). application.action="update" to change a status (e.g. "mark '
+    'for new jobs). IMPORTANT: JARVIS tracks Madan\'s applications on an internal Kanban board / tracker — when '
+    'he asks about his "applications", "job portal", "jobs portal", "board", "kanban", "pipeline", "the jobs '
+    'thing", or "the app" (as in his job-hunt app), he means THAT internal tracker, which you CAN read — never '
+    "treat it as an external site you can't access. application.action=\"list\" to view or COUNT the pipeline "
+    '(e.g. "show my applications", "what jobs have I applied to", "my job pipeline", "how many applications do I '
+    'have", "how many jobs are in my portal", "how\'s my board looking", "how are my applications doing", '
+    '"what\'s in my job portal", "how many did I apply to"); fill application.status_filter only if they ask for a '
+    'specific stage (e.g. "which ones am I interviewing for", "how many offers do I have"). '
+    'application.action="update" to change a status (e.g. "mark '
     'Cognizant as interviewing", "I got rejected from Infosys", "got an offer from BP") — fill application.company '
     "with the company/role identifier and application.new_status with the target stage. "
     'application.action="add" when the user says they APPLIED to a specific job somewhere and wants it tracked '
@@ -6472,6 +6478,34 @@ You are not limited to any domain. Explain whatever the user asks."""
         context_str = "\n".join([f"- {c['content']}" for c in relevant_context])
         facts_str = "\n".join([f"- {f}" for f in user_facts])
 
+        # Live job-tracker snapshot so general chat can answer questions about the Kanban
+        # board factually (counts by stage) instead of denying access to Madan's OWN tracker.
+        # This is the safety net for phrasings that slip past the APPLICATION_ACTION classifier
+        # (e.g. "how's my job portal doing"). Read-only; one cheap query per web message.
+        try:
+            _apps = await list_applications()
+            if _apps:
+                _by = {}
+                for _a in _apps:
+                    _st = (_a.get("status") or "unknown")
+                    _by[_st] = _by.get(_st, 0) + 1
+                _parts = ", ".join(f"{n} {s}" for s, n in sorted(_by.items(), key=lambda kv: -kv[1]))
+                pipeline_fact_line = (
+                    f"- LIVE JOB TRACKER SNAPSHOT (read-only, current): Madan has {len(_apps)} "
+                    f"applications on his internal Kanban board — {_parts}. This board IS his "
+                    "'applications'/'job portal'/'jobs portal'/'board'/'pipeline'; when he asks how "
+                    "many applications he has or how his board/portal is doing, answer directly from "
+                    "these real numbers. NEVER say you can't access it or ask him to provide the count.\n"
+                )
+            else:
+                pipeline_fact_line = (
+                    "- LIVE JOB TRACKER SNAPSHOT: Madan's internal Kanban board currently has 0 tracked "
+                    "applications. If he asks how many, say none are tracked yet — never claim you "
+                    "can't access his board/job portal.\n"
+                )
+        except Exception:
+            pipeline_fact_line = ""
+
         # Cross-cutting learned reply style — how Madan actually communicates. Shapes every
         # JARVIS reply so it mirrors his register. Empty until there's enough history.
         try:
@@ -6552,6 +6586,7 @@ You are not limited to any domain. Explain whatever the user asks."""
                 "- Emails triage to WhatsApp every hour\n"
                 "- Briefings go to WhatsApp\n"
                 f"{gmail_fact_line}"
+                f"{pipeline_fact_line}"
                 "- Calendar features are built in (e.g. 'what's on my calendar "
                 "today', 'put a meeting tomorrow at 3pm') — but do NOT claim "
                 "calendar access definitely works OR definitely doesn't until "
