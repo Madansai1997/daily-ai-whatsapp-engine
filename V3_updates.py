@@ -39,6 +39,7 @@ from openai import AsyncOpenAI
 
 load_dotenv()
 
+from llm_gateway import GATEWAY
 from rag_engine import retrieve_relevant_context, search_user_facts
 from email_triage import (
     init_email_tables,
@@ -514,49 +515,100 @@ def _log_llm_call(provider: str, model: str, ok: bool = True):
         pass
 
 
+async def _try_one_model(client, model: str, messages: list, max_tokens: int,
+                         temperature: float) -> str | None:
+    """Send a single completion. Returns the answer string, or None on empty content.
+    Raises on transport/API error (so the caller can record a failure and fail over)."""
+    # If calling OmniRoute, map model IDs to prefixed names to avoid ambiguity.
+    omni_url = os.environ.get("OMNIROUTE_URL", "").strip()
+    if omni_url:
+        if model == "openai/gpt-oss-120b":
+            model = "groq/openai/gpt-oss-120b"
+        elif model == "llama-3.3-70b-versatile":
+            model = "groq/llama-3.3-70b-versatile"
+        elif model == "llama-3.1-8b-instant":
+            model = "groq/llama-3.1-8b-instant"
+        elif model == "gemini-2.5-flash":
+            model = "openrouter/google/gemini-2.5-flash"
+
+    extra_body = {"reasoning_effort": "low"} if "gpt-oss" in model else {}
+    kwargs = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "extra_body": extra_body,
+        "messages": messages,
+    }
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    response = await client.chat.completions.create(**kwargs)
+    content = response.choices[0].message.content
+    if content and content.strip():
+        return content
+    return None
+
+
 async def _complete_with_fallback(messages: list, max_tokens: int, temperature: float = None) -> str:
     """Run a chat completion across the model chain, returning the first non-empty answer.
+
+    The chain is wrapped by GATEWAY (llm_gateway.py): a per-provider circuit breaker
+    skips a backend that's been failing (so we fail over instantly instead of eating its
+    latency every call), and a sliding-window rate limiter keeps us under free-tier RPM.
+    Both are advisory — if the gateway would skip every provider, we force-try the full
+    chain anyway (second pass) so an over-eager breaker can never take the whole app down.
 
     GPT-OSS models on Groq spend tokens on hidden reasoning before the visible answer —
     with a tight max_tokens budget this can consume the whole budget and return empty
     content (finish_reason="length", zero actual answer). reasoning_effort="low" fixes
     this, but only gpt-oss models accept that parameter — other models (Llama, Gemini)
-    hard-error on it, so it's only added when the model name matches.
+    hard-error on it, so it's only added when the model name matches (see _try_one_model).
     """
-    last_err = None
-    for client, model in _model_chain():
-        # If calling OmniRoute, map model IDs to prefixed names to avoid ambiguity
-        omni_url = os.environ.get("OMNIROUTE_URL", "").strip()
-        if omni_url:
-            if model == "openai/gpt-oss-120b":
-                model = "groq/openai/gpt-oss-120b"
-            elif model == "llama-3.3-70b-versatile":
-                model = "groq/llama-3.3-70b-versatile"
-            elif model == "llama-3.1-8b-instant":
-                model = "groq/llama-3.1-8b-instant"
-            elif model == "gemini-2.5-flash":
-                model = "openrouter/google/gemini-2.5-flash"
+    def _provider_of(model: str) -> str:
+        return "gemini" if model == GEMINI_MODEL else "groq"
 
+    last_err = None
+    attempted_any = False
+    chain = _model_chain()
+
+    # Pass 1 — honour the gateway (skip open circuits / rate-limited providers).
+    for client, model in chain:
+        provider = _provider_of(model)
+        skip, reason = GATEWAY.should_skip(provider)
+        if skip:
+            print(f"⏭️  Skipping {provider}/{model} — gateway: {reason}")
+            continue
+        attempted_any = True
+        GATEWAY.record_attempt(provider)
         try:
-            extra_body = {"reasoning_effort": "low"} if "gpt-oss" in model else {}
-            kwargs = {
-                "model": model,
-                "max_tokens": max_tokens,
-                "extra_body": extra_body,
-                "messages": messages,
-            }
-            if temperature is not None:
-                kwargs["temperature"] = temperature
-            response = await client.chat.completions.create(**kwargs)
-            content = response.choices[0].message.content
-            if content and content.strip():
-                _log_llm_call("gemini" if model == GEMINI_MODEL else "groq", model, True)
+            content = await _try_one_model(client, model, messages, max_tokens, temperature)
+            if content is not None:
+                GATEWAY.record_success(provider)
+                _log_llm_call(provider, model, True)
                 return content
             print(f"⚠️ Model {model} returned empty content. Trying next...")
         except Exception as e:
             last_err = e
+            GATEWAY.record_failure(provider)
             print(f"⚠️ Model {model} failed: {e}. Trying next...")
             continue
+
+    # Pass 2 — the gateway skipped every provider (all circuits open / rate-limited).
+    # Fail OPEN: force-try the whole chain so the app never goes dark on the gateway.
+    if not attempted_any:
+        print("⚠️ Gateway skipped all providers — force-trying the full chain (fail-open).")
+        for client, model in chain:
+            provider = _provider_of(model)
+            GATEWAY.record_attempt(provider)
+            try:
+                content = await _try_one_model(client, model, messages, max_tokens, temperature)
+                if content is not None:
+                    GATEWAY.record_success(provider)
+                    _log_llm_call(provider, model, True)
+                    return content
+            except Exception as e:
+                last_err = e
+                GATEWAY.record_failure(provider)
+                continue
+
     raise Exception(f"All models failed (last error: {last_err})")
 
 
@@ -1064,8 +1116,17 @@ import hmac as _hmac
 import hashlib as _hashlib
 
 JARVIS_PIN = os.environ.get("JARVIS_PIN", "").strip()
+# Optional recruiter/guest demo PIN. When set (and a real PIN is configured), logging in
+# with it returns an EMPTY, non-privileged token — so the demo session can never read or
+# mutate Madan's real data (protected endpoints 401 on it). The frontend recognises the
+# demo session and renders the console from bundled sample fixtures instead. This makes the
+# console shareable as a live demo without exposing anything personal.
+JARVIS_DEMO_PIN = os.environ.get("JARVIS_DEMO_PIN", "").strip()
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "").strip() or f"insecure-dev-secret-{JARVIS_PIN}"
 AUTH_REQUIRED = bool(JARVIS_PIN)
+# Demo is only meaningful when the console is actually locked AND the demo PIN differs from
+# the real one (never let the demo PIN double as a backdoor to real data).
+DEMO_AVAILABLE = bool(JARVIS_DEMO_PIN) and AUTH_REQUIRED and JARVIS_DEMO_PIN != JARVIS_PIN
 _TOKEN_TTL = 12 * 3600  # seconds
 # Endpoints carrying personal data/actions — gated when a PIN is configured.
 _PROTECTED_PREFIXES = (
@@ -1104,7 +1165,7 @@ async def _auth_gate(request: Request, call_next):
 
 @app.get("/auth/status")
 async def auth_status():
-    return JSONResponse({"required": AUTH_REQUIRED})
+    return JSONResponse({"required": AUTH_REQUIRED, "demo_available": DEMO_AVAILABLE})
 
 
 @app.post("/auth/login")
@@ -1115,9 +1176,16 @@ async def auth_login(request: Request):
         return JSONResponse(
             {"ok": False, "error": "Too many attempts — wait a minute."}, status_code=429)
     try:
-        pin = str((await request.json()).get("pin", ""))
+        body = await request.json()
     except Exception:
-        pin = ""
+        body = {}
+    pin = str(body.get("pin", ""))
+    # "Explore the demo" button → keyless demo login (no PIN needed, and typing the demo
+    # PIN works too). Either way the token is EMPTY and authorises nothing: protected
+    # endpoints still 401, and the frontend serves sample fixtures for the demo session.
+    if DEMO_AVAILABLE and (body.get("demo") is True or (pin and _hmac.compare_digest(pin, JARVIS_DEMO_PIN))):
+        _login_guard["fails"] = 0
+        return JSONResponse({"ok": True, "token": "", "demo": True})
     await asyncio.sleep(0.4)  # throttle brute force
     if pin and _hmac.compare_digest(pin, JARVIS_PIN):
         _login_guard["fails"] = 0
@@ -9199,6 +9267,45 @@ def _day_series(n: int) -> list:
     """Last n calendar days as 'YYYY-MM-DD' strings (UTC), oldest first."""
     today = dt.datetime.now(dt.timezone.utc).date()
     return [(today - dt.timedelta(days=i)).isoformat() for i in range(n - 1, -1, -1)]
+
+
+@app.get("/api/insights/llm")
+async def api_insights_llm():
+    """Live view of the LLM gateway (llm_gateway.py): per-provider circuit-breaker state
+    and rate-limiter usage (in-memory, this process) fused with the historical provider /
+    model split from the llm_calls ledger. Powers the 'Gateway health' card on Insights."""
+    async def _rows(sql, args=()):
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(sql, args)
+            return [dict(r) for r in await cur.fetchall()]
+
+    live = GATEWAY.snapshot()
+
+    prov_rows = await _rows("SELECT provider, COUNT(*) AS n FROM llm_calls GROUP BY provider")
+    totals = [{"provider": r["provider"] or "unknown", "calls": r["n"]} for r in prov_rows]
+    total_calls = sum(x["calls"] for x in totals)
+    gemini_calls = sum(x["calls"] for x in totals if x["provider"] == "gemini")
+    fallback_rate = round(100 * gemini_calls / total_calls) if total_calls else 0
+
+    today_str = dt.datetime.now(dt.timezone.utc).date().isoformat()
+    today_rows = await _rows(
+        "SELECT COUNT(*) AS n FROM llm_calls WHERE substr(created_at,1,10) = ?", (today_str,))
+    today = today_rows[0]["n"] if today_rows else 0
+
+    model_rows = await _rows(
+        "SELECT model, COUNT(*) AS n FROM llm_calls GROUP BY model ORDER BY n DESC LIMIT 8")
+    models = [{"model": (r["model"] or "unknown").split("/")[-1][:24], "calls": r["n"]}
+              for r in model_rows]
+
+    return JSONResponse({
+        "gateway": live,                 # {providers:{groq:{circuit,...}}, config:{...}}
+        "totals": totals,                # lifetime calls per provider (from ledger)
+        "total_calls": total_calls,
+        "fallback_rate": fallback_rate,  # % served by the Gemini fallback
+        "today": today,
+        "models": models,                # which models actually answered
+    })
 
 
 @app.get("/api/analytics")

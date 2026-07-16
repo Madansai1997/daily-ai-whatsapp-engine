@@ -44,6 +44,15 @@ interface Metrics {
   uptime: string; errors_24h: number; agents: number;
   patterns_learned: number; db: string; scheduler_mode: string;
 }
+interface GatewayProvider {
+  circuit: "open" | "closed"; opens_in_secs: number;
+  calls: number; successes: number; failures: number;
+  rate_limit_skips: number; breaker_trips: number; window_used: number; rpm_limit: number;
+}
+interface GatewayInsights {
+  gateway: { providers: Record<string, GatewayProvider>; config: { fail_threshold: number; cooldown_secs: number; rpm_limit: number; window_secs: number } };
+  fallback_rate: number; total_calls: number; today: number;
+}
 
 const CYAN = "#8aebff", AMBER = "#ffd6a3", GREEN = "#5eead4", LIME = "#a3e635", RED = "#ffb4ab", MUTED = "#859397", PURPLE = "#c084fc";
 const TOOL_COLORS: Record<string, string> = { "claude-code": CYAN, antigravity: PURPLE };
@@ -78,6 +87,7 @@ export default function Insights() {
   const [funnel, setFunnel] = useState<{ funnel: { stage: string; count: number }[]; rejected: number; applied_total: number; response_rate: number; responded_total: number; avg_response_days: number | null; ghost_rate: number; ghosted: number; ghost_days: number; sources: { source: string; applied: number; responded: number; yield: number }[] } | null>(null);
   const [freshness, setFreshness] = useState<{ id: number; name: string; url?: string; days_since: number | null; interval_days: number; status: string; auto: boolean }[] | null>(null);
   const [shield, setShield] = useState<{ checked: number; clear: boolean; buffer_min: number; conflicts: { a: string; b: string; when: string; interview_involved: boolean }[]; unbuffered: { summary: string; when: string; issues: string[] }[] } | null>(null);
+  const [gateway, setGateway] = useState<GatewayInsights | null>(null);
   const [loading, setLoading] = useState(true);
   const [logOpen, setLogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -118,13 +128,14 @@ export default function Insights() {
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      const [a, m, sg, fn, pf, cs] = await Promise.all([
+      const [a, m, sg, fn, pf, cs, gw] = await Promise.all([
         fetch("/api/analytics", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
         fetch("/api/system-metrics", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
         fetch("/api/skill-gap", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
         fetch("/api/response-analytics", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
         fetch("/api/profile-freshness", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
         fetch("/api/calendar-shield", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
+        fetch("/api/insights/llm", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
       ]);
       if (a) setData(a);
       if (m) setMetrics(m);
@@ -132,6 +143,7 @@ export default function Insights() {
       if (fn) setFunnel(fn);
       if (pf?.assets) setFreshness(pf.assets);
       if (cs) setShield(cs);
+      if (gw) setGateway(gw);
     } catch { /* keep last */ } finally {
       if (!silent) setLoading(false);
     }
@@ -354,6 +366,72 @@ export default function Insights() {
                 })}
               </div>
             </>
+          )}
+        </Panel>
+      </section>
+
+      {/* LLM gateway health — live circuit breaker + rate limiter state */}
+      <section className="grid grid-cols-1 gap-6">
+        <Panel title="LLM gateway — circuit breakers & rate limiting" icon={<CircuitBoard className="w-4 h-4" />}>
+          {!gateway || Object.keys(gateway.gateway.providers).length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-[130px] text-center gap-2">
+              <ShieldCheck className="w-8 h-8 text-[#8aebff]/40" />
+              <p className="text-sm text-[#bbc9cd]">Gateway armed — no provider traffic this run yet.</p>
+              <p className="text-[11px] font-mono text-[#859397] max-w-md">
+                Every LLM call routes through a per-provider circuit breaker (opens after {gateway?.gateway.config.fail_threshold ?? 4} straight fails, {gateway?.gateway.config.cooldown_secs ?? 30}s cooldown) and a {gateway?.gateway.config.rpm_limit ?? 25}/min rate limiter. State appears here on first call.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {(Object.entries(gateway.gateway.providers) as [string, GatewayProvider][]).map(([name, p]) => {
+                const open = p.circuit === "open";
+                const c = open ? RED : GREEN;
+                const winPct = Math.min(100, Math.round((100 * p.window_used) / Math.max(1, p.rpm_limit)));
+                const winColor = winPct >= 85 ? RED : winPct >= 60 ? AMBER : GREEN;
+                const isGem = name.toLowerCase().includes("gemini");
+                return (
+                  <div key={name} className="rounded-xl border border-white/5 bg-white/[0.02] p-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-2">
+                        <span className="w-2.5 h-2.5 rounded-full" style={{ background: c, boxShadow: `0 0 8px ${c}`, animation: open ? "none" : "pulse 2s infinite" }} />
+                        <span className="text-sm font-mono font-bold text-[#dfe2f3] uppercase">{name}</span>
+                        <span className="text-[9px] font-mono px-1.5 py-0.5 rounded" style={{ background: `${isGem ? PURPLE : CYAN}18`, color: isGem ? PURPLE : CYAN }}>
+                          {isGem ? "FALLBACK" : "PRIMARY"}
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded uppercase tracking-widest" style={{ background: `${c}18`, color: c }}>
+                        {open ? `OPEN · ${p.opens_in_secs}s` : "CLOSED"}
+                      </span>
+                    </div>
+                    {/* rate-limit window usage */}
+                    <div className="flex items-center gap-2 mb-3">
+                      <span className="text-[9px] font-mono text-[#859397] uppercase tracking-widest w-14 shrink-0">Rate</span>
+                      <div className="flex-1 h-2 rounded-full bg-white/5 overflow-hidden">
+                        <div className="h-full rounded-full" style={{ width: `${winPct}%`, background: winColor }} />
+                      </div>
+                      <span className="text-[10px] font-mono text-[#859397] w-16 text-right">{p.window_used}/{p.rpm_limit}/min</span>
+                    </div>
+                    {/* counters */}
+                    <div className="grid grid-cols-4 gap-1.5 text-center">
+                      {[
+                        { l: "CALLS", v: p.calls, c: "#dfe2f3" },
+                        { l: "OK", v: p.successes, c: GREEN },
+                        { l: "FAIL", v: p.failures, c: p.failures > 0 ? RED : MUTED },
+                        { l: "TRIPS", v: p.breaker_trips, c: p.breaker_trips > 0 ? AMBER : MUTED },
+                      ].map((x) => (
+                        <div key={x.l} className="bg-white/[0.03] border border-white/5 rounded-lg py-1.5">
+                          <div className="text-[13px] font-mono font-bold" style={{ color: x.c }}>{x.v}</div>
+                          <div className="text-[8px] font-mono text-[#859397] uppercase tracking-widest">{x.l}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {p.rate_limit_skips > 0 && (
+                      <div className="text-[9px] font-mono text-[#ffd6a3] mt-2">↺ {p.rate_limit_skips} call{p.rate_limit_skips === 1 ? "" : "s"} deferred by rate limiter</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           )}
         </Panel>
       </section>

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { motion } from "motion/react";
-import { Delete, Lock, ShieldCheck } from "lucide-react";
-import { login } from "../lib/auth";
+import { Delete, Lock, ShieldCheck, Play } from "lucide-react";
+import { login, loginDemo, authStatus } from "../lib/auth";
 
 interface LockScreenProps {
   onUnlock: () => void;
@@ -14,6 +14,20 @@ export default function LockScreen({ onUnlock }: LockScreenProps) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [shake, setShake] = useState(false);
+  const [demoAvailable, setDemoAvailable] = useState(false);
+
+  useEffect(() => {
+    authStatus().then((s) => setDemoAvailable(!!s.demo_available));
+  }, []);
+
+  const startDemo = useCallback(async () => {
+    setBusy(true);
+    setError("");
+    const r = await loginDemo();
+    if (r.ok) { onUnlock(); return; }
+    setError(r.error || "Demo unavailable.");
+    setBusy(false);
+  }, [onUnlock]);
 
   const submit = useCallback(async (value: string) => {
     setBusy(true);
@@ -130,8 +144,18 @@ export default function LockScreen({ onUnlock }: LockScreenProps) {
           </button>
         </div>
 
-        <p className="text-[10px] font-mono text-[#859397]/60 mt-8 tracking-wider">
-          AUTHORIZED ACCESS ONLY
+        {demoAvailable && (
+          <button
+            onClick={startDemo}
+            disabled={busy}
+            className="mt-7 flex items-center gap-2 px-5 py-2.5 rounded-full border border-[#8aebff]/25 bg-[#8aebff]/[0.06] text-[11px] font-mono font-semibold text-[#8aebff] tracking-wider hover:bg-[#8aebff]/15 active:scale-95 transition-all disabled:opacity-40 cursor-pointer"
+          >
+            <Play className="w-3.5 h-3.5" /> EXPLORE THE DEMO
+          </button>
+        )}
+
+        <p className="text-[10px] font-mono text-[#859397]/60 mt-6 tracking-wider">
+          {demoAvailable ? "SAMPLE DATA · NO SIGN-IN NEEDED" : "AUTHORIZED ACCESS ONLY"}
         </p>
       </motion.div>
     </div>

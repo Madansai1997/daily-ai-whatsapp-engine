@@ -14,7 +14,7 @@ import SearchOverlay from "./components/SearchOverlay";
 import SettingsDrawer from "./components/SettingsDrawer";
 import NotificationsDrawer from "./components/NotificationsDrawer";
 import LockScreen from "./components/LockScreen";
-import { authStatus, setUnauthHandler } from "./lib/auth";
+import { authStatus, setUnauthHandler, isDemo } from "./lib/auth";
 import { AnimatePresence, motion } from "motion/react";
 import { LayoutGrid, Bot, Lock, Briefcase, BarChart3, Wallet, Compass } from "lucide-react";
 
@@ -31,6 +31,7 @@ export default function App() {
 
   // Auth gate: "checking" until we know if a PIN is required; then locked/unlocked.
   const [authState, setAuthState] = useState<"checking" | "locked" | "open">("checking");
+  const [demoMode, setDemoMode] = useState(false);
 
   useEffect(() => {
     setUnauthHandler(() => setAuthState("locked"));
@@ -96,7 +97,7 @@ export default function App() {
     return <div className="fixed inset-0 bg-[#0a0e1a]" />;
   }
   if (authState === "locked") {
-    return <LockScreen onUnlock={() => setAuthState("open")} />;
+    return <LockScreen onUnlock={() => { setDemoMode(isDemo()); setAuthState("open"); }} />;
   }
 
   return (
@@ -106,6 +107,15 @@ export default function App() {
       
       {/* Dark tint backing to enhance grid line and card readability */}
       <div className="fixed inset-0 bg-[#0a0e1a]/45 pointer-events-none z-0"></div>
+
+      {/* Demo-mode banner — sample data, read-only */}
+      {demoMode && (
+        <div className="fixed top-0 left-0 w-full z-[60] bg-[#8aebff]/10 border-b border-[#8aebff]/25 backdrop-blur-sm text-center py-1.5 px-4">
+          <span className="text-[11px] font-mono text-[#8aebff] tracking-wider">
+            ● DEMO MODE — sample data, read-only. Nothing here is real.
+          </span>
+        </div>
+      )}
 
       {/* Unified HUD Header Navigation bar */}
       <Header 

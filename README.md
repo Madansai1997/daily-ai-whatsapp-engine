@@ -28,6 +28,68 @@ shield, profile freshness) · `Bills` · `JARVIS` (chat) · `Terminal`.
 FastAPI · SQLite / Turso (`db_compat`) · React + Vite + Tailwind · Recharts · Groq & Gemini LLMs ·
 Gmail & Google Calendar APIs · Web Push. Deployed on Render (free tier).
 
+## Architecture
+
+One FastAPI process routes a natural-language message through a shared **AI intent classifier**
+(no hardcoded trigger phrases) to whichever agent module owns that capability. Every agent shares
+one storage layer (`db_compat` → SQLite locally, Turso in prod) and one **LLM gateway** — so
+reliability, failover and metrics are solved once, centrally, rather than per agent.
+
+```mermaid
+flowchart TD
+    subgraph Clients
+      WEB["React console /console<br/>(installable PWA)"]
+      WA["WhatsApp webhook"]
+    end
+
+    WEB & WA --> API["FastAPI engine (V3_updates.py)"]
+    API --> AUTH["PIN lock + demo mode<br/>(read-only sample data)"]
+    API --> ROUTER["AI intent classifier<br/>(one shared prompt)"]
+
+    ROUTER --> AGENTS
+    subgraph AGENTS["Agent modules — one file each"]
+      A1["Job Scout · ATS · Tracker"]
+      A2["Email triage · Calendar · Follow-ups"]
+      A3["Bills · Reminders · Interview prep"]
+      A4["Content watchers<br/>(company · people · influencers)"]
+    end
+
+    ROUTER --> RAG["RAG — BM25 retrieval<br/>(rag_engine.py) + user facts"]
+
+    AGENTS & RAG --> GW["LLM Gateway (llm_gateway.py)<br/>circuit breaker · rate limiter · metrics"]
+    GW -->|primary| GROQ["Groq free models<br/>(gpt-oss-120b → llama 70b → 8b)"]
+    GW -->|fallback| GEM["Gemini 2.5 Flash"]
+
+    AGENTS --> DB[("db_compat<br/>SQLite / Turso")]
+    GW --> LOG[("llm_calls ledger")]
+    LOG --> INS["Insights dashboard<br/>GET /api/insights/llm"]
+
+    SCHED["Scheduler (internal APScheduler<br/>or external /cron/* on free tier)"] --> AGENTS
+```
+
+### Reliability & LLM gateway
+
+Every model call goes through `llm_gateway.py`, an in-process reliability layer around the free-tier
+provider chain:
+
+- **Circuit breaker** — after N consecutive failures a provider is *opened* and skipped for a
+  cooldown, so we fail over instantly instead of paying a dead provider's latency on every call.
+  It closes again on the first success.
+- **Rate limiter** — a per-provider sliding-window cap keeps us under free-tier RPM; a full window
+  soft-skips to the next provider instead of earning a hard 429.
+- **Fails open** — if the gateway would skip *every* provider, the chain is force-tried anyway, so
+  the reliability layer can never take the app dark.
+- **Live metrics** — `GET /api/insights/llm` fuses the in-memory breaker/limiter state with the
+  historical `llm_calls` ledger; the console's **Insights → LLM gateway** card shows circuit state,
+  rate-limit usage, breaker trips and provider/model split.
+
+### Demo mode
+
+Setting `JARVIS_DEMO_PIN` (alongside a real `JARVIS_PIN`) adds an **"Explore the demo"** button to
+the lock screen. A demo session gets an *empty, non-privileged token* — every protected endpoint
+still returns 401 to it, so real data is physically unreachable — and the frontend renders the
+whole console from bundled sample fixtures. Shareable as a live demo with zero data exposure.
+
 ## Modules
 
 <!-- AUTO:modules -->
@@ -48,6 +110,7 @@ Gmail & Google Calendar APIs · Web Push. Deployed on Render (free tier).
 - **`interview_prep.py`** — Interview Prep Dock — surfaces upcoming interviews from Calendar and, on demand, drafts a.
 - **`job_apply_agent.py`** — Job Apply Agent — apply-prep + (approval-gated) auto-apply for the Job Scout pipeline.
 - **`job_scout_agent.py`** — Job Scout Agent — self-contained skill module (Phase 4).
+- **`llm_gateway.py`** — In-process reliability layer around the multi-provider LLM chain.
 - **`local_bridge.py`** — JARVIS Local Bridge.
 - **`mcp_sqlite_server.py`** — SQLite MCP Server.
 - **`networking_crm.py`** — Thin Networking CRM — track the people behind the applications.
@@ -79,6 +142,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `463c202` feat(console): installable PWA — "Install JARVIS" as a desktop/mobile app _(2026-07-13)_
 - `e60aab4` feat(watchers): People Watch → CRM nudges + Unified Trends Pulse _(2026-07-13)_
 - `6711281` feat(company-watch): slice 1b — news on Kanban cards + interview-prep briefs _(2026-07-13)_
 - `b869f49` feat(jobs): declutter the Kanban — compact cards, overflow menu, board filters _(2026-07-13)_
@@ -90,10 +154,9 @@ npm install && npm run build     # served by the engine at /console
 - `e587052` feat(jobs): multi-source scouting + guided triage funnel (NEW lane, inline Assess, next-step cues) _(2026-07-12)_
 - `9417c93` feat(daily): "Rewrite to run offline" — turn un-runnable snippets into stdlib-only that runs _(2026-07-08)_
 - `c25ce59` feat(daily): visual Deep Dive + interactive Go Deeper; fix in-browser Run hang _(2026-07-08)_
-- `253d97a` feat(daily): interactive study flow — richer Deep Dive, chatty Go Deeper, no code dupes _(2026-07-08)_
 <!-- /AUTO:changelog -->
 
 ---
 
-_Last updated: 2026-07-13 · this README's inventory and changelog are auto-maintained by
+_Last updated: 2026-07-16 · this README's inventory and changelog are auto-maintained by
 `scripts/gen_readme.py` on every commit._
