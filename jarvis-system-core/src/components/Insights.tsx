@@ -191,7 +191,7 @@ export default function Insights() {
       <section className="pt-4 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
           <h1 className="text-2xl md:text-3xl font-bold text-[#dfe2f3] flex items-center gap-4 font-mono">
-            <span className="opacity-40 font-light text-xl">05 //</span> SYSTEM INSIGHTS
+            <span className="opacity-40 font-light text-xl">02 //</span> SYSTEM INSIGHTS
           </h1>
           <p className="text-xs font-mono text-[#859397] uppercase tracking-widest mt-1 opacity-80">
             Engine health · agents · LLM routing — last {data?.days ?? 14} days

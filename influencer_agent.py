@@ -22,8 +22,15 @@ INTERESTS = (
 )
 
 
+_tables_ready = False  # migrations run once per process, not on every feed read
+
+
 async def _ensure_tables(db):
-    """Create the persistent feed table if it's missing (idempotent; also lives in V3 init_db)."""
+    """Create the persistent feed table + run column migrations ONCE per process. Every ALTER is
+    a failing Turso round-trip after the first run, so guarding this keeps feed reads cheap."""
+    global _tables_ready
+    if _tables_ready:
+        return
     await db.execute('''CREATE TABLE IF NOT EXISTS influencer_posts (
         post_id TEXT PRIMARY KEY,
         platform TEXT,
@@ -50,6 +57,7 @@ async def _ensure_tables(db):
             await db.execute(_ddl)
         except Exception:
             pass
+    _tables_ready = True
 
 
 async def fetch_instagram_posts(handle: str) -> list:
@@ -536,12 +544,35 @@ async def fetch_video_transcript(video_id: str, max_chars: int = 8000) -> str:
     return re.sub(r"\s+", " ", text or "").strip()[:max_chars]
 
 
+def _is_safe_public_url(url: str) -> bool:
+    """SSRF guard: only https, and the host must NOT resolve to a private/loopback/link-local
+    address. Feed URLs are third-party data, so a malicious one could otherwise point at cloud
+    metadata (169.254.169.254) or internal services."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url)
+        if p.scheme != "https" or not p.hostname:
+            return False
+        # Resolve every address the host maps to; reject if ANY is non-public.
+        for family, _, _, _, sockaddr in socket.getaddrinfo(p.hostname, None):
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                return False
+        return True
+    except Exception:
+        return False
+
+
 async def fetch_article_text(url: str, max_chars: int = 6000) -> str:
-    """Main readable text of a blog/Substack/article page (free). Returns '' on failure."""
-    if not url or not url.startswith("http"):
+    """Main readable text of a blog/Substack/article page (free). Returns '' on failure.
+    SSRF-guarded: https-only, public hosts only, and redirects are NOT followed (a redirect
+    could aim an allowed host at an internal one)."""
+    if not _is_safe_public_url(url):
         return ""
     try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
             r = await client.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; JARVIS-Watcher/1.0)"})
         if r.status_code != 200:
             return ""

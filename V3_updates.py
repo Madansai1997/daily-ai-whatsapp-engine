@@ -40,7 +40,7 @@ from openai import AsyncOpenAI
 load_dotenv()
 
 from llm_gateway import GATEWAY
-from prompts import INTENT_FEWSHOT
+from prompts import INTENT_FEWSHOT, ANALYST_SYSTEM
 from rag_engine import retrieve_relevant_context, search_user_facts
 from email_triage import (
     init_email_tables,
@@ -982,6 +982,7 @@ init_people_watch_tables()
 from pdf_rag_agent import (
     init_pdf_rag_tables, ingest_pdf as pdf_rag_ingest, list_docs as pdf_rag_list_docs,
     delete_doc as pdf_rag_delete, answer_question as pdf_rag_ask, assess_document as pdf_rag_assess,
+    document_summary as pdf_rag_summary,
 )
 init_pdf_rag_tables()
 
@@ -1368,7 +1369,9 @@ def _push_all_sync(body: str):
     if dead:
         try:
             conn = _get_db_conn()
-            conn.executemany("DELETE FROM push_subscriptions WHERE endpoint = ?", [(e,) for e in dead])
+            # Per-row DELETE — TursoConnectionSync has no executemany (see db_compat).
+            for _ep in dead:
+                conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (_ep,))
             conn.commit()
             conn.close()
             print(f"🧹 push: pruned {len(dead)} expired subscription(s).")
@@ -4313,7 +4316,8 @@ _CRON_BG_TASKS: set = set()
 
 
 def _cron_authorized(token: str) -> bool:
-    return bool(CLAUDE_CODE_TRIGGER_SECRET) and token == CLAUDE_CODE_TRIGGER_SECRET
+    # constant-time compare — these tokens are the only guard on the /cron/* job triggers
+    return bool(CLAUDE_CODE_TRIGGER_SECRET) and _hmac.compare_digest(token, CLAUDE_CODE_TRIGGER_SECRET)
 
 
 def _run_bg(coro):
@@ -7725,14 +7729,22 @@ PDF_SUMMARY_PROMPT = (
 )
 
 
+# Cap uploads so a large PDF can't OOM the 512MB free-tier instance before we can trim.
+PDF_MAX_UPLOAD_BYTES = 12 * 1024 * 1024  # 12MB
+
+
 @app.post("/web-terminal/upload-pdf")
 async def upload_pdf(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".pdf"):
         return JSONResponse({"reply": "⚠️ Only PDF files are supported here."})
     try:
         file_bytes = await file.read()
+        if len(file_bytes) > PDF_MAX_UPLOAD_BYTES:
+            del file_bytes
+            return JSONResponse({"reply": f"⚠️ That PDF is too large (max {PDF_MAX_UPLOAD_BYTES // (1024*1024)}MB)."})
         _mem_probe(f"pdf:before {file.filename} ({len(file_bytes)//1024}KB)")
-        text = extract_pdf_text(file_bytes)
+        loop = asyncio.get_event_loop()
+        text = await loop.run_in_executor(None, extract_pdf_text, file_bytes)
         del file_bytes  # drop the raw bytes before trimming so the heap can be reclaimed
         _mem_probe(f"pdf:after {file.filename}")
         _malloc_trim()
@@ -7763,8 +7775,16 @@ async def pdf_rag_upload(file: UploadFile = File(...)):
         return JSONResponse({"error": "Only PDF files are supported."}, status_code=400)
     try:
         file_bytes = await file.read()
+        if len(file_bytes) > PDF_MAX_UPLOAD_BYTES:
+            del file_bytes
+            return JSONResponse(
+                {"error": f"PDF is too large (max {PDF_MAX_UPLOAD_BYTES // (1024*1024)}MB)."},
+                status_code=413)
         _mem_probe(f"pdfrag:before {file.filename} ({len(file_bytes)//1024}KB)")
-        pages = extract_pdf_pages(file_bytes)
+        # pdfplumber is CPU/IO-heavy — run it OFF the event loop so one upload can't freeze
+        # every other request on the single free-tier worker.
+        loop = asyncio.get_event_loop()
+        pages = await loop.run_in_executor(None, extract_pdf_pages, file_bytes)
         del file_bytes  # drop raw bytes before trimming so the heap can be reclaimed
         _mem_probe(f"pdfrag:after {file.filename}")
         _malloc_trim()
@@ -7781,9 +7801,49 @@ async def pdf_rag_upload(file: UploadFile = File(...)):
     return JSONResponse({"ok": True, "document": meta})
 
 
+@app.post("/api/analyst/code")
+async def analyst_code(request: Request):
+    """AI Data Analyst: natural-language question + a DataFrame schema -> pandas code (+ optional
+    chart spec). The code is RUN CLIENT-SIDE in the browser's Pyodide sandbox — the server only
+    generates it and never executes it, so a 512MB instance is never at risk."""
+    body = await request.json()
+    question = (body.get("question") or "").strip()
+    schema = (body.get("schema") or "").strip()
+    if not question or not schema:
+        return JSONResponse({"error": "Upload a CSV and ask a question."}, status_code=400)
+    try:
+        raw = await call_llm(
+            ANALYST_SYSTEM,
+            f"SCHEMA: {schema[:2000]}\n\nQUESTION: {question}\n\nJSON:",
+            max_tokens=600, temperature=0.1)
+    except Exception as e:
+        return JSONResponse({"error": f"Analysis failed: {e}"}, status_code=502)
+    from influencer_agent import extract_json_object
+    parsed = extract_json_object(raw) or {}
+    code = (parsed.get("code") or "").strip()
+    if not code:
+        return JSONResponse({"error": "Couldn't turn that into an analysis — try rephrasing."}, status_code=422)
+    # Defense-in-depth denylist (execution is already sandboxed client-side; this keeps the model
+    # honest and blocks obviously-unsafe output). pandas/numpy imports are harmless in Pyodide.
+    lowered = code.lower()
+    if any(bad in lowered for bad in ("__import__", "subprocess", "socket", "os.system", "eval(", "exec(",
+                                      "open(", "requests", "urllib", "sys.")):
+        return JSONResponse({"error": "Generated code was blocked by the safety filter."}, status_code=422)
+    chart = parsed.get("chart") if isinstance(parsed.get("chart"), dict) else None
+    return JSONResponse({"code": code, "explanation": (parsed.get("explanation") or "").strip(), "chart": chart})
+
+
 @app.get("/api/pdf-rag/docs")
 async def pdf_rag_docs():
     return JSONResponse({"documents": await pdf_rag_list_docs()})
+
+
+@app.post("/api/pdf-rag/{doc_id}/summary")
+async def pdf_rag_summary_ep(doc_id: int):
+    """A short 'what this document is about' overview + key topics (cached)."""
+    result = await pdf_rag_summary(doc_id, call_llm)
+    _malloc_trim()
+    return JSONResponse(result)
 
 
 @app.post("/api/pdf-rag/{doc_id}/ask")
@@ -9099,6 +9159,11 @@ async def privachat_http_proxy(path: str, request: Request):
 
 @app.websocket("/privachat/ws/{room_code}/{alias}")
 async def privachat_ws_proxy(websocket: WebSocket, room_code: str, alias: str):
+    # Validate BEFORE building the upstream URL — raw path segments could otherwise smuggle
+    # '../' or query params and redirect the proxy to an unintended upstream path.
+    if not (re.fullmatch(r"[A-Za-z0-9_-]{1,64}", room_code) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", alias)):
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     upstream_url = f"{PRIVACHAT_WS_BASE}/privachat/ws/{room_code}/{alias}"
     try:
@@ -9970,4 +10035,6 @@ if __name__ == "__main__":
             #await db.execute("DELETE FROM sent_history WHERE timestamp LIKE ?", (f"{today}%",))
             #await db.commit()
         #return {"status": f"All data for {today} cleared successfully"}
+        
+
         

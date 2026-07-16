@@ -19,7 +19,7 @@ import json
 
 import db_compat as aiosqlite  # Turso in prod, local in dev — MUST match V3_updates
 from rag_engine import tokenize, compute_bm25
-from prompts import PDF_RAG_ANSWER_SYSTEM, PDF_RAG_ASSESS_SYSTEM
+from prompts import PDF_RAG_ANSWER_SYSTEM, PDF_RAG_ASSESS_SYSTEM, PDF_RAG_SUMMARY_SYSTEM
 
 DB_PATH = os.environ.get("DB_PATH", "agent_memory.db")
 
@@ -47,6 +47,10 @@ def init_pdf_rag_tables():
         content TEXT NOT NULL)''')
     try:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_pdf_chunks_doc ON pdf_chunks(doc_id)")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE pdf_documents ADD COLUMN summary TEXT")  # cached document overview
     except Exception:
         pass
     conn.commit()
@@ -147,6 +151,59 @@ async def _retrieve(doc_id: int, query: str, k: int = TOP_K) -> list[dict]:
     return hits
 
 
+async def document_summary(doc_id: int, call_llm, force: bool = False) -> dict:
+    """A short 'what this document is about' overview + key topics, from a representative excerpt
+    of the text (front-loaded + a couple of later passages). Cached on the document row so it's a
+    one-time cost, generated lazily when the doc is first opened."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT filename, summary FROM pdf_documents WHERE id = ?", (doc_id,))
+        row = await cur.fetchone()
+        if not row:
+            return {"ok": False, "error": "document not found"}
+        if row["summary"] and not force:
+            try:
+                return {"ok": True, **json.loads(row["summary"]), "cached": True}
+            except Exception:
+                pass
+
+    chunks = await _doc_chunks(doc_id)
+    if not chunks:
+        return {"ok": False, "error": "no readable text in this document"}
+    # Representative excerpt: fill a budget from the front (intro/abstract usually lead), then
+    # append the last couple of passages so the ending/conclusion is covered too.
+    budget, used, parts = 8000, 0, []
+    for c in chunks:
+        if used >= budget:
+            break
+        parts.append(c["content"])
+        used += len(c["content"])
+    if len(chunks) > len(parts) + 2:
+        parts.extend(c["content"] for c in chunks[-2:])
+    text = "\n".join(parts)[: budget + 2000]
+
+    try:
+        raw = await call_llm(
+            PDF_RAG_SUMMARY_SYSTEM,
+            f"DOCUMENT EXCERPT:\n{text}\n\nJSON:",
+            max_tokens=400, temperature=0.2,
+        )
+    except Exception as e:
+        return {"ok": False, "error": f"llm failed: {e}"}
+    parsed = _extract_json(raw) or {}
+    overview = (parsed.get("overview") or "").strip()
+    topics = [str(t).strip() for t in (parsed.get("topics") or []) if str(t).strip()][:6]
+    if not overview:
+        return {"ok": False, "error": "could not build a summary"}
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE pdf_documents SET summary = ? WHERE id = ?",
+            (json.dumps({"overview": overview, "topics": topics}), doc_id))
+        await db.commit()
+    return {"ok": True, "overview": overview, "topics": topics, "cached": False}
+
+
 def _passage_block(passages: list[dict]) -> str:
     """Number the passages for the prompt: [1] (p.3) <text>."""
     lines = []
@@ -188,9 +245,11 @@ async def answer_question(doc_id: int, question: str, call_llm) -> dict:
                 "verified": False, "grounded": False}
 
     block = _passage_block(passages)
+    # PDF_RAG_ANSWER_SYSTEM is a full {passages}/{question} template — fill it and send as the
+    # user turn with a minimal system role.
     draft = await call_llm(
-        PDF_RAG_ANSWER_SYSTEM,
-        f"PASSAGES:\n{block}\n\nQUESTION: {question}\n\nCited answer:",
+        "You are a precise document question-answering assistant.",
+        PDF_RAG_ANSWER_SYSTEM.format(passages=block, question=question),
         max_tokens=500, temperature=0.2,
     )
     draft = _normalize_cites((draft or "").strip())

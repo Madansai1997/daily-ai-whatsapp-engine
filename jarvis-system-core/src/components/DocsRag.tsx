@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import {
   FileText, Upload, Trash2, Send, MessageSquare, ClipboardCheck,
-  ShieldCheck, Loader2, Quote, X, AlertTriangle,
+  ShieldCheck, Loader2, Quote, X, AlertTriangle, Sparkles,
 } from "lucide-react";
 
 interface DocItem { id: number; filename: string; pages: number; chunks: number; char_count: number; created_at?: string; }
@@ -42,6 +42,9 @@ export default function DocsRag() {
   const [assessing, setAssessing] = useState(false);
   const [assessment, setAssessment] = useState<AssessResult | null>(null);
 
+  // Per-document overview ("what this is about"), fetched lazily when a doc is selected.
+  const [summaries, setSummaries] = useState<Record<number, { loading?: boolean; overview?: string; topics?: string[]; error?: string }>>({});
+
   const loadDocs = useCallback(async () => {
     try {
       const d = await fetch("/api/pdf-rag/docs", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null));
@@ -53,7 +56,19 @@ export default function DocsRag() {
   }, []);
 
   useEffect(() => { loadDocs(); }, [loadDocs]);
-  useEffect(() => { setTurns([]); setAssessment(null); setError(""); }, [active?.id]);
+
+  // On selecting a doc: reset chat/assess and lazily load its overview (cached server-side).
+  useEffect(() => {
+    setTurns([]); setAssessment(null); setError("");
+    const id = active?.id;
+    if (!id || summaries[id]) return;
+    setSummaries((s) => ({ ...s, [id]: { loading: true } }));
+    fetch(`/api/pdf-rag/${id}/summary`, { method: "POST" })
+      .then((r) => r.json())
+      .then((d) => setSummaries((s) => ({ ...s, [id]: d?.ok ? { overview: d.overview, topics: d.topics } : { error: d?.error || "Couldn't summarize this document." } })))
+      .catch(() => setSummaries((s) => ({ ...s, [id]: { error: "Couldn't reach the summarizer." } })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active?.id]);
   useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); }, [turns, asking]);
 
   const upload = async (file: File) => {
@@ -111,7 +126,7 @@ export default function DocsRag() {
       {/* Header */}
       <section className="pt-4">
         <h1 className="text-2xl md:text-3xl font-bold text-[#dfe2f3] flex items-center gap-4 font-mono">
-          <span className="opacity-40 font-light text-xl">06 //</span> DOCUMENT RAG
+          <span className="opacity-40 font-light text-xl">03 //</span> DOCUMENT RAG
         </h1>
         <p className="text-xs font-mono text-[#859397] uppercase tracking-widest mt-1 opacity-80">
           Upload a PDF · ask it questions · answers cited to the source page
@@ -167,6 +182,30 @@ export default function DocsRag() {
             </Panel>
           ) : (
             <div className="glass-panel rounded-xl border border-white/5 overflow-hidden flex flex-col" style={{ minHeight: 460 }}>
+              {/* What this document is about — auto overview */}
+              {(() => { const sm = summaries[active.id]; return (
+                <div className="border-b border-white/5 bg-[#8aebff]/[0.03] px-5 py-3">
+                  <div className="text-[9px] font-mono uppercase tracking-widest text-[#8aebff] mb-1 flex items-center gap-1">
+                    <Sparkles className="w-3 h-3" /> What this document is about
+                  </div>
+                  {sm?.loading ? (
+                    <div className="flex items-center gap-2 text-[11px] font-mono text-[#859397]"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Reading the document…</div>
+                  ) : sm?.error ? (
+                    <p className="text-[11px] font-mono text-[#859397]">{sm.error}</p>
+                  ) : sm?.overview ? (
+                    <>
+                      <p className="text-[12px] text-[#dfe2f3] leading-relaxed">{sm.overview}</p>
+                      {sm.topics && sm.topics.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 mt-2">
+                          {sm.topics.map((t, i) => (
+                            <span key={i} className="text-[10px] font-mono text-[#8aebff]/90 bg-[#8aebff]/10 px-1.5 py-0.5 rounded">{t}</span>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  ) : null}
+                </div>
+              ); })()}
               {/* Tabs */}
               <div className="flex items-center border-b border-white/5">
                 {([["chat", "CHAT", <MessageSquare className="w-4 h-4" key="c" />], ["assess", "ASSESS", <ClipboardCheck className="w-4 h-4" key="a" />]] as const).map(([id, label, icon]) => (

@@ -7,6 +7,7 @@ import SecureChat from "./components/SecureChat";
 import JobsBoard from "./components/JobsBoard";
 import Insights from "./components/Insights";
 import DocsRag from "./components/DocsRag";
+import DataAnalyst from "./components/DataAnalyst";
 import Bills from "./components/Bills";
 import Help from "./components/Help";
 import Discover from "./components/Discover";
@@ -19,7 +20,7 @@ import VoiceDock from "./components/VoiceDock";
 import { useVoiceAgent } from "./lib/voiceAgent";
 import { authStatus, setUnauthHandler, isDemo } from "./lib/auth";
 import { AnimatePresence, motion } from "motion/react";
-import { LayoutGrid, Bot, Lock, Briefcase, BarChart3, Wallet, Compass } from "lucide-react";
+import { LayoutGrid, Bot, Lock, Briefcase, BarChart3, Wallet, Compass, FileText, Table2 } from "lucide-react";
 
 export default function App() {
   const [activeScreen, setActiveScreen] = useState<ScreenId>(ScreenId.Core);
@@ -77,7 +78,7 @@ export default function App() {
     }
 
     // Nav order index to determine forward vs backward push (matches the header order)
-    const screenOrder = [ScreenId.Core, ScreenId.Jobs, ScreenId.Insights, ScreenId.Docs, ScreenId.Bills, ScreenId.Assistant, ScreenId.Discover, ScreenId.Terminal, ScreenId.Help];
+    const screenOrder = [ScreenId.Core, ScreenId.Jobs, ScreenId.Insights, ScreenId.Docs, ScreenId.Analyst, ScreenId.Bills, ScreenId.Assistant, ScreenId.Discover, ScreenId.Terminal, ScreenId.Help];
     const fromIndex = screenOrder.indexOf(from);
     const toIndex = screenOrder.indexOf(to);
 
@@ -168,6 +169,9 @@ export default function App() {
             {activeScreen === ScreenId.Docs && (
               <DocsRag />
             )}
+            {activeScreen === ScreenId.Analyst && (
+              <DataAnalyst />
+            )}
             {activeScreen === ScreenId.Bills && (
               <Bills />
             )}
@@ -187,6 +191,8 @@ export default function App() {
           { screen: ScreenId.Core, label: "HOME", Icon: LayoutGrid, active: activeScreen === ScreenId.Core },
           { screen: ScreenId.Jobs, label: "JOBS", Icon: Briefcase, active: activeScreen === ScreenId.Jobs || activeScreen === ScreenId.AtsAnalysis },
           { screen: ScreenId.Insights, label: "STATS", Icon: BarChart3, active: activeScreen === ScreenId.Insights },
+          { screen: ScreenId.Docs, label: "DOCS", Icon: FileText, active: activeScreen === ScreenId.Docs },
+          { screen: ScreenId.Analyst, label: "DATA", Icon: Table2, active: activeScreen === ScreenId.Analyst },
           { screen: ScreenId.Bills, label: "BILLS", Icon: Wallet, active: activeScreen === ScreenId.Bills },
           { screen: ScreenId.Assistant, label: "JARVIS", Icon: Bot, active: activeScreen === ScreenId.Assistant },
           { screen: ScreenId.Discover, label: "DISCOVER", Icon: Compass, active: activeScreen === ScreenId.Discover || activeScreen === ScreenId.Trends || activeScreen === ScreenId.Daily },

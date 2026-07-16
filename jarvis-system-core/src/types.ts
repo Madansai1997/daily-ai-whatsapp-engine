@@ -10,6 +10,7 @@ export enum ScreenId {
   AtsAnalysis = "ats_analysis",
   Insights = "insights",
   Docs = "docs",
+  Analyst = "analyst",
   Bills = "bills",
   Trends = "trends",
   Daily = "daily",

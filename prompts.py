@@ -26,20 +26,25 @@ PROJECT_CONTEXT = (
 
 # ── PDF document-RAG: cited answer ───────────────────────────────────────────
 PDF_RAG_ANSWER_SYSTEM = (
-    "You answer questions using ONLY the numbered passages from a document. Cite the passage "
-    "number(s) in square brackets after each claim, e.g. [1] or [2][3]. If the passages do not "
-    "contain the answer, say exactly: 'The document doesn't cover that.' Never use outside "
-    "knowledge. Be concise (1-4 sentences).\n\n"
+    "You are a strict factual assistant. Your task is to answer the user's QUESTION "
+    "using ONLY the provided numbered PASSAGES. \n\n"
+    "CRITICAL RULES:\n"
+    "1. Cite the exact passage number(s) in square brackets immediately after the claim they support, e.g., [1] or [2][3].\n"
+    "2. ONLY use citation numbers that actually exist in the provided PASSAGES. Never invent a passage number.\n"
+    "3. If the passages do not contain the answer to the question at all, reply EXACTLY with: 'The document doesn't cover that.' Do not add any other text.\n"
+    "4. If the passages contain a partial answer, provide ONLY the supported part with citations, and state clearly what is missing. Do not use outside knowledge to fill the gaps.\n"
+    "5. Be extremely concise (1-4 sentences). Do not use introductory phrases like 'Based on the text...'.\n\n"
     "EXAMPLE\n"
     "PASSAGES:\n"
     "[1] (p.2) The model was trained on 300 billion tokens of filtered web text.\n"
     "[2] (p.5) Evaluation used the GLUE benchmark.\n"
     "QUESTION: How much data was it trained on, and what optimizer did they use?\n"
-    "Cited answer: It was trained on 300 billion tokens of filtered web text [1]. The passages "
-    "don't mention the optimizer.\n"
-    "(Note: each supported claim is cited; the unsupported part is refused, not invented.)"
+    "ANSWER: It was trained on 300 billion tokens of filtered web text [1]. The provided passages do not state what optimizer was used.\n\n"
+    "Now, perform the task:\n\n"
+    "PASSAGES:\n{passages}\n\n"
+    "QUESTION: {question}\n"
+    "ANSWER:"
 )
-
 
 # ── PDF document-RAG: assess one criterion ───────────────────────────────────
 PDF_RAG_ASSESS_SYSTEM = (
@@ -52,6 +57,25 @@ PDF_RAG_ASSESS_SYSTEM = (
     "CRITERION: Mentions a cloud data warehouse (Snowflake/BigQuery/Redshift)\n"
     "JSON: {\"met\": false, \"evidence\": \"Only Power BI and Tableau are mentioned; no cloud data "
     "warehouse appears.\", \"cite\": 1}"
+)
+
+
+# ── PDF document-RAG: whole-document overview ────────────────────────────────
+# System prompt (the excerpt is sent as the user turn — NOT a .format() template, because the
+# example below contains literal JSON braces that str.format would choke on).
+PDF_RAG_SUMMARY_SYSTEM = (
+    "You write a short overview of a document from an excerpt of its text. Respond in STRICT JSON "
+    "only: {\"overview\": string, \"topics\": [string, ...]}. "
+    "'overview' = 2-4 plain sentences on what this document IS and what it's telling the reader — the "
+    "gist and purpose, not a table of contents. 'topics' = 3-6 short key topics/sections it covers. "
+    "Base it ONLY on the excerpt; never invent. No markdown, JSON only.\n\n"
+    "EXAMPLE\n"
+    "DOCUMENT EXCERPT: \"...Level 1 covers five prompting rules. Level 2 is about connecting the model "
+    "to your data with RAG and MCP so it can act on your business...\"\n"
+    "JSON: {\"overview\": \"A practical playbook for leveling up how you use AI, from prompting "
+    "technique to connected, action-taking assistants. It's aimed at builders who want AI that knows "
+    "their business and can act, not just chat.\", \"topics\": [\"Prompting principles\", \"RAG over "
+    "your own data\", \"MCP connectors / taking actions\", \"Projects to ship\"]}"
 )
 
 
@@ -79,6 +103,31 @@ def insight_system(kind: str) -> str:
         "into CI so answer quality can't silently regress.\"}\n\n"
         f"MADAN'S PROJECT:\n{PROJECT_CONTEXT}"
     )
+
+
+# ── AI Data Analyst: natural language -> pandas ──────────────────────────────
+# The generated code runs client-side in the browser's Pyodide sandbox (no server exec, no
+# host filesystem/network), on a DataFrame `df` that's already loaded. System prompt; the
+# schema+question go in the user turn.
+ANALYST_SYSTEM = (
+    "You are a senior data analyst. A pandas DataFrame named `df` is already loaded in scope, and "
+    "`pd` (pandas) and `np` (numpy) are already imported. Given the DataFrame's schema and a "
+    "question, write Python that computes the answer. Respond in STRICT JSON only: "
+    "{\"code\": string, \"explanation\": string, \"chart\": {\"type\": \"bar\"|\"line\"|\"pie\", "
+    "\"x\": string, \"y\": string} | null}.\n"
+    "RULES: assign the final answer to a variable named `result` (a pandas DataFrame or Series is "
+    "preferred; a scalar is fine). Use ONLY pandas/numpy — do NOT import anything, do NOT touch "
+    "files/network/os. Keep `result` small (aggregate or limit to ~50 rows). Only reference columns "
+    "that exist in the schema. If a chart genuinely helps, set `chart` with x/y columns that exist in "
+    "`result` (for pie: x=label col, y=value col); otherwise chart=null. 'explanation' = 1-2 plain "
+    "sentences on what the code does. JSON only, no markdown.\n\n"
+    "EXAMPLE\n"
+    "SCHEMA: 1200 rows; columns: region (object), sales (float64), month (object)\n"
+    "QUESTION: total sales by region, biggest first\n"
+    "JSON: {\"code\": \"result = df.groupby('region', as_index=False)['sales'].sum()"
+    ".sort_values('sales', ascending=False)\", \"explanation\": \"Groups rows by region and sums "
+    "sales, sorted highest first.\", \"chart\": {\"type\": \"bar\", \"x\": \"region\", \"y\": \"sales\"}}"
+)
 
 
 # ── Intent classifier: few-shot examples ─────────────────────────────────────

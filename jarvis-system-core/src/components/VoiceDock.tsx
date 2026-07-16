@@ -7,7 +7,11 @@ import type { VoiceAgent } from "../lib/voiceAgent";
  * showing state (listening / thinking / speaking) + the last line, with an instant STOP.
  * Space cuts speech from anywhere (except while typing). */
 export default function VoiceDock({ agent }: { agent: VoiceAgent }) {
-  const { state, active, speaking, caption, toggle, stopSpeaking, stopAll } = agent;
+  const { state, active, speaking, caption, supported, toggle, stopSpeaking, stopAll } = agent;
+
+  // No SpeechRecognition (Firefox/Safari desktop, some webviews) → hide the dock entirely
+  // rather than show a mic that silently does nothing.
+  if (!supported) return null;
 
   // Space = instant stop while speaking (ignored when typing in a field).
   useEffect(() => {

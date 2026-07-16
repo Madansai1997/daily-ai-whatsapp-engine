@@ -122,6 +122,7 @@ export default function Header({
               { screen: ScreenId.Jobs, label: "JOBS", active: activeScreen === ScreenId.Jobs || activeScreen === ScreenId.AtsAnalysis },
               { screen: ScreenId.Insights, label: "INSIGHTS", active: activeScreen === ScreenId.Insights },
               { screen: ScreenId.Docs, label: "DOCS", active: activeScreen === ScreenId.Docs },
+              { screen: ScreenId.Analyst, label: "DATA", active: activeScreen === ScreenId.Analyst },
               { screen: ScreenId.Bills, label: "BILLS", active: activeScreen === ScreenId.Bills },
               { screen: ScreenId.Assistant, label: "JARVIS", active: activeScreen === ScreenId.Assistant },
               { screen: ScreenId.Discover, label: "DISCOVER", active: activeScreen === ScreenId.Discover || activeScreen === ScreenId.Trends || activeScreen === ScreenId.Daily },

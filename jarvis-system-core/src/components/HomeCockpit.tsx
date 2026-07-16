@@ -131,13 +131,15 @@ export default function HomeCockpit({ onNavigate, voice }: Props) {
             >
               {speaking ? <><Square className="w-4 h-4" /> STOP</> : <><Volume2 className="w-4 h-4" /> BRIEF ME</>}
             </button>
-            <button
-              onClick={askByVoice}
-              title="Talk to JARVIS — say “open jobs”, ask a question, or “stop”"
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold font-mono border transition-all cursor-pointer ${voice.active ? "bg-[#8aebff]/20 border-[#8aebff]/50 text-[#8aebff]" : "bg-white/5 border-white/10 text-[#bbc9cd] hover:border-[#8aebff]/30 hover:text-[#8aebff]"}`}
-            >
-              <Mic className={`w-4 h-4 ${listening ? "animate-pulse" : ""}`} /> {voice.active ? (listening ? "LISTENING…" : "TALKING…") : "ASK"}
-            </button>
+            {voice.supported && (
+              <button
+                onClick={askByVoice}
+                title="Talk to JARVIS — say “open jobs”, ask a question, or “stop”"
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold font-mono border transition-all cursor-pointer ${voice.active ? "bg-[#8aebff]/20 border-[#8aebff]/50 text-[#8aebff]" : "bg-white/5 border-white/10 text-[#bbc9cd] hover:border-[#8aebff]/30 hover:text-[#8aebff]"}`}
+              >
+                <Mic className={`w-4 h-4 ${listening ? "animate-pulse" : ""}`} /> {voice.active ? (listening ? "LISTENING…" : "TALKING…") : "ASK"}
+              </button>
+            )}
           </div>
           {voice.caption && <p className="text-[11px] font-mono text-[#859397] mt-3 max-w-lg">{voice.caption}</p>}
         </div>
