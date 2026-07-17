@@ -145,18 +145,18 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
-- `e833161` fix(analyst): serve Pyodide from our own origin (jsdelivr blocked on some ISPs) _(2026-07-17)_
-- `979740b` perf(analyst): Add CDN fallbacks and progress tracking for Pyodide loading _(2026-07-17)_
-- `0ae7c4b` docs: Update shared assistant memories in AGENTS.md _(2026-07-17)_
-- `2fdd822` perf(analyst): prefetch Pyodide on screen mount + honest runtime status _(2026-07-17)_
-- `5093d14` fix(analyst): make Excel & Parquet ingestion actually work in Pyodide _(2026-07-17)_
-- `40d732e` feat(analyst): upgrade Data Analyst into a 6-phase browser-native analyst agent _(2026-07-17)_
-- `ea1c0d3` test(evals): free-tier golden-eval harness + CI gate _(2026-07-16)_
-- `db9690d` feat: AI Data Analyst + PDF doc summary; security/reliability hardening; mobile+UI fixes _(2026-07-16)_
-- `40d837b` refactor(prompts): prompt library + few-shot examples on the highest-stakes prompts _(2026-07-16)_
-- `cd95317` feat: PDF-RAG Docs, conversational voice agent, richer influencer insights, PWA refresh + memory trims _(2026-07-16)_
-- `2dd27e1` fix(chat): route "job portal / how many applications" to the real tracker _(2026-07-16)_
-- `5e99cbb` feat(home): cinematic JARVIS energy-sphere hero + audio-reactive voice loop _(2026-07-16)_
+- build(readme): auto-changelog via post-commit hook so it includes the current commit _(2026-07-17)_
+- fix(analyst): on-demand scikit-learn + reconcile chart to real columns _(2026-07-17)_
+- fix(analyst): serve Pyodide from our own origin (jsdelivr blocked on some ISPs) _(2026-07-17)_
+- perf(analyst): Add CDN fallbacks and progress tracking for Pyodide loading _(2026-07-17)_
+- docs: Update shared assistant memories in AGENTS.md _(2026-07-17)_
+- perf(analyst): prefetch Pyodide on screen mount + honest runtime status _(2026-07-17)_
+- fix(analyst): make Excel & Parquet ingestion actually work in Pyodide _(2026-07-17)_
+- feat(analyst): upgrade Data Analyst into a 6-phase browser-native analyst agent _(2026-07-17)_
+- test(evals): free-tier golden-eval harness + CI gate _(2026-07-16)_
+- feat: AI Data Analyst + PDF doc summary; security/reliability hardening; mobile+UI fixes _(2026-07-16)_
+- refactor(prompts): prompt library + few-shot examples on the highest-stakes prompts _(2026-07-16)_
+- feat: PDF-RAG Docs, conversational voice agent, richer influencer insights, PWA refresh + memory trims _(2026-07-16)_
 <!-- /AUTO:changelog -->
 
 ---

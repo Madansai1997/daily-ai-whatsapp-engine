@@ -1,0 +1,23 @@
+#!/bin/sh
+# Auto-refresh README.md (module inventory + changelog + date) AFTER each commit, then fold the
+# update back into that same commit. Post-commit (not pre-commit) so `git log` already sees the
+# commit you just made — the changelog includes it with zero lag. The amend changes the commit's
+# hash, which is exactly why the changelog carries no short hash (see scripts/gen_readme.py).
+#
+# GEN_README_SKIP guards against infinite recursion: the --amend below fires post-commit again,
+# and that second run exits immediately.
+[ -n "$GEN_README_SKIP" ] && exit 0
+
+ROOT="$(git rev-parse --show-toplevel)"
+[ -f "$ROOT/scripts/gen_readme.py" ] || exit 0
+command -v python3 >/dev/null 2>&1 || exit 0
+
+python3 "$ROOT/scripts/gen_readme.py" >/dev/null 2>&1
+
+# Only amend if the README actually changed, so ordinary commits that don't move the inventory or
+# changelog are left untouched.
+if ! git -C "$ROOT" diff --quiet -- "$ROOT/README.md" 2>/dev/null; then
+  git -C "$ROOT" add "$ROOT/README.md"
+  GEN_README_SKIP=1 git -C "$ROOT" commit --amend --no-edit --no-verify >/dev/null 2>&1
+fi
+exit 0

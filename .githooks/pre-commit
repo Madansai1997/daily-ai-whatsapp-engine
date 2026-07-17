@@ -1,9 +1,0 @@
-#!/bin/sh
-# Auto-refresh README.md (module inventory + changelog + date) on every commit, then stage it
-# so the update rides along in the same commit. Runs only on commits you initiate.
-ROOT="$(git rev-parse --show-toplevel)"
-if [ -f "$ROOT/scripts/gen_readme.py" ]; then
-  python3 "$ROOT/scripts/gen_readme.py" >/dev/null 2>&1
-  git add "$ROOT/README.md" 2>/dev/null
-fi
-exit 0
