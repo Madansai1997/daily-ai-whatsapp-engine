@@ -7854,8 +7854,14 @@ async def pdf_rag_upload(file: UploadFile = File(...)):
 # pandas/numpy/matplotlib code runs client-side in Pyodide (no host os/fs/network reachable). This
 # denylist is defense-in-depth on the *generated* text — it keeps the model honest and blocks
 # obviously-unsafe output. matplotlib/scipy imports are harmless in the WASM sandbox.
-_ANALYST_DENY = ("__import__", "subprocess", "socket", "os.system", "os.popen", "eval(", "exec(",
-                 "open(", "requests", "urllib", "sys.", "savefig", "pickle", "shutil")
+_ANALYST_DENY = (
+    "__import__", "subprocess", "socket", "os.system", "os.popen", "os.remove", "os.rename",
+    "os.unlink", "os.environ", "os.path", "import os", "eval(", "exec(", "compile(", "open(",
+    "requests", "urllib", "sys.", "pickle", "shutil", "importlib", "getattr(", "globals(",
+    "__builtins__", "builtins.", "pyodide", "js.", "fetch(", "pathlib",
+    # generated analyst code never needs to read files — the data is already in memory
+    "read_csv", "read_excel", "read_parquet", "read_sql", "read_json", "read_html", "read_pickle",
+    "read_table", "pd.read", "savefig")
 
 
 def _analyst_blocked(code: str) -> bool:
@@ -7881,6 +7887,11 @@ async def analyst_code(request: Request):
         user_turn = (f"PROFILE: {schema[:5000]}\n\nQUESTION: {question}\n\n"
                      f"Your previous code raised an error when it ran. Fix it and return corrected "
                      f"JSON.\nPREVIOUS CODE:\n{prev_code[:1500]}\n\nERROR:\n{run_error[:600]}\n\nJSON:")
+    elif prev_code:
+        # follow-up: build on the prior analysis (no error => not a fix)
+        user_turn = (f"PROFILE: {schema[:5000]}\n\nThis continues a prior analysis.\nPREVIOUS CODE:\n"
+                     f"{prev_code[:1500]}\n\nNow answer this FOLLOW-UP, building on that where it helps: "
+                     f"{question}\n\nJSON:")
     else:
         user_turn = f"PROFILE: {schema[:5000]}\n\nQUESTION: {question}\n\nJSON:"
     try:

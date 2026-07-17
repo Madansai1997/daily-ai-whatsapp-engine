@@ -8,7 +8,7 @@
 > ```
 > List / remove: `python3 shared_memory.py list` · `python3 shared_memory.py rm <key>`
 
-_18 shared memories · last rendered 2026-07-16 18:20 UTC_
+_19 shared memories · last rendered 2026-07-17 08:25 UTC_
 
 ## Feedback — how to work
 
@@ -217,3 +217,8 @@ PLAN — reorganize the whole JARVIS console into a proper guided, ordered flow 
 
 ### shared-memory-bridge _(via claude-code)_
 Claude Code ⇄ Antigravity shared memory. Canonical store: shared_memory table in LOCAL agent_memory.db, managed by shared_memory.py. Both IDEs read the generated AGENTS.md (Antigravity natively; Claude via CLAUDE.md @import). NOTE: the two SQLite MCP servers are NOT a shared channel — Claude's mcp_sqlite_server.py loads .env and hits prod Turso, while Antigravity's server-sqlite reads the local file; AGENTS.md is the real bridge. To add: python3 shared_memory.py add --key <slug> --category <cat> --source <who> "fact" (regenerates AGENTS.md). A Claude SessionStart hook re-renders AGENTS.md each session.
+
+## Decisions — settled choices
+
+### analyst_pyodide_same_origin_proxy _(via claude-code)_
+The Data Analyst's Pyodide runtime MUST load from the same-origin engine proxy (GET /pyodide/{path} in V3_updates.py -> streams from jsdelivr server-side, disk-cached, immutable cache headers), NOT directly from jsdelivr. Root cause (2026-07-17): loading Pyodide straight from cdn.jsdelivr.net hung forever on the user's Hyderabad ISP because several Indian ISPs throttle/block jsdelivr; it worked from other networks, making it look like slowness. Multi-CDN fallbacks (fastly/gcore.jsdelivr) DON'T help - all jsdelivr edges. Frontend DataAnalyst.tsx sets indexURL='/pyodide/'. Excel wheels (openpyxl+et_xmlfile) are self-hosted under jarvis-system-core/public/wheels and micropip-installed from /console/wheels with deps=False, so Excel doesn't need PyPI either. In Pyodide 0.26.4 loadPackage lacks openpyxl/pyarrow/python-calamine (use micropip wheels for openpyxl; fastparquet+cramjam for parquet; xlrd for .xls). DO NOT revert to direct-CDN loading.
