@@ -58,7 +58,8 @@ REDDIT_RAPIDAPI_QPARAM = os.environ.get("REDDIT_RAPIDAPI_QUERY_PARAM", "query").
 #   /getPostsBySubreddit?subreddit=…). The idea subs are already request-dense, so this works well.
 REDDIT_RAPIDAPI_MODE = os.environ.get("REDDIT_RAPIDAPI_MODE", "search").strip().lower()
 REDDIT_RAPIDAPI_SORT = os.environ.get("REDDIT_RAPIDAPI_SORT", "new").strip()
-REDDIT_VIA_RAPIDAPI = bool(RAPIDAPI_KEY1 and REDDIT_RAPIDAPI_HOST)
+REDDIT_VIA_RAPIDAPI = bool(RAPIDAPI_KEY1
+                            and REDDIT_RAPIDAPI_HOST)
 
 # Subreddits where product-request language is dense.
 REDDIT_SUBS = ["SomebodyMakeThis", "AppIdeas", "Lightbulb", "SideProject",

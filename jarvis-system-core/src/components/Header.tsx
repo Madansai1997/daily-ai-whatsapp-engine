@@ -8,6 +8,7 @@ interface HeaderProps {
   onOpenSearch: () => void;
   onOpenSettings: () => void;
   onOpenNotifications: () => void;
+  demoMode?: boolean;
 }
 
 interface Weather {
@@ -23,7 +24,8 @@ export default function Header({
   onNavigate,
   onOpenSearch,
   onOpenSettings,
-  onOpenNotifications
+  onOpenNotifications,
+  demoMode
 }: HeaderProps) {
   const [weather, setWeather] = useState<Weather | null>(null);
   const [memPct, setMemPct] = useState<number | null>(null);
@@ -94,7 +96,7 @@ export default function Header({
   }, []);
 
   return (
-    <header className="fixed top-0 left-0 w-full z-50 bg-[#0f131f]/40 backdrop-blur-md border-b border-white/10 h-16">
+    <header className={`fixed ${demoMode ? "top-[28px]" : "top-0"} left-0 w-full z-50 bg-[#0f131f]/40 backdrop-blur-md border-b border-white/10 h-16 transition-all duration-300`}>
       <div className="flex justify-between items-center w-full px-8 max-w-full mx-auto h-full">
         <div className="flex items-center gap-8">
           {/* Real Hyderabad weather + live memory usage */}

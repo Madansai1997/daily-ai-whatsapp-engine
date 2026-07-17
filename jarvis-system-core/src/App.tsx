@@ -136,10 +136,11 @@ export default function App() {
         onOpenSearch={() => setIsSearchOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenNotifications={() => setIsNotificationsOpen(true)}
+        demoMode={demoMode}
       />
 
       {/* Dynamic Main Stage Grid Area */}
-      <main className="flex-1 w-full max-w-[1440px] mx-auto px-6 sm:px-8 pt-24 pb-24 md:pb-8 relative z-10 cyber-grid flex flex-col justify-start">
+      <main className={`flex-1 w-full max-w-[1440px] mx-auto px-6 sm:px-8 ${demoMode ? "pt-[124px]" : "pt-24"} pb-24 md:pb-8 relative z-10 cyber-grid flex flex-col justify-start`}>
         <AnimatePresence mode="wait" custom={direction}>
           <motion.div
             key={activeScreen === ScreenId.AtsAnalysis ? ScreenId.Jobs : activeScreen}

@@ -145,6 +145,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(header): Resolve demo-mode banner overlap by dynamically shifting header and main containers _(2026-07-17)_
 - feat(deploy): Add in-app system deployment popup modal with hard-refresh functionality _(2026-07-17)_
 - feat(analyst): Add goal-oriented analysis support and fix relationship UI overflow _(2026-07-17)_
 - feat(rag): Integrate and auto-seed multimodal RAG pipeline design guide _(2026-07-17)_
@@ -156,7 +157,6 @@ npm install && npm run build     # served by the engine at /console
 - fix(analyst): serve Pyodide from our own origin (jsdelivr blocked on some ISPs) _(2026-07-17)_
 - perf(analyst): Add CDN fallbacks and progress tracking for Pyodide loading _(2026-07-17)_
 - docs: Update shared assistant memories in AGENTS.md _(2026-07-17)_
-- perf(analyst): prefetch Pyodide on screen mount + honest runtime status _(2026-07-17)_
 <!-- /AUTO:changelog -->
 
 ---
