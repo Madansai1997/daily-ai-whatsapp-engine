@@ -46,6 +46,7 @@ PDF_RAG_ANSWER_SYSTEM = (
     "ANSWER:"
 )
 
+
 # ── PDF document-RAG: assess one criterion ───────────────────────────────────
 PDF_RAG_ASSESS_SYSTEM = (
     "You assess whether a document satisfies ONE criterion, using ONLY the numbered passages. "
@@ -110,12 +111,19 @@ def insight_system(kind: str) -> str:
 # host filesystem/network), on a DataFrame `df` that's already loaded. System prompt; the
 # schema+question go in the user turn.
 ANALYST_SYSTEM = (
-    "You are a senior data analyst. A pandas DataFrame named `df` is already loaded, and `pd` "
-    "(pandas), `np` (numpy) and `plt` (matplotlib.pyplot, non-interactive AGG backend) are already "
-    "imported. Given the DataFrame's profile and a question, write Python that computes the answer. "
+    "You are a senior data analyst working across a PROJECT that may hold several datasets. The "
+    "loaded pandas DataFrames are available in a dict called `datasets`, keyed by name — e.g. "
+    "`datasets['sales']`, `datasets['regions']`. When the project has exactly one dataset, `df` is "
+    "also bound to it as a convenience. `pd` (pandas), `np` (numpy) and `plt` (matplotlib.pyplot, "
+    "AGG backend) are already imported. Given the project's profile (every dataset's columns, plus "
+    "detected relationships between them) and a question, write Python that computes the answer. "
     "Respond in STRICT JSON only: {\"code\": string, \"explanation\": string, \"chart\": {\"type\": "
     "\"bar\"|\"line\"|\"pie\", \"x\": string, \"y\": string} | null}.\n"
     "RULES:\n"
+    "- Reference datasets via the `datasets` dict by their exact names from the profile. When the "
+    "question spans two datasets, JOIN/MERGE them on the detected (or an obviously matching) key "
+    "before aggregating; validate the merge (check row counts, use the right how=). If a needed key "
+    "isn't present, say so in 'explanation' rather than inventing one.\n"
     "- Assign the final tabular/scalar answer to a variable named `result` (a pandas DataFrame or "
     "Series is preferred; a scalar is fine). Keep `result` small — aggregate or limit to ~50 rows.\n"
     "- Use pandas / numpy / matplotlib (`plt`) freely. For clustering, dimensionality reduction or "
@@ -171,20 +179,24 @@ ANALYST_SYSTEM = (
 # categoricals). Returns an analyst's opening read, so the screen is useful before the first
 # question. JSON only.
 ANALYST_HYPOTHESES_SYSTEM = (
-    "You are a senior data analyst doing structural reconnaissance on a fresh dataset. You are given "
-    "an automated profile (shape, per-column dtype + missing%, numeric distributions, top categorical "
-    "values). WITHOUT any further computation, respond in STRICT JSON only: {\"read\": string, "
-    "\"hypotheses\": [string], \"kpis\": [{\"name\": string, \"why\": string}], \"questions\": "
-    "[string]}.\n"
-    "- 'read' = one grounded sentence on what this dataset appears to be and its grain (one row = ?).\n"
+    "You are a senior data analyst doing structural reconnaissance on a PROJECT that holds one or more "
+    "datasets. You are given an automated profile of every dataset (shape, per-column dtype + missing%, "
+    "numeric distributions, top categorical values) and, when there are multiple, the detected "
+    "RELATIONSHIPS between them (candidate join keys). WITHOUT any further computation, respond in "
+    "STRICT JSON only: {\"read\": string, \"hypotheses\": [string], \"kpis\": [{\"name\": string, "
+    "\"why\": string}], \"questions\": [string]}.\n"
+    "- 'read' = one or two grounded sentences on what this project appears to be, each dataset's grain "
+    "(one row = ?), and — if multiple datasets — how they relate (e.g. 'orders join to customers on "
+    "customer_id').\n"
     "- 'hypotheses' = 3-5 concrete, testable business hypotheses grounded strictly in the columns "
-    "and types shown (e.g. 'churn concentrates in month-to-month contracts'). No generic filler.\n"
-    "- 'kpis' = 2-4 KPIs native to this dataset's domain (SaaS→LTV/CAC/MRR/churn; e-commerce→AOV/"
-    "conversion; ops→throughput; finance→burn), each with a one-line 'why it matters here'. Only "
-    "propose KPIs the columns can actually support.\n"
+    "shown. When datasets relate, prefer at least one CROSS-DATASET hypothesis (e.g. 'high-value "
+    "customers cluster in the West region once orders are joined to regions'). No generic filler.\n"
+    "- 'kpis' = 2-4 KPIs native to this domain (SaaS→LTV/CAC/MRR/churn; e-commerce→AOV/conversion; "
+    "ops→throughput; finance→burn), each with a one-line 'why it matters here'. Only propose KPIs the "
+    "columns can actually support (they may require a join).\n"
     "- 'questions' = 4-6 specific, clickable analysis questions phrased the way a user would type them "
-    "(short, plain English), each answerable from these columns.\n"
-    "Ground everything in the actual column names. JSON only, no markdown."
+    "(short, plain English). When datasets relate, include a couple that JOIN across them.\n"
+    "Ground everything in the actual dataset + column names. JSON only, no markdown."
 )
 
 

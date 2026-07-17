@@ -7878,11 +7878,11 @@ async def analyst_code(request: Request):
     if not question or not schema:
         return JSONResponse({"error": "Upload a dataset and ask a question."}, status_code=400)
     if prev_code and run_error:
-        user_turn = (f"PROFILE: {schema[:2200]}\n\nQUESTION: {question}\n\n"
+        user_turn = (f"PROFILE: {schema[:5000]}\n\nQUESTION: {question}\n\n"
                      f"Your previous code raised an error when it ran. Fix it and return corrected "
                      f"JSON.\nPREVIOUS CODE:\n{prev_code[:1500]}\n\nERROR:\n{run_error[:600]}\n\nJSON:")
     else:
-        user_turn = f"PROFILE: {schema[:2200]}\n\nQUESTION: {question}\n\nJSON:"
+        user_turn = f"PROFILE: {schema[:5000]}\n\nQUESTION: {question}\n\nJSON:"
     try:
         raw = await call_llm(ANALYST_SYSTEM, user_turn, max_tokens=900, temperature=0.1)
     except Exception as e:
@@ -7908,7 +7908,7 @@ async def analyst_hypotheses(request: Request):
         return JSONResponse({"error": "No profile provided."}, status_code=400)
     try:
         raw = await call_llm(ANALYST_HYPOTHESES_SYSTEM,
-                             f"PROFILE:\n{profile[:3500]}\n\nJSON:", max_tokens=700, temperature=0.3)
+                             f"PROFILE:\n{profile[:6000]}\n\nJSON:", max_tokens=700, temperature=0.3)
     except Exception as e:
         return JSONResponse({"error": f"Reconnaissance failed: {e}"}, status_code=502)
     from influencer_agent import extract_json_object

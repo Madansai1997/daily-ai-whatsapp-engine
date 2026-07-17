@@ -6,15 +6,20 @@ import {
 } from "recharts";
 import {
   Upload, Table2, Send, Loader2, AlertTriangle, Code2, Sparkles, FileSpreadsheet,
-  ClipboardList, Wand2, Lightbulb, Target, Database, RefreshCw,
+  ClipboardList, Wand2, Lightbulb, Target, Database, RefreshCw, FolderPlus, Trash2,
+  Link2, ChevronDown, Plus, X,
 } from "lucide-react";
+import {
+  ProjectRec, DatasetRec, listProjects, createProject, deleteProject,
+  getDatasets, addDataset, removeDataset,
+} from "../lib/analystStore";
 
-/* AI Data Analyst — a browser-native senior-analyst agent. Upload a dataset (CSV/TSV/JSON/XML/
- * Excel/Parquet/SQLite), and everything runs ENTIRELY IN YOUR BROWSER via Pyodide (the server
- * never executes code, so the free-tier instance is never at risk). It profiles the data (Phase 1),
- * offers a one-click semantic clean (Phase 2), writes+runs pandas/matplotlib for your questions
- * with a self-correcting retry (Phase 2/3/5), and closes each answer with a decision-ready
- * Situation→Complication→Resolution brief (Phase 6). */
+/* AI Data Analyst — a browser-native senior-analyst workspace. A PROJECT is a folder of datasets
+ * (CSV/TSV/JSON/XML/Excel/Parquet/SQLite; multi-sheet workbooks and multi-table DBs load every
+ * sheet/table as its own dataset). Everything — storage (IndexedDB), profiling, cleaning, the
+ * pandas/matplotlib/scikit-learn you ask for — happens IN YOUR BROWSER (Pyodide via the engine's
+ * same-origin proxy). JARVIS profiles every table, detects how they relate (candidate join keys),
+ * and answers questions across them with a decision-ready Situation→Complication→Resolution brief. */
 
 interface PyAPI {
   runPythonAsync: (code: string) => Promise<unknown>;
@@ -22,19 +27,12 @@ interface PyAPI {
   globals: { set: (k: string, v: unknown) => void };
 }
 
-const PYODIDE_VER = "0.26.4";
 let _py: Promise<PyAPI> | null = null;
 const _loaded = new Set<string>(["pandas", "numpy"]);
 function loadPy(onProgress?: (msg: string) => void): Promise<PyAPI> {
-  if (_py) {
-    if (onProgress) onProgress("Ready");
-    return _py;
-  }
-  
+  if (_py) { if (onProgress) onProgress("Ready"); return _py; }
   // Same-origin: the engine proxies the Pyodide runtime from the CDN server-side (see
-  // /pyodide/{path} in V3_updates.py), so the browser only talks to OUR domain — reliable even on
-  // networks that throttle/block jsdelivr (e.g. some Indian ISPs), which was the real cause of the
-  // "Loading Python runtime" hang. indexURL must match the engine's proxy route.
+  // /pyodide/{path} in V3_updates.py), reliable even where jsdelivr is throttled.
   const base = "/pyodide/";
   _py = new Promise((resolve, reject) => {
     if (onProgress) onProgress("Connecting to Python runtime…");
@@ -59,15 +57,11 @@ async function ensurePkgs(py: PyAPI, pkgs: string[]) {
   const need = pkgs.filter((p) => !_loaded.has(p));
   if (need.length) { await py.loadPackage(need); need.forEach((p) => _loaded.add(p)); }
 }
-// Resolve the pandas Excel engine. In Pyodide 0.26.4 openpyxl is NOT in the loadPackage
-// distribution, but it's pure-Python — install it from PyPI via micropip. Old .xls uses xlrd,
-// which IS a loadPackage package. Returns the engine name to hand to pandas.
+// openpyxl isn't in Pyodide's loadPackage set — install the pure-Python wheel from our own origin.
 async function ensureExcel(py: PyAPI, ext: string): Promise<string> {
   if (ext === "xls") { await ensurePkgs(py, ["xlrd"]); return "xlrd"; }
   if (!_loaded.has("openpyxl")) {
     await ensurePkgs(py, ["micropip"]);
-    // Install from wheels we serve ourselves (public/wheels → /console/wheels) with deps=False, so
-    // Excel never depends on PyPI being reachable either.
     await py.runPythonAsync(
       "import micropip\n" +
       "await micropip.install(['/console/wheels/et_xmlfile-2.0.0-py3-none-any.whl', " +
@@ -77,10 +71,7 @@ async function ensureExcel(py: PyAPI, ext: string): Promise<string> {
   }
   return "openpyxl";
 }
-
-// Which Pyodide packages the generated code needs. matplotlib is always available (for stat viz);
-// scikit-learn / scipy / statsmodels load on demand when clustering/ML/stats code references them.
-// All are in the Pyodide distribution and fetched via the same-origin /pyodide proxy.
+// Heavy packages the generated code may reference — loaded on demand via the same-origin proxy.
 function pkgsForCode(code: string): string[] {
   const c = code.toLowerCase();
   const need = ["matplotlib"];
@@ -91,21 +82,22 @@ function pkgsForCode(code: string): string[] {
 }
 
 // ── format dispatch ──────────────────────────────────────────────────────────
-interface Fmt { fmt: string; binary: boolean; pkgs: string[]; }
+interface Fmt { fmt: string; binary: boolean; }
 function detectFmt(name: string): Fmt | null {
   const ext = (name.toLowerCase().split(".").pop() || "");
   switch (ext) {
-    case "csv": return { fmt: "csv", binary: false, pkgs: [] };
-    case "tsv": case "tab": return { fmt: "tsv", binary: false, pkgs: [] };
-    case "json": return { fmt: "json", binary: false, pkgs: [] };
-    case "xml": return { fmt: "xml", binary: false, pkgs: ["lxml"] };
-    case "parquet": return { fmt: "parquet", binary: true, pkgs: ["fastparquet"] }; // pyarrow absent in Pyodide
-    case "xlsx": case "xls": return { fmt: ext, binary: true, pkgs: [] }; // engine loaded in ingest()
-    case "db": case "sqlite": case "sqlite3": return { fmt: "sqlite", binary: true, pkgs: [] };
+    case "csv": return { fmt: "csv", binary: false };
+    case "tsv": case "tab": return { fmt: "tsv", binary: false };
+    case "json": return { fmt: "json", binary: false };
+    case "xml": return { fmt: "xml", binary: true }; // read as bytes to preserve encoding
+    case "parquet": return { fmt: "parquet", binary: true };
+    case "xlsx": case "xls": return { fmt: ext, binary: true };
+    case "db": case "sqlite": case "sqlite3": return { fmt: "sqlite", binary: true };
     default: return null;
   }
 }
 const MAX_BYTES = 15 * 1024 * 1024;
+const baseName = (f: string) => f.replace(/\.[^.]+$/, "").trim() || "data";
 
 const CYAN = "#8aebff", GREEN = "#5eead4", AMBER = "#ffd6a3", PURPLE = "#c084fc", MUTED = "#859397";
 const PIE_COLORS = [CYAN, GREEN, AMBER, PURPLE, "#a3e635", "#ffb4ab", "#22d3ee", "#f0abfc"];
@@ -113,58 +105,82 @@ const tip = { background: "#0f131f", border: "1px solid #3c494c", borderRadius: 
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
 // ── Python snippets (run client-side; NOT the LLM-generated code) ─────────────
+// Ingest one uploaded file into the DATASETS registry. Multi-sheet workbooks / multi-table DBs
+// each add one dataset per sheet/table (named by sheet/table, deduped).
 const INGEST_PY = `
 import json as _json, io as _io
 import pandas as pd, numpy as np
-_fmt = fmt
-_pick = pick_name or None
-_sources = []
+try: DATASETS
+except NameError: DATASETS = {}
+_fmt = fmt; _base = ds_base
 def _b(): return bytes(src_bytes.to_py())
+def _uniq(nm):
+    nm = str(nm).strip() or 'data'; base = nm; i = 2
+    while nm in DATASETS: nm = base + '_' + str(i); i += 1
+    return nm
+_added = []
+def _finish(nm, d):
+    d.columns = [str(c) for c in d.columns]
+    for _c in d.columns:
+        if d[_c].dtype == object:
+            _s = d[_c].dropna().astype(str).head(20)
+            if len(_s) and _s.str.match(r'^\\d{4}-\\d{2}-\\d{2}').mean() > 0.7:
+                try: d[_c] = pd.to_datetime(d[_c], errors='coerce')
+                except Exception: pass
+    key = _uniq(nm); DATASETS[key] = d
+    _added.append({"name": key, "nrows": int(len(d)), "ncols": int(len(d.columns))})
 if _fmt in ('csv','tsv'):
-    df = pd.read_csv(_io.StringIO(src_text), sep='\\t' if _fmt=='tsv' else ',')
+    _finish(_base, pd.read_csv(_io.StringIO(src_text), sep='\\t' if _fmt=='tsv' else ','))
 elif _fmt=='json':
-    try:
-        df = pd.read_json(_io.StringIO(src_text))
+    try: _df = pd.read_json(_io.StringIO(src_text))
     except Exception:
-        import json as __j
-        df = pd.json_normalize(__j.loads(src_text))
+        import json as __j; _df = pd.json_normalize(__j.loads(src_text))
+    _finish(_base, _df)
 elif _fmt=='xml':
-    df = pd.read_xml(_io.StringIO(src_text))
+    _finish(_base, pd.read_xml(_io.BytesIO(_b())))
 elif _fmt=='parquet':
-    df = pd.read_parquet(_io.BytesIO(_b()), engine='fastparquet')
+    _finish(_base, pd.read_parquet(_io.BytesIO(_b()), engine='fastparquet'))
 elif _fmt in ('xlsx','xls'):
-    _xl = pd.ExcelFile(_io.BytesIO(_b()), engine=excel_engine)
-    _sources = [str(s) for s in _xl.sheet_names]
-    _p = _pick if _pick in _sources else _sources[0]
-    df = _xl.parse(_p); _pick = _p
+    _sheets = pd.read_excel(_io.BytesIO(_b()), engine=excel_engine, sheet_name=None)
+    _multi = len(_sheets) > 1
+    for _sn, _sdf in _sheets.items(): _finish(_sn if _multi else _base, _sdf)
 elif _fmt=='sqlite':
     import sqlite3
     with open('/tmp/_up.db','wb') as _f: _f.write(_b())
     _con = sqlite3.connect('/tmp/_up.db')
-    _sources = [r[0] for r in _con.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()]
-    if not _sources: raise ValueError('No tables in this SQLite database.')
-    _p = _pick if _pick in _sources else _sources[0]
-    df = pd.read_sql('SELECT * FROM "%s"' % _p, _con); _pick = _p
+    _tabs = [r[0] for r in _con.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()]
+    if not _tabs: raise ValueError('No tables in this SQLite database.')
+    _multi = len(_tabs) > 1
+    for _t in _tabs: _finish(_t if _multi else _base, pd.read_sql('SELECT * FROM "%s"' % _t, _con))
 else:
     raise ValueError('Unsupported format: ' + str(_fmt))
-df.columns = [str(c) for c in df.columns]
-for _c in df.columns:
-    if df[_c].dtype == object:
-        _s = df[_c].dropna().astype(str).head(20)
-        if len(_s) and _s.str.match(r'^\\d{4}-\\d{2}-\\d{2}').mean() > 0.7:
-            try: df[_c] = pd.to_datetime(df[_c], errors='coerce')
-            except Exception: pass
-_json.dumps({"sources": _sources, "picked": _pick})
+_json.dumps({"added": _added})
 `;
 
-const PROFILE_PY = `
+const RESET_PY = `
+try: DATASETS.clear()
+except NameError: DATASETS = {}
+'ok'
+`;
+const REMOVE_PY = `
 import json as _json
+try:
+    for _n in _json.loads(remove_names): DATASETS.pop(_n, None)
+except NameError: pass
+'ok'
+`;
+
+// Profile every dataset + detect candidate join keys (value overlap / matching names) across them.
+const PROFILE_ALL_PY = `
+import json as _json, itertools as _it
 import pandas as pd, numpy as np
-def _prof():
-    n = int(len(df)); cols = []
-    lines = [str(n) + " rows x " + str(len(df.columns)) + " columns.", "Columns:"]
-    for c in df.columns:
-        s = df[c]; miss = float(s.isna().mean()*100.0); nun = int(s.nunique(dropna=True))
+try: DATASETS
+except NameError: DATASETS = {}
+
+def _profile_one(name, d):
+    n = int(len(d)); cols = []; lines = []
+    for c in d.columns:
+        s = d[c]; miss = float(s.isna().mean()*100.0); nun = int(s.nunique(dropna=True))
         col = {"name": str(c), "dtype": str(s.dtype), "missing_pct": round(miss,1), "nunique": nun}
         if pd.api.types.is_numeric_dtype(s):
             col["kind"]="numeric"; sv = s.dropna().astype(float)
@@ -176,46 +192,84 @@ def _prof():
                     "max":round(float(sv.max()),3),"skew":round(float(sv.skew()),3) if len(sv)>2 else 0.0,
                     "kurtosis":round(float(sv.kurtosis()),3) if len(sv)>3 else 0.0,"outliers":out})
                 lines.append("- %s (%s) - %s%% missing; mean %s, median %s, std %s, min %s, max %s, skew %s, %d IQR outliers" % (c, s.dtype, round(miss,1), col['mean'], col['median'], col['std'], col['min'], col['max'], col['skew'], out))
-            else:
-                lines.append("- %s (%s) - all missing" % (c, s.dtype))
+            else: lines.append("- %s (%s) - all missing" % (c, s.dtype))
         elif pd.api.types.is_datetime64_any_dtype(s):
             col["kind"]="datetime"; sv=s.dropna()
             if len(sv):
                 col["min"]=str(sv.min())[:19]; col["max"]=str(sv.max())[:19]
                 lines.append("- %s (datetime) - %s%% missing; range %s to %s" % (c, round(miss,1), col['min'], col['max']))
-            else:
-                lines.append("- %s (datetime) - all missing" % c)
+            else: lines.append("- %s (datetime) - all missing" % c)
         else:
             col["kind"]="categorical" if nun<=max(30, n*0.5) else "text"
             vc = s.dropna().astype(str).value_counts().head(5)
             col["top"]=[{"value":str(k)[:40],"count":int(v)} for k,v in vc.items()]
-            _t = ", ".join(d["value"]+"("+str(d["count"])+")" for d in col["top"][:3])
+            _t = ", ".join(d2["value"]+"("+str(d2["count"])+")" for d2 in col["top"][:3])
             lines.append("- %s (%s) - %s%% missing, %d unique; top: %s" % (c, s.dtype, round(miss,1), nun, _t))
         cols.append(col)
-    return {"nrows":n,"ncols":int(len(df.columns)),"columns":cols,"profileText":"\\n".join(lines)}
-_json.dumps(_prof())
+    return {"name":name,"nrows":n,"ncols":int(len(d.columns)),"columns":cols}, lines
+
+def _sig(nm, c):
+    try: vals = DATASETS[nm][c].dropna().astype(str).unique()
+    except Exception: return None
+    if len(vals) > 4000: vals = vals[:4000]
+    return set(vals.tolist())
+
+def _relationships():
+    names = list(DATASETS.keys()); sigs = {}
+    for nm in names:
+        for c in DATASETS[nm].columns:
+            sg = _sig(nm, c)
+            if sg is not None and len(sg) >= 2: sigs[(nm, str(c))] = sg
+    out = []
+    for a, b in _it.combinations(names, 2):
+        best = None
+        for ca in DATASETS[a].columns:
+            sa = sigs.get((a, str(ca)))
+            if not sa: continue
+            for cb in DATASETS[b].columns:
+                sb = sigs.get((b, str(cb)))
+                if not sb: continue
+                ov = len(sa & sb) / min(len(sa), len(sb))
+                nm_match = str(ca).lower() == str(cb).lower()
+                score = ov + (0.15 if nm_match else 0.0)
+                if (nm_match and ov >= 0.3) or ov >= 0.6:
+                    if best is None or score > best["_s"]:
+                        best = {"left":a,"leftCol":str(ca),"right":b,"rightCol":str(cb),"overlap":round(float(ov),2),"_s":score}
+        if best: best.pop("_s"); out.append(best)
+    out.sort(key=lambda r: -r["overlap"])
+    return out[:8]
+
+_dsets=[]; _lines=["PROJECT with %d dataset(s)." % len(DATASETS)]
+for _nm, _d in DATASETS.items():
+    _p, _pl = _profile_one(_nm, _d); _dsets.append(_p)
+    _lines.append(""); _lines.append('DATASET "%s" - %d rows x %d columns.' % (_nm, _p["nrows"], _p["ncols"]))
+    _lines.append("Columns:"); _lines.extend(_pl)
+_rel = _relationships()
+if _rel:
+    _lines.append(""); _lines.append("RELATIONSHIPS (candidate join keys):")
+    for r in _rel: _lines.append("- %s.%s <-> %s.%s (overlap %s)" % (r["left"], r["leftCol"], r["right"], r["rightCol"], r["overlap"]))
+_json.dumps({"datasets":_dsets,"relationships":_rel,"profileText":"\\n".join(_lines)})
 `;
 
 const CLEAN_PY = `
 import json as _json
 import pandas as pd, numpy as np
+df = DATASETS[clean_name]
 _report = []
 for _c in list(df.columns):
     _s = df[_c]
     if _s.dtype == object:
         _cl = _s.astype(str).str.strip().str.replace(r'\\s+', ' ', regex=True)
         _cl = _cl.replace({'nan': np.nan, 'None': np.nan, 'NaN': np.nan, '': np.nan})
-        _nf = int(_cl.isna().sum())
-        df[_c] = _cl.fillna('Unknown')
+        _nf = int(_cl.isna().sum()); df[_c] = _cl.fillna('Unknown')
         if _nf: _report.append(_c + ": filled " + str(_nf) + " missing with 'Unknown'")
     elif pd.api.types.is_numeric_dtype(_s):
         _m = int(_s.isna().sum())
-        if _m:
-            df[_c] = _s.fillna(_s.median())
-            _report.append(_c + ": imputed " + str(_m) + " missing with median")
+        if _m: df[_c] = _s.fillna(_s.median()); _report.append(_c + ": imputed " + str(_m) + " missing with median")
 _before = len(df); df.drop_duplicates(inplace=True); _drop = _before - len(df)
 if _drop: _report.append("removed " + str(_drop) + " duplicate rows")
-if not _report: _report.append("Already clean — no missing values, whitespace issues or duplicates found.")
+DATASETS[clean_name] = df
+if not _report: _report.append("Already clean - no missing values, whitespace issues or duplicates found.")
 _json.dumps(_report)
 `;
 
@@ -226,6 +280,10 @@ import matplotlib
 matplotlib.use('AGG')
 import matplotlib.pyplot as plt
 plt.close('all')
+try: DATASETS
+except NameError: DATASETS = {}
+datasets = DATASETS
+df = next(iter(DATASETS.values())) if len(DATASETS) == 1 else None
 result = None
 `;
 const RUNNER_TAIL = `
@@ -263,7 +321,9 @@ interface ColProfile {
   skew?: number; kurtosis?: number; outliers?: number;
   top?: { value: string; count: number }[];
 }
-interface Profile { nrows: number; ncols: number; columns: ColProfile[]; profileText: string; }
+interface DatasetProfile { name: string; nrows: number; ncols: number; columns: ColProfile[]; }
+interface Relationship { left: string; leftCol: string; right: string; rightCol: string; overlap: number; }
+interface ProfileAll { datasets: DatasetProfile[]; relationships: Relationship[]; profileText: string; }
 interface Recon { read: string; hypotheses: string[]; kpis: { name: string; why: string }[]; questions: string[]; }
 interface Chart { type: "bar" | "line" | "pie"; x: string; y: string; }
 interface Scr { scorecard: string[]; descriptive: string; diagnostic: string; prescriptive: string; }
@@ -277,6 +337,7 @@ interface Turn {
   result?: RunResult; scr?: Scr | null; scrLoading?: boolean;
   error?: string; running?: boolean; retried?: boolean;
 }
+interface LoadedFile { rec: DatasetRec; names: string[]; }
 
 interface CodeGen { code: string; explanation: string; chart: Chart | null; error?: string; }
 async function fetchCode(question: string, schema: string, previous_code?: string, error?: string): Promise<CodeGen> {
@@ -307,35 +368,44 @@ function resultToText(result?: RunResult, image?: string | null): string {
   return `Columns: ${head}\n${body}\n(${result.rows.length} rows)`;
 }
 
+// Set the ingest globals for one file and run INGEST_PY; returns the dataset names it created.
+async function ingestFile(py: PyAPI, rec: { fmt: string; binary: boolean; base: string; content: ArrayBuffer | string }): Promise<string[]> {
+  let excelEngine = "openpyxl";
+  if (rec.fmt === "xlsx" || rec.fmt === "xls") excelEngine = await ensureExcel(py, rec.fmt);
+  else if (rec.fmt === "parquet") await ensurePkgs(py, ["fastparquet"]);
+  else if (rec.fmt === "xml") await ensurePkgs(py, ["lxml"]);
+  py.globals.set("fmt", rec.fmt);
+  py.globals.set("ds_base", rec.base);
+  py.globals.set("excel_engine", excelEngine);
+  if (rec.binary) py.globals.set("src_bytes", new Uint8Array(rec.content as ArrayBuffer));
+  else py.globals.set("src_text", rec.content as string);
+  const out = JSON.parse((await py.runPythonAsync(INGEST_PY)) as string) as { added: { name: string }[] };
+  return out.added.map((a) => a.name);
+}
+
 export default function DataAnalyst() {
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [fileName, setFileName] = useState("");
-  const [srcFmt, setSrcFmt] = useState("");
-  const [sources, setSources] = useState<string[]>([]);
-  const [picked, setPicked] = useState("");
-  const [loadingCsv, setLoadingCsv] = useState(false);
-  const [statusMsg, setStatusMsg] = useState("");
-  const [csvError, setCsvError] = useState("");
+  const [pyState, setPyState] = useState<"loading" | "ready" | "error">("loading");
+  const [projects, setProjects] = useState<ProjectRec[]>([]);
+  const [project, setProject] = useState<ProjectRec | null>(null);
+  const [files, setFiles] = useState<LoadedFile[]>([]);
+  const [prof, setProf] = useState<ProfileAll | null>(null);
   const [recon, setRecon] = useState<Recon | null>(null);
   const [reconLoading, setReconLoading] = useState(false);
-  const [cleaning, setCleaning] = useState(false);
-  const [cleanReport, setCleanReport] = useState<string[] | null>(null);
-  const [showProfile, setShowProfile] = useState(false);
+  const [statusMsg, setStatusMsg] = useState("");
+  const [busyLoad, setBusyLoad] = useState(false);
+  const [error, setError] = useState("");
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [cleaning, setCleaning] = useState("");
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
-  const [pyState, setPyState] = useState<"loading" | "ready" | "error">("loading");
+  const [projMenu, setProjMenu] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
-  const lastFile = useRef<File | null>(null);
 
-  // Prefetch the ~20MB Pyodide + pandas/numpy runtime the moment this screen mounts, so the
-  // download overlaps with the user picking a file instead of starting only on upload. It's a
-  // one-time cost — the browser caches it for every later visit.
+  // Prefetch the runtime on mount (one-time ~20MB, cached) so uploads land straight on profiling.
   useEffect(() => {
     let alive = true;
-    loadPy((msg) => { if (alive) setStatusMsg(msg); })
-      .then(() => { if (alive) setPyState("ready"); })
-      .catch(() => { if (alive) setPyState("error"); });
+    loadPy().then(() => { if (alive) setPyState("ready"); }).catch(() => { if (alive) setPyState("error"); });
     return () => { alive = false; };
   }, []);
 
@@ -345,76 +415,135 @@ export default function DataAnalyst() {
       const r = await fetch("/api/analyst/hypotheses", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ profile: profileText }) });
       const d = await r.json();
       if (r.ok && !d.error) setRecon(d);
-    } catch { /* recon is best-effort */ } finally { setReconLoading(false); }
+    } catch { /* best-effort */ } finally { setReconLoading(false); }
   }, []);
 
-  const ingest = useCallback(async (file: File, pick?: string) => {
-    const det = detectFmt(file.name);
-    if (!det) { setCsvError("Unsupported format. Use CSV, TSV, JSON, XML, Parquet, Excel (.xlsx) or SQLite (.db)."); return; }
-    if (file.size > MAX_BYTES) { setCsvError("File is too large (max 15MB) — sample it down first."); return; }
-    setLoadingCsv(true); setCsvError(""); setCleanReport(null);
-    if (!pick) { setTurns([]); setProfile(null); setRecon(null); }
+  const reprofile = useCallback(async (): Promise<ProfileAll | null> => {
+    const py = await loadPy();
+    const p = JSON.parse((await py.runPythonAsync(PROFILE_ALL_PY)) as string) as ProfileAll;
+    setProf(p);
+    return p;
+  }, []);
+
+  // Load a project: reset the registry, re-ingest its files, profile everything, refresh the read.
+  const openProject = useCallback(async (p: ProjectRec) => {
+    setProject(p); setBusyLoad(true); setError(""); setTurns([]); setProf(null); setRecon(null); setExpanded(null);
     try {
-      setStatusMsg("Loading Python runtime…");
-      const py = await loadPy();
-      let excelEngine = "openpyxl";
-      if (det.fmt === "xlsx" || det.fmt === "xls") {
-        setStatusMsg("Loading Excel reader…");
-        excelEngine = await ensureExcel(py, det.fmt);
-      } else if (det.pkgs.length) {
-        setStatusMsg(`Loading ${det.pkgs.join(", ")}…`);
-        await ensurePkgs(py, det.pkgs);
+      setStatusMsg("Loading runtime…");
+      const py = await loadPy((m) => setStatusMsg(m));
+      await py.runPythonAsync(RESET_PY);
+      const recs = await getDatasets(p.id);
+      const ordered = p.order.length ? p.order.map((id) => recs.find((r) => r.id === id)).filter(Boolean) as DatasetRec[] : recs;
+      const loaded: LoadedFile[] = [];
+      for (const rec of ordered) {
+        setStatusMsg(`Loading ${rec.fileName}…`);
+        const names = await ingestFile(py, { fmt: rec.fmt, binary: rec.binary, base: rec.name, content: rec.content });
+        loaded.push({ rec, names });
       }
-      setStatusMsg("Reading + profiling…");
-      py.globals.set("fmt", det.fmt);
-      py.globals.set("excel_engine", excelEngine);
-      py.globals.set("pick_name", pick ?? "");
-      if (det.binary) py.globals.set("src_bytes", new Uint8Array(await file.arrayBuffer()));
-      else py.globals.set("src_text", await file.text());
-      const ing = JSON.parse((await py.runPythonAsync(INGEST_PY)) as string) as { sources: string[]; picked: string | null };
-      setSources(ing.sources || []);
-      setPicked(ing.picked || "");
-      const prof = JSON.parse((await py.runPythonAsync(PROFILE_PY)) as string) as Profile;
-      setProfile(prof); setFileName(file.name); setSrcFmt(det.fmt);
-      lastFile.current = file;
-      loadRecon(prof.profileText);
+      setFiles(loaded);
+      if (loaded.length) { const p2 = await reprofile(); if (p2) loadRecon(p2.profileText); }
+      else setProf(null);
     } catch (e) {
-      setCsvError(`Couldn't read that file: ${e instanceof Error ? e.message : e}`);
+      setError(`Couldn't load the project: ${e instanceof Error ? e.message : e}`);
+    } finally { setBusyLoad(false); setStatusMsg(""); }
+  }, [reprofile, loadRecon]);
+
+  // First mount: load (or create) the project list and open the first.
+  useEffect(() => {
+    (async () => {
+      let ps = await listProjects();
+      if (!ps.length) { const p = await createProject("My first project"); ps = [p]; }
+      setProjects(ps);
+      await openProject(ps[0]);
+    })().catch((e) => setError(`Storage error: ${e instanceof Error ? e.message : e}`));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const addFiles = useCallback(async (fileList: FileList) => {
+    if (!project) return;
+    setError(""); setBusyLoad(true);
+    try {
+      const py = await loadPy((m) => setStatusMsg(m));
+      const newlyLoaded: LoadedFile[] = [];
+      for (const file of Array.from(fileList)) {
+        const det = detectFmt(file.name);
+        if (!det) { setError(`Unsupported: ${file.name}. Use CSV/TSV/JSON/XML/Excel/Parquet/SQLite.`); continue; }
+        if (file.size > MAX_BYTES) { setError(`${file.name} is too large (max 15MB).`); continue; }
+        setStatusMsg(`Reading ${file.name}…`);
+        const content: ArrayBuffer | string = det.binary ? await file.arrayBuffer() : await file.text();
+        const names = await ingestFile(py, { fmt: det.fmt, binary: det.binary, base: baseName(file.name), content });
+        const rec = await addDataset({ projectId: project.id, name: baseName(file.name), fileName: file.name, fmt: det.fmt, sheet: "", binary: det.binary, content });
+        newlyLoaded.push({ rec, names });
+      }
+      if (newlyLoaded.length) {
+        setFiles((f) => [...f, ...newlyLoaded]);
+        const p2 = await reprofile();
+        // refresh the project record's order from storage
+        const ps = await listProjects(); setProjects(ps);
+        const cur = ps.find((x) => x.id === project.id); if (cur) setProject(cur);
+        if (p2) loadRecon(p2.profileText);
+      }
+    } catch (e) {
+      setError(`Couldn't add data: ${e instanceof Error ? e.message : e}`);
     } finally {
-      setLoadingCsv(false); setStatusMsg("");
+      setBusyLoad(false); setStatusMsg("");
       if (fileRef.current) fileRef.current.value = "";
     }
-  }, [loadRecon]);
+  }, [project, reprofile, loadRecon]);
 
-  const reprofile = useCallback(async () => {
-    const py = await loadPy();
-    const prof = JSON.parse((await py.runPythonAsync(PROFILE_PY)) as string) as Profile;
-    setProfile(prof);
-    return prof;
-  }, []);
-
-  const runClean = useCallback(async () => {
-    if (!profile || cleaning) return;
-    setCleaning(true);
+  const removeFile = useCallback(async (lf: LoadedFile) => {
+    if (!project) return;
     try {
       const py = await loadPy();
-      const rep = JSON.parse((await py.runPythonAsync(CLEAN_PY)) as string) as string[];
-      setCleanReport(rep);
-      await reprofile();
-    } catch (e) {
-      setCsvError(`Clean failed: ${e instanceof Error ? e.message : e}`);
-    } finally { setCleaning(false); }
-  }, [profile, cleaning, reprofile]);
+      py.globals.set("remove_names", JSON.stringify(lf.names));
+      await py.runPythonAsync(REMOVE_PY);
+      await removeDataset(lf.rec.id);
+      const rest = files.filter((f) => f.rec.id !== lf.rec.id);
+      setFiles(rest);
+      setTurns([]);
+      if (rest.length) { const p2 = await reprofile(); if (p2) loadRecon(p2.profileText); }
+      else { setProf(null); setRecon(null); }
+      const ps = await listProjects(); setProjects(ps);
+    } catch (e) { setError(`Couldn't remove: ${e instanceof Error ? e.message : e}`); }
+  }, [project, files, reprofile, loadRecon]);
+
+  const runClean = useCallback(async (name: string) => {
+    setCleaning(name);
+    try {
+      const py = await loadPy();
+      py.globals.set("clean_name", name);
+      await py.runPythonAsync(CLEAN_PY);
+      const p2 = await reprofile(); if (p2) loadRecon(p2.profileText);
+    } catch (e) { setError(`Clean failed: ${e instanceof Error ? e.message : e}`); }
+    finally { setCleaning(""); }
+  }, [reprofile, loadRecon]);
+
+  const newProject = useCallback(async () => {
+    const name = window.prompt("Name this project", "New project");
+    if (name === null) return;
+    const p = await createProject(name || "New project");
+    setProjects((ps) => [...ps, p]); setProjMenu(false);
+    await openProject(p);
+  }, [openProject]);
+
+  const removeProject = useCallback(async (p: ProjectRec) => {
+    if (!window.confirm(`Delete project "${p.name}" and all its datasets?`)) return;
+    await deleteProject(p.id);
+    let ps = await listProjects();
+    if (!ps.length) { ps = [await createProject("My first project")]; }
+    setProjects(ps); setProjMenu(false);
+    await openProject(ps[0]);
+  }, [openProject]);
 
   const ask = useCallback(async (preset?: string) => {
     const q = (preset ?? question).trim();
-    if (!q || !profile || busy) return;
+    if (!q || !prof || busy) return;
     if (!preset) setQuestion("");
     setBusy(true);
     const id = (crypto as { randomUUID?: () => string }).randomUUID?.() ?? String(Date.now() + Math.random());
     setTurns((t) => [...t, { id, q, running: true }]);
     const patch = (p: Partial<Turn>) => setTurns((t) => t.map((x) => (x.id === id ? { ...x, ...p } : x)));
-    const schema = profile.profileText;
+    const schema = prof.profileText;
     try {
       const py = await loadPy();
       const gen = await fetchCode(q, schema);
@@ -422,9 +551,7 @@ export default function DataAnalyst() {
       await ensurePkgs(py, pkgsForCode(gen.code));
       let run = await runGenerated(py, gen.code);
       let usedCode = gen.code, usedExpl = gen.explanation, usedChart = gen.chart, retried = false;
-
       if (!run.ok) {
-        // Phase 2.3 — self-correcting loop: feed the stack trace back, retry once.
         const gen2 = await fetchCode(q, schema, gen.code, run.error);
         if (!gen2.error) {
           await ensurePkgs(py, pkgsForCode(gen2.code));
@@ -433,10 +560,7 @@ export default function DataAnalyst() {
           else { patch({ running: false, code: gen2.code, explanation: gen2.explanation, error: run2.error, retried: true }); return; }
         } else { patch({ running: false, code: gen.code, explanation: gen.explanation, error: run.error }); return; }
       }
-
       patch({ running: false, code: usedCode, explanation: usedExpl, chart: usedChart, result: run.result, image: run.image, retried, scrLoading: true });
-
-      // Phase 6 — executive SCR synthesis on the actual result (best-effort, non-blocking).
       try {
         const r = await fetch("/api/analyst/synthesis", {
           method: "POST", headers: JSON_HEADERS,
@@ -449,7 +573,10 @@ export default function DataAnalyst() {
     } catch (e) {
       patch({ running: false, error: `Couldn't run the analysis: ${e instanceof Error ? e.message : e}` });
     } finally { setBusy(false); }
-  }, [question, profile, busy]);
+  }, [question, prof, busy]);
+
+  const profByName = (n: string) => prof?.datasets.find((d) => d.name === n) || null;
+  const totalDatasets = files.reduce((a, f) => a + f.names.length, 0);
 
   return (
     <motion.div initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -15 }} transition={{ duration: 0.4 }} className="space-y-6">
@@ -460,42 +587,67 @@ export default function DataAnalyst() {
             <span className="opacity-40 font-light text-xl">04 //</span> DATA ANALYST
           </h1>
           <p className="text-xs font-mono text-[#859397] uppercase tracking-widest mt-1 opacity-80">
-            Any dataset · profiled, cleaned, questioned & briefed — in your browser
+            A project of datasets · joined, profiled, questioned & briefed — in your browser
           </p>
         </div>
-        <input ref={fileRef} type="file" accept=".csv,.tsv,.tab,.json,.xml,.parquet,.xlsx,.xls,.db,.sqlite,.sqlite3" className="hidden"
-          onChange={(e) => { const f = e.target.files?.[0]; if (f) ingest(f); }} />
-        <button onClick={() => fileRef.current?.click()} disabled={loadingCsv}
-          className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-xs font-semibold font-mono border border-[#8aebff]/30 bg-[#8aebff]/10 text-[#8aebff] hover:bg-[#8aebff]/20 transition-all cursor-pointer disabled:opacity-50">
-          {loadingCsv ? <><Loader2 className="w-4 h-4 animate-spin" /> {statusMsg || "LOADING…"}</> : <><Upload className="w-4 h-4" /> {profile ? "REPLACE DATA" : "UPLOAD DATA"}</>}
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Project switcher */}
+          <div className="relative">
+            <button onClick={() => setProjMenu((v) => !v)}
+              className="flex items-center gap-2 px-3 py-2.5 rounded-lg text-xs font-semibold font-mono border border-white/10 bg-white/5 text-[#bbc9cd] hover:bg-white/10 transition-all cursor-pointer max-w-[220px]">
+              <Database className="w-4 h-4 shrink-0 text-[#8aebff]" />
+              <span className="truncate">{project?.name || "Project"}</span>
+              <ChevronDown className="w-3.5 h-3.5 shrink-0 opacity-60" />
+            </button>
+            {projMenu && (
+              <div className="absolute right-0 mt-2 w-64 z-30 rounded-xl border border-white/10 bg-[#0f131f] shadow-2xl p-1.5">
+                {projects.map((p) => (
+                  <div key={p.id} className={`flex items-center gap-1 rounded-lg ${p.id === project?.id ? "bg-[#8aebff]/10" : "hover:bg-white/5"}`}>
+                    <button onClick={() => { setProjMenu(false); if (p.id !== project?.id) openProject(p); }}
+                      className="flex-1 text-left px-3 py-2 text-[12px] font-mono text-[#dfe2f3] truncate cursor-pointer">{p.name}</button>
+                    <button onClick={() => removeProject(p)} title="Delete project"
+                      className="p-1.5 text-[#5c6a6d] hover:text-[#ffb4ab] cursor-pointer"><Trash2 className="w-3.5 h-3.5" /></button>
+                  </div>
+                ))}
+                <button onClick={newProject} className="w-full flex items-center gap-2 px-3 py-2 mt-1 rounded-lg text-[12px] font-mono text-[#8aebff] hover:bg-[#8aebff]/10 cursor-pointer border-t border-white/5">
+                  <FolderPlus className="w-3.5 h-3.5" /> New project
+                </button>
+              </div>
+            )}
+          </div>
+          <input ref={fileRef} type="file" multiple accept=".csv,.tsv,.tab,.json,.xml,.parquet,.xlsx,.xls,.db,.sqlite,.sqlite3" className="hidden"
+            onChange={(e) => { if (e.target.files?.length) addFiles(e.target.files); }} />
+          <button onClick={() => fileRef.current?.click()} disabled={busyLoad || pyState === "error"}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs font-semibold font-mono border border-[#8aebff]/30 bg-[#8aebff]/10 text-[#8aebff] hover:bg-[#8aebff]/20 transition-all cursor-pointer disabled:opacity-50">
+            {busyLoad ? <><Loader2 className="w-4 h-4 animate-spin" /> {statusMsg || "WORKING…"}</> : <><Plus className="w-4 h-4" /> ADD DATA</>}
+          </button>
+        </div>
       </section>
 
-      {csvError && (
+      {error && (
         <div className="flex items-start gap-2 text-[11px] font-mono text-[#ffb4ab] bg-[#ffb4ab]/5 border border-[#ffb4ab]/20 rounded-lg p-3">
-          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" /> <span>{csvError}</span>
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" /> <span>{error}</span>
         </div>
       )}
 
-      {!profile ? (
+      {totalDatasets === 0 ? (
         <div className="glass-panel rounded-xl border border-white/5 p-5">
           <div className="flex flex-col items-center justify-center h-[300px] text-center gap-3">
             <FileSpreadsheet className="w-11 h-11 text-[#8aebff]/30" />
-            <p className="text-sm text-[#bbc9cd]">Drop in a dataset — JARVIS profiles it and takes questions.</p>
+            <p className="text-sm text-[#bbc9cd]">This project is empty — add one or more datasets to begin.</p>
             <p className="text-[11px] font-mono text-[#859397] max-w-lg">
-              Supports <b className="text-[#bbc9cd]">CSV · TSV · JSON · XML · Excel (.xlsx) · Parquet · SQLite (.db)</b>. Everything —
-              profiling, cleaning, the pandas & matplotlib you ask for — runs <b>in your browser</b> (Pyodide; nothing leaves your
-              machine, the server never executes code).
+              Add <b className="text-[#bbc9cd]">CSV · TSV · JSON · XML · Excel · Parquet · SQLite</b> (drop several — every sheet/table becomes
+              its own dataset). JARVIS profiles them, finds how they <b>relate</b>, and answers questions <b>across</b> them. Everything runs
+              and is stored <b>in your browser</b>; nothing leaves your machine.
             </p>
             {pyState === "loading" && (
               <div className="flex items-center gap-2 text-[11px] font-mono text-[#8aebff] bg-[#8aebff]/[0.06] border border-[#8aebff]/20 rounded-full px-3 py-1.5 mt-1">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                {statusMsg || "Warming up the Python runtime — one-time ~20MB download, then cached. Pick a file meanwhile."}
+                <Loader2 className="w-3.5 h-3.5 animate-spin" /> {statusMsg || "Warming up the Python runtime — one-time ~20MB, then cached."}
               </div>
             )}
-            {pyState === "ready" && (
+            {pyState === "ready" && !busyLoad && (
               <div className="flex items-center gap-2 text-[11px] font-mono text-[#5eead4] bg-[#5eead4]/[0.06] border border-[#5eead4]/20 rounded-full px-3 py-1.5 mt-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#5eead4]" /> Runtime ready — upload a dataset.
+                <span className="w-1.5 h-1.5 rounded-full bg-[#5eead4]" /> Runtime ready — add a dataset.
               </div>
             )}
             {pyState === "error" && (
@@ -507,56 +659,67 @@ export default function DataAnalyst() {
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Left column — dataset + recon */}
+          {/* Left column — datasets + relationships + recon */}
           <div className="lg:col-span-1 space-y-4">
-            {/* Dataset summary */}
+            {/* Datasets */}
             <div className="glass-panel rounded-xl border border-white/5 p-4">
               <h3 className="text-xs font-bold font-mono uppercase tracking-widest text-[#859397] flex items-center gap-2 mb-3">
-                <Database className="w-4 h-4" /> <span className="truncate">{fileName}</span>
+                <Table2 className="w-4 h-4" /> Datasets · {totalDatasets}
               </h3>
-              <p className="text-[10px] font-mono text-[#859397] mb-3">
-                {profile.nrows.toLocaleString()} rows · {profile.ncols} columns · <span className="uppercase">{srcFmt}</span>
-              </p>
-              {sources.length > 1 && (
-                <div className="mb-3">
-                  <label className="text-[9px] font-mono uppercase tracking-widest text-[#5c6a6d] block mb-1">
-                    {srcFmt === "sqlite" ? "Table" : "Sheet"}
-                  </label>
-                  <select value={picked} onChange={(e) => { const f = lastFile.current; if (f) ingest(f, e.target.value); }}
-                    className="w-full bg-[#0a0e1a]/60 border border-white/10 rounded-lg px-2 py-1.5 font-mono text-[11px] text-[#dfe2f3] focus:outline-none focus:border-[#8aebff]/40">
-                    {sources.map((s) => <option key={s} value={s}>{s}</option>)}
-                  </select>
-                </div>
-              )}
-              <div className="flex gap-2">
-                <button onClick={runClean} disabled={cleaning}
-                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-[10px] font-bold font-mono border border-[#5eead4]/25 bg-[#5eead4]/10 text-[#5eead4] hover:bg-[#5eead4]/20 transition-all cursor-pointer disabled:opacity-50">
-                  {cleaning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />} CLEAN DATA
-                </button>
-                <button onClick={() => setShowProfile((v) => !v)}
-                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-[10px] font-bold font-mono border border-white/10 bg-white/5 text-[#bbc9cd] hover:bg-white/10 transition-all cursor-pointer">
-                  <Table2 className="w-3.5 h-3.5" /> {showProfile ? "HIDE" : "PROFILE"}
-                </button>
+              <div className="space-y-2">
+                {files.map((lf) => lf.names.map((n) => {
+                  const dp = profByName(n);
+                  return (
+                    <div key={n} className="border border-white/5 rounded-lg bg-white/[0.02]">
+                      <div className="flex items-center justify-between gap-2 px-3 py-2">
+                        <button onClick={() => setExpanded(expanded === n ? null : n)} className="flex-1 text-left cursor-pointer min-w-0">
+                          <div className="text-[12px] font-mono text-[#8aebff] font-semibold truncate">{n}</div>
+                          <div className="text-[9px] font-mono text-[#5c6a6d]">
+                            {dp ? `${dp.nrows.toLocaleString()} rows · ${dp.ncols} cols` : "…"}{lf.names.length > 1 ? ` · ${lf.rec.fileName}` : ""}
+                          </div>
+                        </button>
+                        <button onClick={() => runClean(n)} disabled={cleaning === n} title="Clean this dataset"
+                          className="p-1 text-[#5c6a6d] hover:text-[#5eead4] cursor-pointer disabled:opacity-50">
+                          {cleaning === n ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
+                        </button>
+                        <button onClick={() => removeFile(lf)} title="Remove (whole file)"
+                          className="p-1 text-[#5c6a6d] hover:text-[#ffb4ab] cursor-pointer"><X className="w-3.5 h-3.5" /></button>
+                      </div>
+                      {expanded === n && dp && (
+                        <div className="px-2 pb-2 space-y-1.5 max-h-72 overflow-y-auto">
+                          {dp.columns.map((c) => <ColRow key={c.name} c={c} />)}
+                        </div>
+                      )}
+                    </div>
+                  );
+                }))}
               </div>
-              {cleanReport && (
-                <div className="mt-3 text-[10px] font-mono text-[#5eead4] bg-[#5eead4]/5 border border-[#5eead4]/15 rounded-lg p-2.5 space-y-1">
-                  <div className="text-[#859397] uppercase tracking-widest text-[9px] mb-1">Cleaned</div>
-                  {cleanReport.map((r, i) => <div key={i}>• {r}</div>)}
-                </div>
-              )}
+              <button onClick={() => fileRef.current?.click()} disabled={busyLoad}
+                className="w-full mt-3 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-[10px] font-bold font-mono border border-white/10 bg-white/5 text-[#bbc9cd] hover:bg-white/10 transition-all cursor-pointer disabled:opacity-50">
+                <Plus className="w-3.5 h-3.5" /> ADD DATASET
+              </button>
             </div>
 
-            {/* Structural profile (collapsible) */}
-            {showProfile && (
+            {/* Relationships */}
+            {prof && prof.relationships.length > 0 && (
               <div className="glass-panel rounded-xl border border-white/5 p-4">
-                <h3 className="text-xs font-bold font-mono uppercase tracking-widest text-[#859397] mb-3">Structural reconnaissance</h3>
-                <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
-                  {profile.columns.map((col: ColProfile) => <ColRow key={col.name} c={col} />)}
+                <h3 className="text-xs font-bold font-mono uppercase tracking-widest text-[#859397] flex items-center gap-2 mb-3">
+                  <Link2 className="w-4 h-4" /> Detected links
+                </h3>
+                <div className="space-y-1.5">
+                  {prof.relationships.map((r, i) => (
+                    <div key={i} className="text-[10px] font-mono text-[#bbc9cd] flex items-center gap-1.5">
+                      <span className="text-[#c084fc]">{r.left}</span>.<span className="text-[#8aebff]">{r.leftCol}</span>
+                      <Link2 className="w-3 h-3 text-[#5c6a6d]" />
+                      <span className="text-[#c084fc]">{r.right}</span>.<span className="text-[#8aebff]">{r.rightCol}</span>
+                      <span className="text-[#5c6a6d] ml-auto">{Math.round(r.overlap * 100)}%</span>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
 
-            {/* Recon — hypotheses + KPIs */}
+            {/* Recon */}
             <div className="glass-panel rounded-xl border border-white/5 p-4">
               <h3 className="text-xs font-bold font-mono uppercase tracking-widest text-[#859397] flex items-center gap-2 mb-3">
                 <Lightbulb className="w-4 h-4" /> Analyst's read
@@ -597,7 +760,7 @@ export default function DataAnalyst() {
           <div className="lg:col-span-2 space-y-4">
             <div className="glass-panel rounded-xl border border-white/5 p-3 flex items-center gap-2">
               <input value={question} onChange={(e) => setQuestion(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") ask(); }}
-                placeholder="Ask anything — correlations, top drivers, distribution, trend over time…" disabled={busy}
+                placeholder={totalDatasets > 1 ? "Ask across your datasets — join, compare, correlate, cluster…" : "Ask anything — correlations, top drivers, distribution, trend…"} disabled={busy}
                 className="flex-1 bg-[#0a0e1a]/60 border border-white/10 rounded-lg px-3 py-2.5 font-mono text-sm text-[#dfe2f3] focus:outline-none focus:border-[#8aebff]/40" />
               <button onClick={() => ask()} disabled={busy || !question.trim()}
                 className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs font-bold font-mono bg-[#8aebff] hover:bg-[#22d3ee] text-[#00363e] cursor-pointer disabled:opacity-40">
@@ -605,7 +768,6 @@ export default function DataAnalyst() {
               </button>
             </div>
 
-            {/* Suggested starter questions */}
             {recon && recon.questions.length > 0 && turns.length === 0 && (
               <div className="flex flex-wrap gap-2">
                 {recon.questions.map((qq, i) => (
@@ -639,9 +801,7 @@ export default function DataAnalyst() {
                       </div>
                     )}
                     {t.explanation && <p className="text-[12px] text-[#bbc9cd] leading-relaxed">{t.explanation}</p>}
-                    {t.image && (
-                      <img src={`data:image/png;base64,${t.image}`} alt="chart" className="w-full rounded-lg border border-white/10 bg-white" />
-                    )}
+                    {t.image && <img src={`data:image/png;base64,${t.image}`} alt="chart" className="w-full rounded-lg border border-white/10 bg-white" />}
                     {t.result && t.result.kind !== "none" && renderResult(t)}
                     {t.scrLoading && (
                       <div className="flex items-center gap-2 text-[10px] font-mono text-[#5c6a6d]"><Loader2 className="w-3 h-3 animate-spin" /> Drafting executive brief…</div>
@@ -689,7 +849,7 @@ const ColRow: React.FC<{ c: ColProfile }> = ({ c }) => {
       )}
     </div>
   );
-}
+};
 
 function renderScr(scr: Scr) {
   return (
@@ -717,15 +877,9 @@ function BriefRow({ label, text, color }: { label: string; text: string; color: 
 
 function renderResult(t: Turn) {
   const r = t.result!;
-  if (r.kind === "scalar") {
-    return <div className="text-2xl font-bold font-mono text-[#8aebff]">{String(r.value)}</div>;
-  }
+  if (r.kind === "scalar") return <div className="text-2xl font-bold font-mono text-[#8aebff]">{String(r.value)}</div>;
   if (r.kind !== "table") return null;
   const { columns, rows } = r;
-  // The model predicts chart x/y at code-gen time, before it knows what pandas will actually name
-  // the result columns — so they often don't match, leaving an empty chart frame. Reconcile against
-  // the real columns/values here: keep the chosen chart TYPE, map x->a label column and y->a real
-  // numeric column, and drop the chart entirely if nothing is plottable.
   const chart = t.chart && rows.length > 0 ? reconcileChart(t.chart, columns, rows) : null;
   return (
     <div className="space-y-3">
@@ -751,15 +905,15 @@ function fmt(v: unknown): string {
   return String(v ?? "");
 }
 
-// Make the chart spec valid against the ACTUAL result columns/values. Returns null if there's
-// nothing numeric to plot (so we render the table alone instead of an empty chart box).
+// Make the chart valid against the ACTUAL result columns/values (the model predicts x/y before it
+// knows what pandas will name them). Returns null when nothing numeric is plottable.
 function reconcileChart(chart: Chart, columns: string[], rows: Record<string, unknown>[]): Chart | null {
   if (!columns.length) return null;
   const numericCols = columns.filter((c) => rows.some((row) => typeof row[c] === "number"));
-  if (!numericCols.length) return null; // nothing to plot on a value axis
+  if (!numericCols.length) return null;
   let x = chart.x, y = chart.y;
-  if (!numericCols.includes(y)) y = numericCols[0];              // y must be a real numeric column
-  if (!columns.includes(x) || x === y) {                        // x should be a distinct label column
+  if (!numericCols.includes(y)) y = numericCols[0];
+  if (!columns.includes(x) || x === y) {
     x = columns.find((c) => c !== y && !numericCols.includes(c)) ?? columns.find((c) => c !== y) ?? columns[0];
   }
   if (x === y) return null;
