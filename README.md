@@ -145,6 +145,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `e833161` fix(analyst): serve Pyodide from our own origin (jsdelivr blocked on some ISPs) _(2026-07-17)_
 - `979740b` perf(analyst): Add CDN fallbacks and progress tracking for Pyodide loading _(2026-07-17)_
 - `0ae7c4b` docs: Update shared assistant memories in AGENTS.md _(2026-07-17)_
 - `2fdd822` perf(analyst): prefetch Pyodide on screen mount + honest runtime status _(2026-07-17)_
@@ -156,7 +157,6 @@ npm install && npm run build     # served by the engine at /console
 - `cd95317` feat: PDF-RAG Docs, conversational voice agent, richer influencer insights, PWA refresh + memory trims _(2026-07-16)_
 - `2dd27e1` fix(chat): route "job portal / how many applications" to the real tracker _(2026-07-16)_
 - `5e99cbb` feat(home): cinematic JARVIS energy-sphere hero + audio-reactive voice loop _(2026-07-16)_
-- `58f3c47` feat(reliability): LLM gateway (breaker + rate limiter + metrics), demo mode, README architecture _(2026-07-16)_
 <!-- /AUTO:changelog -->
 
 ---

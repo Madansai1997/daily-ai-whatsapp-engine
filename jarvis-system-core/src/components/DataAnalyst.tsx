@@ -78,6 +78,18 @@ async function ensureExcel(py: PyAPI, ext: string): Promise<string> {
   return "openpyxl";
 }
 
+// Which Pyodide packages the generated code needs. matplotlib is always available (for stat viz);
+// scikit-learn / scipy / statsmodels load on demand when clustering/ML/stats code references them.
+// All are in the Pyodide distribution and fetched via the same-origin /pyodide proxy.
+function pkgsForCode(code: string): string[] {
+  const c = code.toLowerCase();
+  const need = ["matplotlib"];
+  if (c.includes("sklearn") || c.includes("scikit")) need.push("scikit-learn");
+  if (c.includes("scipy")) need.push("scipy");
+  if (c.includes("statsmodels")) need.push("statsmodels");
+  return need;
+}
+
 // ── format dispatch ──────────────────────────────────────────────────────────
 interface Fmt { fmt: string; binary: boolean; pkgs: string[]; }
 function detectFmt(name: string): Fmt | null {
@@ -407,7 +419,7 @@ export default function DataAnalyst() {
       const py = await loadPy();
       const gen = await fetchCode(q, schema);
       if (gen.error) { patch({ running: false, error: gen.error }); return; }
-      await ensurePkgs(py, gen.code.includes("scipy") ? ["matplotlib", "scipy"] : ["matplotlib"]);
+      await ensurePkgs(py, pkgsForCode(gen.code));
       let run = await runGenerated(py, gen.code);
       let usedCode = gen.code, usedExpl = gen.explanation, usedChart = gen.chart, retried = false;
 
@@ -415,7 +427,7 @@ export default function DataAnalyst() {
         // Phase 2.3 — self-correcting loop: feed the stack trace back, retry once.
         const gen2 = await fetchCode(q, schema, gen.code, run.error);
         if (!gen2.error) {
-          await ensurePkgs(py, gen2.code.includes("scipy") ? ["matplotlib", "scipy"] : ["matplotlib"]);
+          await ensurePkgs(py, pkgsForCode(gen2.code));
           const run2 = await runGenerated(py, gen2.code);
           if (run2.ok) { run = run2; usedCode = gen2.code; usedExpl = gen2.explanation; usedChart = gen2.chart; retried = true; }
           else { patch({ running: false, code: gen2.code, explanation: gen2.explanation, error: run2.error, retried: true }); return; }
@@ -710,9 +722,14 @@ function renderResult(t: Turn) {
   }
   if (r.kind !== "table") return null;
   const { columns, rows } = r;
+  // The model predicts chart x/y at code-gen time, before it knows what pandas will actually name
+  // the result columns — so they often don't match, leaving an empty chart frame. Reconcile against
+  // the real columns/values here: keep the chosen chart TYPE, map x->a label column and y->a real
+  // numeric column, and drop the chart entirely if nothing is plottable.
+  const chart = t.chart && rows.length > 0 ? reconcileChart(t.chart, columns, rows) : null;
   return (
     <div className="space-y-3">
-      {t.chart && rows.length > 0 && renderChart(t.chart, rows)}
+      {chart && renderChart(chart, rows)}
       <div className="overflow-auto rounded-lg border border-white/5 max-h-72">
         <table className="w-full text-[11px] font-mono">
           <thead className="sticky top-0"><tr className="bg-[#0f131f]">{columns.map((c) => (
@@ -732,6 +749,21 @@ function renderResult(t: Turn) {
 function fmt(v: unknown): string {
   if (typeof v === "number") return Number.isInteger(v) ? v.toLocaleString() : v.toFixed(2);
   return String(v ?? "");
+}
+
+// Make the chart spec valid against the ACTUAL result columns/values. Returns null if there's
+// nothing numeric to plot (so we render the table alone instead of an empty chart box).
+function reconcileChart(chart: Chart, columns: string[], rows: Record<string, unknown>[]): Chart | null {
+  if (!columns.length) return null;
+  const numericCols = columns.filter((c) => rows.some((row) => typeof row[c] === "number"));
+  if (!numericCols.length) return null; // nothing to plot on a value axis
+  let x = chart.x, y = chart.y;
+  if (!numericCols.includes(y)) y = numericCols[0];              // y must be a real numeric column
+  if (!columns.includes(x) || x === y) {                        // x should be a distinct label column
+    x = columns.find((c) => c !== y && !numericCols.includes(c)) ?? columns.find((c) => c !== y) ?? columns[0];
+  }
+  if (x === y) return null;
+  return { type: chart.type, x, y };
 }
 
 function renderChart(chart: Chart, rows: Record<string, unknown>[]) {
