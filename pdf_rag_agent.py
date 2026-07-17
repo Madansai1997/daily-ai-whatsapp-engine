@@ -28,6 +28,41 @@ CHUNK_OVERLAP = 150      # carry-over so a sentence split across chunks isn't lo
 TOP_K = 5                # passages fed to the model per question
 
 
+def _seed_multimodal_rag_sync(conn):
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM pdf_documents WHERE filename = 'multimodal_rag_pipeline.md'")
+    if cur.fetchone():
+        return
+    doc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs", "multimodal_rag_pipeline.md")
+    if not os.path.exists(doc_path):
+        return
+    try:
+        with open(doc_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        pages = [p.strip() for p in content.split("\n---") if p.strip()]
+        if not pages:
+            return
+        char_count = sum(len(p or "") for p in pages)
+        cur.execute(
+            "INSERT INTO pdf_documents (filename, pages, char_count) VALUES (?,?,?)",
+            ("multimodal_rag_pipeline.md", len(pages), char_count)
+        )
+        doc_id = cur.lastrowid
+        n = 0
+        for pi, page_text in enumerate(pages, start=1):
+            for chunk in _chunk_page(page_text):
+                cur.execute(
+                    "INSERT INTO pdf_chunks (doc_id, page, chunk_index, content) VALUES (?,?,?,?)",
+                    (doc_id, pi, n, chunk)
+                )
+                n += 1
+        cur.execute("UPDATE pdf_documents SET chunks = ? WHERE id = ?", (n, doc_id))
+        conn.commit()
+        print("🌱 Seeded multimodal_rag_pipeline.md into PDF RAG database.")
+    except Exception as e:
+        print(f"⚠️ Failed to seed multimodal RAG document: {e}")
+
+
 def init_pdf_rag_tables():
     """pdf_documents = one row per uploaded PDF; pdf_chunks = its page-tagged passages."""
     conn = aiosqlite.connect_sync(DB_PATH, check_same_thread=False)
@@ -54,6 +89,10 @@ def init_pdf_rag_tables():
     except Exception:
         pass
     conn.commit()
+    try:
+        _seed_multimodal_rag_sync(conn)
+    except Exception:
+        pass
     conn.close()
     print("✅ PDF RAG tables ready.")
 
