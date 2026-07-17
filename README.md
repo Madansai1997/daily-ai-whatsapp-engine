@@ -145,6 +145,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `40d732e` feat(analyst): upgrade Data Analyst into a 6-phase browser-native analyst agent _(2026-07-17)_
 - `ea1c0d3` test(evals): free-tier golden-eval harness + CI gate _(2026-07-16)_
 - `db9690d` feat: AI Data Analyst + PDF doc summary; security/reliability hardening; mobile+UI fixes _(2026-07-16)_
 - `40d837b` refactor(prompts): prompt library + few-shot examples on the highest-stakes prompts _(2026-07-16)_
@@ -156,7 +157,6 @@ npm install && npm run build     # served by the engine at /console
 - `e60aab4` feat(watchers): People Watch → CRM nudges + Unified Trends Pulse _(2026-07-13)_
 - `6711281` feat(company-watch): slice 1b — news on Kanban cards + interview-prep briefs _(2026-07-13)_
 - `b869f49` feat(jobs): declutter the Kanban — compact cards, overflow menu, board filters _(2026-07-13)_
-- `5b919f4` feat(watchers): shared relevance engine + Company Watch + "Watch these" in Daily _(2026-07-13)_
 <!-- /AUTO:changelog -->
 
 ---

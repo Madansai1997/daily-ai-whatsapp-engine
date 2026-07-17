@@ -49,6 +49,18 @@ async function ensurePkgs(py: PyAPI, pkgs: string[]) {
   const need = pkgs.filter((p) => !_loaded.has(p));
   if (need.length) { await py.loadPackage(need); need.forEach((p) => _loaded.add(p)); }
 }
+// Resolve the pandas Excel engine. In Pyodide 0.26.4 openpyxl is NOT in the loadPackage
+// distribution, but it's pure-Python — install it from PyPI via micropip. Old .xls uses xlrd,
+// which IS a loadPackage package. Returns the engine name to hand to pandas.
+async function ensureExcel(py: PyAPI, ext: string): Promise<string> {
+  if (ext === "xls") { await ensurePkgs(py, ["xlrd"]); return "xlrd"; }
+  if (!_loaded.has("openpyxl")) {
+    await ensurePkgs(py, ["micropip"]);
+    await py.runPythonAsync("import micropip\nawait micropip.install('openpyxl')");
+    _loaded.add("openpyxl");
+  }
+  return "openpyxl";
+}
 
 // ── format dispatch ──────────────────────────────────────────────────────────
 interface Fmt { fmt: string; binary: boolean; pkgs: string[]; }
@@ -59,8 +71,8 @@ function detectFmt(name: string): Fmt | null {
     case "tsv": case "tab": return { fmt: "tsv", binary: false, pkgs: [] };
     case "json": return { fmt: "json", binary: false, pkgs: [] };
     case "xml": return { fmt: "xml", binary: false, pkgs: ["lxml"] };
-    case "parquet": return { fmt: "parquet", binary: true, pkgs: ["pyarrow"] };
-    case "xlsx": case "xls": return { fmt: ext, binary: true, pkgs: ["openpyxl"] };
+    case "parquet": return { fmt: "parquet", binary: true, pkgs: ["fastparquet"] }; // pyarrow absent in Pyodide
+    case "xlsx": case "xls": return { fmt: ext, binary: true, pkgs: [] }; // engine loaded in ingest()
     case "db": case "sqlite": case "sqlite3": return { fmt: "sqlite", binary: true, pkgs: [] };
     default: return null;
   }
@@ -91,9 +103,9 @@ elif _fmt=='json':
 elif _fmt=='xml':
     df = pd.read_xml(_io.StringIO(src_text))
 elif _fmt=='parquet':
-    df = pd.read_parquet(_io.BytesIO(_b()))
+    df = pd.read_parquet(_io.BytesIO(_b()), engine='fastparquet')
 elif _fmt in ('xlsx','xls'):
-    _xl = pd.ExcelFile(_io.BytesIO(_b()))
+    _xl = pd.ExcelFile(_io.BytesIO(_b()), engine=excel_engine)
     _sources = [str(s) for s in _xl.sheet_names]
     _p = _pick if _pick in _sources else _sources[0]
     df = _xl.parse(_p); _pick = _p
@@ -305,10 +317,17 @@ export default function DataAnalyst() {
     try {
       setStatusMsg("Loading Python runtime…");
       const py = await loadPy();
-      if (det.pkgs.length) setStatusMsg(`Loading ${det.pkgs.join(", ")}…`);
-      await ensurePkgs(py, det.pkgs);
+      let excelEngine = "openpyxl";
+      if (det.fmt === "xlsx" || det.fmt === "xls") {
+        setStatusMsg("Loading Excel reader…");
+        excelEngine = await ensureExcel(py, det.fmt);
+      } else if (det.pkgs.length) {
+        setStatusMsg(`Loading ${det.pkgs.join(", ")}…`);
+        await ensurePkgs(py, det.pkgs);
+      }
       setStatusMsg("Reading + profiling…");
       py.globals.set("fmt", det.fmt);
+      py.globals.set("excel_engine", excelEngine);
       py.globals.set("pick_name", pick ?? "");
       if (det.binary) py.globals.set("src_bytes", new Uint8Array(await file.arrayBuffer()));
       else py.globals.set("src_text", await file.text());
