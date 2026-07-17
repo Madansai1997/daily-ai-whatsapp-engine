@@ -31,50 +31,27 @@ function loadPy(onProgress?: (msg: string) => void): Promise<PyAPI> {
     return _py;
   }
   
-  const CDNs = [
-    `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VER}/full/`,
-    `https://fastly.jsdelivr.net/pyodide/v${PYODIDE_VER}/full/`,
-    `https://gcore.jsdelivr.net/pyodide/v${PYODIDE_VER}/full/`
-  ];
-  
-  let cdnIndex = 0;
-  
+  // Same-origin: the engine proxies the Pyodide runtime from the CDN server-side (see
+  // /pyodide/{path} in V3_updates.py), so the browser only talks to OUR domain — reliable even on
+  // networks that throttle/block jsdelivr (e.g. some Indian ISPs), which was the real cause of the
+  // "Loading Python runtime" hang. indexURL must match the engine's proxy route.
+  const base = "/pyodide/";
   _py = new Promise((resolve, reject) => {
-    const loadNext = () => {
-      if (cdnIndex >= CDNs.length) {
-        _py = null;
-        reject(new Error("All CDNs failed to load Pyodide. Check your connection."));
-        return;
-      }
-      const url = CDNs[cdnIndex];
-      if (onProgress) onProgress(`Connecting to Python runtime CDN #${cdnIndex + 1}…`);
-      const s = document.createElement("script");
-      s.src = `${url}pyodide.js`;
-      s.onload = async () => {
-        try {
-          if (onProgress) onProgress("Initializing Python runtime…");
-          const load = (window as unknown as { loadPyodide: (o: { indexURL: string }) => Promise<PyAPI> }).loadPyodide;
-          const py = await load({ indexURL: url });
-          if (onProgress) onProgress("Loading pandas & numpy (~20MB)…");
-          await py.loadPackage(["pandas", "numpy"], (msg) => {
-            if (onProgress) onProgress(msg);
-          });
-          resolve(py);
-        } catch (e) {
-          console.warn(`CDN ${url} failed to initialize, trying next...`, e);
-          cdnIndex++;
-          loadNext();
-        }
-      };
-      s.onerror = () => {
-        console.warn(`CDN ${url} failed to load script, trying next...`);
-        cdnIndex++;
-        loadNext();
-      };
-      document.head.appendChild(s);
+    if (onProgress) onProgress("Connecting to Python runtime…");
+    const s = document.createElement("script");
+    s.src = `${base}pyodide.js`;
+    s.onload = async () => {
+      try {
+        if (onProgress) onProgress("Initializing Python runtime…");
+        const load = (window as unknown as { loadPyodide: (o: { indexURL: string }) => Promise<PyAPI> }).loadPyodide;
+        const py = await load({ indexURL: base });
+        if (onProgress) onProgress("Loading pandas & numpy (~20MB)…");
+        await py.loadPackage(["pandas", "numpy"], (msg) => { if (onProgress) onProgress(msg); });
+        resolve(py);
+      } catch (e) { _py = null; reject(e); }
     };
-    
-    loadNext();
+    s.onerror = () => { _py = null; reject(new Error("Couldn't load the Python runtime.")); };
+    document.head.appendChild(s);
   });
   return _py;
 }
@@ -89,7 +66,13 @@ async function ensureExcel(py: PyAPI, ext: string): Promise<string> {
   if (ext === "xls") { await ensurePkgs(py, ["xlrd"]); return "xlrd"; }
   if (!_loaded.has("openpyxl")) {
     await ensurePkgs(py, ["micropip"]);
-    await py.runPythonAsync("import micropip\nawait micropip.install('openpyxl')");
+    // Install from wheels we serve ourselves (public/wheels → /console/wheels) with deps=False, so
+    // Excel never depends on PyPI being reachable either.
+    await py.runPythonAsync(
+      "import micropip\n" +
+      "await micropip.install(['/console/wheels/et_xmlfile-2.0.0-py3-none-any.whl', " +
+      "'/console/wheels/openpyxl-3.1.5-py2.py3-none-any.whl'], deps=False)"
+    );
     _loaded.add("openpyxl");
   }
   return "openpyxl";

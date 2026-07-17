@@ -31,7 +31,7 @@ from bs4 import BeautifulSoup
 import httpx
 import websockets as ws_lib
 from fastapi import FastAPI, Response, Form, Request, WebSocket, WebSocketDisconnect, UploadFile, File
-from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse, FileResponse, Response
 from twilio.rest import Client
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from contextlib import asynccontextmanager
@@ -1222,6 +1222,56 @@ if os.path.isdir(_CONSOLE_DIST):
     print("✅ Console UI mounted at /console")
 else:
     print("ℹ️ Console UI dist not found — /console disabled until jarvis-system-core is built.")
+
+
+# ── Pyodide same-origin proxy ────────────────────────────────────────────────
+# The Data Analyst runs pandas IN THE BROWSER via Pyodide. Loading it straight from the public
+# jsdelivr CDN is unreliable on some networks — notably several Indian ISPs throttle/block
+# jsdelivr, so the ~20MB runtime download stalls and the screen hangs on "Loading Python runtime".
+# Render's server CAN reach jsdelivr, so we proxy the runtime through the engine: the browser only
+# ever talks to OUR OWN origin (which it already reached to load the app). The files are versioned
+# and immutable, so we cache them on the instance's disk and tell the browser to cache them
+# forever — each visitor downloads the runtime at most once.
+import tempfile as _tempfile
+PYODIDE_VERSION = "0.26.4"
+_PYODIDE_BASE = f"https://cdn.jsdelivr.net/pyodide/v{PYODIDE_VERSION}/full/"
+_PYODIDE_CACHE_DIR = os.path.join(_tempfile.gettempdir(), "jarvis_pyodide")
+_PYODIDE_CTYPES = {
+    ".js": "text/javascript", ".mjs": "text/javascript", ".wasm": "application/wasm",
+    ".json": "application/json", ".zip": "application/zip", ".whl": "application/octet-stream",
+    ".data": "application/octet-stream", ".ts": "text/plain",
+}
+
+
+@app.get("/pyodide/{path:path}")
+async def pyodide_proxy(path: str):
+    """Same-origin passthrough to the versioned Pyodide CDN, disk-cached per instance."""
+    if not path or ".." in path or path.startswith("/"):
+        return JSONResponse({"error": "bad path"}, status_code=400)
+    ctype = _PYODIDE_CTYPES.get(os.path.splitext(path)[1].lower(), "application/octet-stream")
+    headers = {"Cache-Control": "public, max-age=31536000, immutable"}
+    try:
+        os.makedirs(_PYODIDE_CACHE_DIR, exist_ok=True)
+        local = os.path.join(_PYODIDE_CACHE_DIR, path.replace("/", "__"))
+    except Exception:
+        local = None
+    if local and os.path.exists(local):
+        return FileResponse(local, media_type=ctype, headers=headers)
+    try:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            r = await client.get(_PYODIDE_BASE + path)
+    except Exception as e:
+        return JSONResponse({"error": f"upstream fetch failed: {e}"}, status_code=502)
+    if r.status_code != 200:
+        return Response(status_code=r.status_code)
+    data = r.content
+    if local:
+        try:
+            with open(local, "wb") as f:
+                f.write(data)
+        except Exception:
+            pass
+    return Response(content=data, media_type=ctype, headers=headers)
 
 
 APP_START_TIME = time.time()
