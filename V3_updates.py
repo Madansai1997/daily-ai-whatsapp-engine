@@ -9442,6 +9442,38 @@ async def api_notifications_delete(request: Request):
     return JSONResponse({"ok": True})
 
 
+@app.post("/api/webhooks/render")
+async def api_render_webhook(request: Request, token: str = ""):
+    """Webhook receiver for Render deployment events. Translates build/deploy statuses
+    into JARVIS notifications for the user."""
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+        
+    event_type = body.get("type")
+    data = body.get("data") or {}
+    service = data.get("service") or {}
+    service_name = service.get("name") or "JARVIS Engine"
+    
+    if event_type == "deploy_ended":
+        deploy = data.get("deploy") or {}
+        status = deploy.get("status")
+        if status == "succeeded":
+            msg = f"🚀 System Update: The deployment has completed successfully, sir. All new updates are now active and the system engine is running smoothly."
+            _store_notification(msg, "system")
+        elif status == "failed":
+            msg = f"⚠️ System Update: Pardon me, sir, but the latest deployment has failed to compile. You may want to check the build logs on Render."
+            _store_notification(msg, "system")
+    elif event_type == "deploy_started":
+        msg = f"⚙️ System Update: I have detected a new code deployment starting for the system engine. Building the update now, sir."
+        _store_notification(msg, "system")
+        
+    return JSONResponse({"status": "received"})
+
+
 # ── Web Push subscription endpoints ──────────────────────────────────────────
 @app.get("/api/push/vapid-public-key")
 async def api_vapid_public_key():

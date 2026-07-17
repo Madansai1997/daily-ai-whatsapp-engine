@@ -29,6 +29,7 @@ export default function Header({
   const [memPct, setMemPct] = useState<number | null>(null);
   const [unread, setUnread] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  const [systemDeployNotification, setSystemDeployNotification] = useState<any | null>(null);
 
   // Force the installed PWA / cached tab to pull the latest deployed build without a reinstall:
   // drop the service worker + every cache, then hard-reload so fresh HTML + hashed assets load.
@@ -64,7 +65,21 @@ export default function Header({
         }
         if (nRes.ok) {
           const nd = await nRes.json();
-          if (typeof nd?.unread === "number") setUnread(nd.unread);
+          if (typeof nd?.unread === "number") {
+            setUnread(nd.unread);
+            if (nd.unread > 0) {
+              const listRes = await fetch("/api/notifications?limit=5", { cache: "no-store" });
+              if (listRes.ok) {
+                const listData = await listRes.json();
+                const latestSystem = listData.notifications?.find(
+                  (n: any) => n.read === 0 && n.category === "system" && (n.body.includes("completed successfully") || n.body.includes("failed to compile"))
+                );
+                if (latestSystem) {
+                  setSystemDeployNotification(latestSystem);
+                }
+              }
+            }
+          }
         }
       } catch {
         /* leave neutral */
@@ -209,6 +224,65 @@ export default function Header({
           </div>
         </div>
       </div>
+
+      {/* System Deploy Success/Failure Modal Popup */}
+      {systemDeployNotification && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm">
+          <div className="glass-panel w-full max-w-md border border-[#8aebff]/30 bg-[#0c101d] p-6 rounded-2xl shadow-2xl space-y-4 text-center">
+            <div className="flex justify-center">
+              <div className="w-12 h-12 rounded-full bg-[#8aebff]/10 flex items-center justify-center border border-[#8aebff]/30 animate-pulse">
+                <RefreshCw className="w-5 h-5 text-[#8aebff]" />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <h3 className="text-sm font-bold font-mono uppercase tracking-widest text-[#8aebff]">
+                JARVIS Engine Update
+              </h3>
+              <p className="text-[10px] font-mono text-[#5c6a6d]">DEPLOYMENT EVENT DETECTED</p>
+            </div>
+            <p className="text-xs text-[#dfe2f3] leading-relaxed font-mono px-2 italic">
+              "{systemDeployNotification.body}"
+            </p>
+            <div className="flex justify-center gap-3 pt-2">
+              <button
+                onClick={async () => {
+                  try {
+                    await fetch("/api/notifications/read", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ id: systemDeployNotification.id })
+                    });
+                  } catch { /* ignore */ }
+                  setSystemDeployNotification(null);
+                  setUnread((u) => Math.max(0, u - 1));
+                }}
+                className="px-4 py-2 rounded-lg text-xs font-semibold font-mono border border-white/10 text-[#bbc9cd] hover:bg-white/5 cursor-pointer"
+              >
+                Dismiss
+              </button>
+              {systemDeployNotification.body.includes("successfully") && (
+                <button
+                  onClick={async () => {
+                    try {
+                      await fetch("/api/notifications/read", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ id: systemDeployNotification.id })
+                      });
+                    } catch { /* ignore */ }
+                    setSystemDeployNotification(null);
+                    setUnread((u) => Math.max(0, u - 1));
+                    forceRefresh();
+                  }}
+                  className="px-4 py-2 rounded-lg text-xs font-semibold font-mono bg-[#8aebff] text-[#00363e] hover:bg-[#22d3ee] cursor-pointer"
+                >
+                  Refresh Console
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </header>
   );
 }
