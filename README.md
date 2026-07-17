@@ -145,6 +145,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(analyst): Convert boolean values to strings in renderChart for Recharts support _(2026-07-17)_
 - feat(analyst): Add multi-dataset projects, data quality checks, custom schemas, and direct turn persistence _(2026-07-17)_
 - feat(analyst): multi-dataset projects — combine & join many sheets in the browser _(2026-07-17)_
 - build(readme): auto-changelog via post-commit hook so it includes the current commit _(2026-07-17)_
@@ -156,7 +157,6 @@ npm install && npm run build     # served by the engine at /console
 - fix(analyst): make Excel & Parquet ingestion actually work in Pyodide _(2026-07-17)_
 - feat(analyst): upgrade Data Analyst into a 6-phase browser-native analyst agent _(2026-07-17)_
 - test(evals): free-tier golden-eval harness + CI gate _(2026-07-16)_
-- feat: AI Data Analyst + PDF doc summary; security/reliability hardening; mobile+UI fixes _(2026-07-16)_
 <!-- /AUTO:changelog -->
 
 ---

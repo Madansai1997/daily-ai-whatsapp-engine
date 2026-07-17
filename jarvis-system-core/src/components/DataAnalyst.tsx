@@ -1219,7 +1219,15 @@ function reconcileChart(chart: Chart, columns: string[], rows: Record<string, un
 }
 
 function renderChart(chart: Chart, rows: Record<string, unknown>[]) {
-  const data = rows.slice(0, 40);
+  const data = rows.slice(0, 40).map((r) => {
+    const obj = { ...r };
+    for (const k in obj) {
+      if (typeof obj[k] === "boolean") {
+        obj[k] = String(obj[k]);
+      }
+    }
+    return obj;
+  });
   const axis = { fill: MUTED, fontSize: 10, fontFamily: "monospace" };
   if (chart.type === "pie") {
     return (
