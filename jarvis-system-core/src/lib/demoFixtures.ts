@@ -203,12 +203,18 @@ function fixtureFor(path: string): unknown | null {
       { id: 1, name: "Andrej Karpathy", handle: "karpathy", platform: "youtube", is_active: 1, created_at: iso(10) },
       { id: 2, name: "Hamel Husain", handle: "hamel", platform: "rss", is_active: 1, created_at: iso(8) }
     ];
+    case "/api/trends/pulse": return {
+      items: [
+        { id: 1, type: "idea", title: "In-Browser WASM Data Profiler", summary: "A tool that runs pandas profiling client-side to save compute cost.", url: "", source: "reddit", score: 85, when: iso(3), status: "shortlisted" },
+        { id: 2, type: "post", title: "Let's build a RAG system from scratch", summary: "Andrej Karpathy's comprehensive guide to building a citation-verified RAG pipeline.", url: "#", source: "Andrej Karpathy", score: 74, when: iso(1) }
+      ]
+    };
     case "/api/influencers/domains": return [
       { domain: "AI Engineering", count: 4 },
       { domain: "Data Science", count: 2 }
     ];
   }
-  if (p.startsWith("/api/influencers/feed")) return INFLUENCER_FEED;
+  if (p.startsWith("/api/influencers/feed")) return INFLUENCER_FEED.posts;
   if (p.startsWith("/api/influencers/unread")) return { count: 0 };
   if (p.startsWith("/api/daily/") && p !== "/api/daily/today" && p !== "/api/daily/history") return DAILY_TODAY;
   if (p.includes("/followups")) return { turns: [] };

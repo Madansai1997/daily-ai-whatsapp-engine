@@ -145,6 +145,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(demo): Align influencer feed array format and mock trends pulse endpoint _(2026-07-17)_
 - fix(demo): Prevent Discover tab crashes by adding missing mock fixtures for study, trends, and influencers _(2026-07-17)_
 - fix(header): Resolve demo-mode banner overlap by dynamically shifting header and main containers _(2026-07-17)_
 - feat(deploy): Add in-app system deployment popup modal with hard-refresh functionality _(2026-07-17)_
@@ -156,7 +157,6 @@ npm install && npm run build     # served by the engine at /console
 - build(readme): auto-changelog via post-commit hook so it includes the current commit _(2026-07-17)_
 - fix(analyst): on-demand scikit-learn + reconcile chart to real columns _(2026-07-17)_
 - fix(analyst): serve Pyodide from our own origin (jsdelivr blocked on some ISPs) _(2026-07-17)_
-- perf(analyst): Add CDN fallbacks and progress tracking for Pyodide loading _(2026-07-17)_
 <!-- /AUTO:changelog -->
 
 ---
