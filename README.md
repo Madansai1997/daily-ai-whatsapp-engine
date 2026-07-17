@@ -145,6 +145,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- `0ae7c4b` docs: Update shared assistant memories in AGENTS.md _(2026-07-17)_
 - `2fdd822` perf(analyst): prefetch Pyodide on screen mount + honest runtime status _(2026-07-17)_
 - `5093d14` fix(analyst): make Excel & Parquet ingestion actually work in Pyodide _(2026-07-17)_
 - `40d732e` feat(analyst): upgrade Data Analyst into a 6-phase browser-native analyst agent _(2026-07-17)_
@@ -156,7 +157,6 @@ npm install && npm run build     # served by the engine at /console
 - `5e99cbb` feat(home): cinematic JARVIS energy-sphere hero + audio-reactive voice loop _(2026-07-16)_
 - `58f3c47` feat(reliability): LLM gateway (breaker + rate limiter + metrics), demo mode, README architecture _(2026-07-16)_
 - `463c202` feat(console): installable PWA — "Install JARVIS" as a desktop/mobile app _(2026-07-13)_
-- `e60aab4` feat(watchers): People Watch → CRM nudges + Unified Trends Pulse _(2026-07-13)_
 <!-- /AUTO:changelog -->
 
 ---

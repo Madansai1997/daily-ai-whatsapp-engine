@@ -18,30 +18,63 @@ import {
 
 interface PyAPI {
   runPythonAsync: (code: string) => Promise<unknown>;
-  loadPackage: (pkgs: string[]) => Promise<void>;
+  loadPackage: (pkgs: string[], messageCallback?: (msg: string) => void) => Promise<void>;
   globals: { set: (k: string, v: unknown) => void };
 }
 
 const PYODIDE_VER = "0.26.4";
 let _py: Promise<PyAPI> | null = null;
 const _loaded = new Set<string>(["pandas", "numpy"]);
-function loadPy(): Promise<PyAPI> {
-  if (_py) return _py;
+function loadPy(onProgress?: (msg: string) => void): Promise<PyAPI> {
+  if (_py) {
+    if (onProgress) onProgress("Ready");
+    return _py;
+  }
+  
+  const CDNs = [
+    `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VER}/full/`,
+    `https://fastly.jsdelivr.net/pyodide/v${PYODIDE_VER}/full/`,
+    `https://gcore.jsdelivr.net/pyodide/v${PYODIDE_VER}/full/`
+  ];
+  
+  let cdnIndex = 0;
+  
   _py = new Promise((resolve, reject) => {
-    const url = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VER}/full/`;
-    const s = document.createElement("script");
-    s.src = `${url}pyodide.js`;
-    s.onload = async () => {
-      try {
-        // window.loadPyodide is declared (with a different return type) in DailyUpdate; cast here.
-        const load = (window as unknown as { loadPyodide: (o: { indexURL: string }) => Promise<PyAPI> }).loadPyodide;
-        const py = await load({ indexURL: url });
-        await py.loadPackage(["pandas", "numpy"]);
-        resolve(py);
-      } catch (e) { _py = null; reject(e); }
+    const loadNext = () => {
+      if (cdnIndex >= CDNs.length) {
+        _py = null;
+        reject(new Error("All CDNs failed to load Pyodide. Check your connection."));
+        return;
+      }
+      const url = CDNs[cdnIndex];
+      if (onProgress) onProgress(`Connecting to Python runtime CDN #${cdnIndex + 1}…`);
+      const s = document.createElement("script");
+      s.src = `${url}pyodide.js`;
+      s.onload = async () => {
+        try {
+          if (onProgress) onProgress("Initializing Python runtime…");
+          const load = (window as unknown as { loadPyodide: (o: { indexURL: string }) => Promise<PyAPI> }).loadPyodide;
+          const py = await load({ indexURL: url });
+          if (onProgress) onProgress("Loading pandas & numpy (~20MB)…");
+          await py.loadPackage(["pandas", "numpy"], (msg) => {
+            if (onProgress) onProgress(msg);
+          });
+          resolve(py);
+        } catch (e) {
+          console.warn(`CDN ${url} failed to initialize, trying next...`, e);
+          cdnIndex++;
+          loadNext();
+        }
+      };
+      s.onerror = () => {
+        console.warn(`CDN ${url} failed to load script, trying next...`);
+        cdnIndex++;
+        loadNext();
+      };
+      document.head.appendChild(s);
     };
-    s.onerror = () => { _py = null; reject(new Error("Couldn't load the Python runtime (offline?).")); };
-    document.head.appendChild(s);
+    
+    loadNext();
   });
   return _py;
 }
@@ -305,8 +338,9 @@ export default function DataAnalyst() {
   // one-time cost — the browser caches it for every later visit.
   useEffect(() => {
     let alive = true;
-    loadPy().then(() => { if (alive) setPyState("ready"); })
-            .catch(() => { if (alive) setPyState("error"); });
+    loadPy((msg) => { if (alive) setStatusMsg(msg); })
+      .then(() => { if (alive) setPyState("ready"); })
+      .catch(() => { if (alive) setPyState("error"); });
     return () => { alive = false; };
   }, []);
 
@@ -458,11 +492,10 @@ export default function DataAnalyst() {
               profiling, cleaning, the pandas & matplotlib you ask for — runs <b>in your browser</b> (Pyodide; nothing leaves your
               machine, the server never executes code).
             </p>
-            {/* Runtime status — the honest ~20MB one-time cost, warming up in the background */}
             {pyState === "loading" && (
               <div className="flex items-center gap-2 text-[11px] font-mono text-[#8aebff] bg-[#8aebff]/[0.06] border border-[#8aebff]/20 rounded-full px-3 py-1.5 mt-1">
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                Warming up the Python runtime — one-time ~20MB download, then cached. Pick a file meanwhile.
+                {statusMsg || "Warming up the Python runtime — one-time ~20MB download, then cached. Pick a file meanwhile."}
               </div>
             )}
             {pyState === "ready" && (
