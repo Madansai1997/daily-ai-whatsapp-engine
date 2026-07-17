@@ -7881,6 +7881,7 @@ async def analyst_code(request: Request):
     schema = (body.get("schema") or "").strip()
     prev_code = (body.get("previous_code") or "").strip()
     run_error = (body.get("error") or "").strip()
+    goal = (body.get("goal") or "").strip()
     if not question or not schema:
         return JSONResponse({"error": "Upload a dataset and ask a question."}, status_code=400)
     if prev_code and run_error:
@@ -7894,6 +7895,10 @@ async def analyst_code(request: Request):
                      f"{question}\n\nJSON:")
     else:
         user_turn = f"PROFILE: {schema[:5000]}\n\nQUESTION: {question}\n\nJSON:"
+    
+    if goal:
+        user_turn = f"USER'S OVERALL ANALYSIS GOAL: {goal}\n\n" + user_turn
+
     try:
         raw = await call_llm(ANALYST_SYSTEM, user_turn, max_tokens=900, temperature=0.1)
     except Exception as e:
@@ -7915,11 +7920,17 @@ async def analyst_hypotheses(request: Request):
     opening read — hypotheses, domain KPIs, and clickable starter questions. No code execution."""
     body = await request.json()
     profile = (body.get("profile") or "").strip()
+    goal = (body.get("goal") or "").strip()
     if not profile:
         return JSONResponse({"error": "No profile provided."}, status_code=400)
+    
+    prompt = f"PROFILE:\n{profile[:6000]}\n\n"
+    if goal:
+        prompt += f"USER'S SPECIFIC ANALYSIS GOAL / REQUIREMENT:\n{goal}\n(Crucial: tailor all suggested hypotheses, KPIs, and starter questions directly to help the user achieve this specific goal!)\n\n"
+    prompt += "JSON:"
+
     try:
-        raw = await call_llm(ANALYST_HYPOTHESES_SYSTEM,
-                             f"PROFILE:\n{profile[:6000]}\n\nJSON:", max_tokens=700, temperature=0.3)
+        raw = await call_llm(ANALYST_HYPOTHESES_SYSTEM, prompt, max_tokens=700, temperature=0.3)
     except Exception as e:
         return JSONResponse({"error": f"Reconnaissance failed: {e}"}, status_code=502)
     from influencer_agent import extract_json_object
@@ -7939,12 +7950,17 @@ async def analyst_synthesis(request: Request):
     body = await request.json()
     question = (body.get("question") or "").strip()
     result = (body.get("result") or "").strip()
+    goal = (body.get("goal") or "").strip()
     if not question or not result:
         return JSONResponse({"error": "Nothing to synthesize."}, status_code=400)
+    
+    prompt = f"QUESTION: {question}\n\nRESULT:\n{result[:2500]}\n\n"
+    if goal:
+        prompt += f"USER'S OVERALL ANALYSIS GOAL:\n{goal}\n(Tailor your brief and recommendations to specifically support this analysis goal!)\n\n"
+    prompt += "JSON:"
+
     try:
-        raw = await call_llm(ANALYST_SCR_SYSTEM,
-                             f"QUESTION: {question}\n\nRESULT:\n{result[:2500]}\n\nJSON:",
-                             max_tokens=550, temperature=0.35)
+        raw = await call_llm(ANALYST_SCR_SYSTEM, prompt, max_tokens=550, temperature=0.35)
     except Exception as e:
         return JSONResponse({"error": f"Synthesis failed: {e}"}, status_code=502)
     from influencer_agent import extract_json_object

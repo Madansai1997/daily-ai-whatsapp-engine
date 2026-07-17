@@ -14,6 +14,7 @@ export interface ProjectRec {
   name: string;
   createdAt: number;
   order: string[]; // dataset ids, in display order
+  goal?: string;   // user's analysis objective / requirement
 }
 export interface DatasetRec {
   id: string;

@@ -10,7 +10,7 @@ import {
   Link2, ChevronDown, Plus, X, Copy, Download, MessageSquarePlus, Pencil, FlaskConical, Check,
 } from "lucide-react";
 import {
-  ProjectRec, DatasetRec, listProjects, createProject, deleteProject,
+  ProjectRec, DatasetRec, listProjects, createProject, saveProject, deleteProject,
   getDatasets, addDataset, removeDataset, renameDataset,
   getTurns, saveTurn, setTurnPinned, deleteTurn,
 } from "../lib/analystStore";
@@ -426,10 +426,10 @@ interface Turn {
 interface LoadedFile { rec: DatasetRec; names: string[]; }
 
 interface CodeGen { code: string; explanation: string; chart: Chart | null; error?: string; }
-async function fetchCode(question: string, schema: string, previous_code?: string, error?: string): Promise<CodeGen> {
+async function fetchCode(question: string, schema: string, previous_code?: string, error?: string, goal?: string): Promise<CodeGen> {
   const res = await fetch("/api/analyst/code", {
     method: "POST", headers: JSON_HEADERS,
-    body: JSON.stringify({ question, schema, previous_code, error }),
+    body: JSON.stringify({ question, schema, previous_code, error, goal }),
   });
   const d = await res.json();
   if (!res.ok || d.error) return { code: "", explanation: "", chart: null, error: d.error || `Request failed (${res.status}).` };
@@ -503,6 +503,10 @@ export default function DataAnalyst() {
   const [followupFor, setFollowupFor] = useState<string | null>(null);
   const [followupText, setFollowupText] = useState("");
   const [copied, setCopied] = useState<string | null>(null);
+  const [goalInput, setGoalInput] = useState("");
+  const [editingGoal, setEditingGoal] = useState(false);
+  const [showGoalModal, setShowGoalModal] = useState(false);
+
   const fileRef = useRef<HTMLInputElement | null>(null);
   // Registry ops all mutate one shared Pyodide `DATASETS` global. `opEpoch` lets a superseded
   // project-load bail before it clobbers a newer one; the UI also disables destructive controls
@@ -517,14 +521,31 @@ export default function DataAnalyst() {
     return () => { alive = false; };
   }, []);
 
-  const loadRecon = useCallback(async (profileText: string) => {
+  const loadRecon = useCallback(async (profileText: string, currentGoal?: string) => {
     setRecon(null); setReconLoading(true);
     try {
-      const r = await fetch("/api/analyst/hypotheses", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ profile: profileText }) });
+      const r = await fetch("/api/analyst/hypotheses", {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ profile: profileText, goal: currentGoal ?? project?.goal ?? "" }),
+      });
       const d = await r.json();
       if (r.ok && !d.error) setRecon(d);
     } catch { /* best-effort */ } finally { setReconLoading(false); }
-  }, []);
+  }, [project?.goal]);
+
+  const saveProjectGoal = useCallback(async (newGoal: string) => {
+    if (!project) return;
+    const g = newGoal.trim();
+    const updated = { ...project, goal: g };
+    setProject(updated);
+    setEditingGoal(false);
+    await saveProject(updated);
+    setProjects((ps) => ps.map((p) => (p.id === updated.id ? updated : p)));
+    if (prof) {
+      loadRecon(prof.profileText, g);
+    }
+  }, [project, prof, loadRecon]);
 
   const reprofile = useCallback(async (): Promise<ProfileAll | null> => {
     const py = await loadPy();
@@ -550,15 +571,7 @@ export default function DataAnalyst() {
       const leftover = recs.filter((r) => !p.order.includes(r.id)).sort((a, b) => a.addedAt - b.addedAt);
       const ordered = [...inOrder, ...leftover];
       const loaded: LoadedFile[] = [];
-      for (const rec of ordered) {
-        if (stale()) return;
-        setStatusMsg(`Loading ${rec.fileName}…`);
-        const names = await ingestFile(py, { fmt: rec.fmt, binary: rec.binary, base: rec.name, content: rec.content });
-        loaded.push({ rec, names });
-      }
-      if (stale()) return;
-      setFiles(loaded);
-      if (loaded.length) { const p2 = await reprofile(); if (!stale() && p2) loadRecon(p2.profileText); }
+      if (loaded.length) { const p2 = await reprofile(); if (!stale() && p2) loadRecon(p2.profileText, p.goal); }
       else setProf(null);
       // restore this project's saved analysis history
       try {
@@ -569,7 +582,7 @@ export default function DataAnalyst() {
       if (!stale()) setError(`Couldn't load the project: ${e instanceof Error ? e.message : e}`);
     } finally { if (!stale()) { setBusyLoad(false); setStatusMsg(""); } }
   }, [reprofile, loadRecon]);
-
+ 
   // First mount: load (or create) the project list and open the first.
   useEffect(() => {
     (async () => {
@@ -577,10 +590,10 @@ export default function DataAnalyst() {
       if (!ps.length) { const p = await createProject("My first project"); ps = [p]; }
       setProjects(ps);
       await openProject(ps[0]);
-    })().catch((e) => setError(`Storage error: ${e instanceof Error ? e.message : e}`));
+    })().catch((e) => setError("Storage error: " + (e instanceof Error ? e.message : e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
+ 
   const addFiles = useCallback(async (fileList: FileList, proj?: ProjectRec) => {
     const target = proj ?? project;
     if (!target) return;
@@ -603,7 +616,11 @@ export default function DataAnalyst() {
         const p2 = await reprofile();
         const ps = await listProjects(); setProjects(ps);
         const cur = ps.find((x) => x.id === target.id); if (cur) setProject(cur);
-        if (p2) loadRecon(p2.profileText);
+        if (p2) loadRecon(p2.profileText, cur?.goal);
+        if (cur && !cur.goal) {
+          setGoalInput("");
+          setShowGoalModal(true);
+        }
       }
     } catch (e) {
       setError(`Couldn't add data: ${e instanceof Error ? e.message : e}`);
@@ -665,6 +682,8 @@ export default function DataAnalyst() {
         return new File([await r.blob()], n, { type: "text/csv" });
       }));
       const p = await createProject("Sample · sales & customers");
+      p.goal = "Analyze customer demographics and purchasing patterns to find high-value segments.";
+      await saveProject(p);
       setProjects((ps) => [...ps, p]);
       await openProject(p);
       const dt = new DataTransfer(); sampleFiles.forEach((f) => dt.items.add(f));
@@ -708,7 +727,7 @@ export default function DataAnalyst() {
     try {
       const py = await loadPy();
       // contextCode present => a follow-up that builds on a prior answer (no error => not a retry).
-      const gen = await fetchCode(q, schema, contextCode);
+      const gen = await fetchCode(q, schema, contextCode, undefined, project?.goal);
       if (gen.error) {
         finalTurnData = { id, q, running: false, error: gen.error };
         patch(finalTurnData);
@@ -718,7 +737,7 @@ export default function DataAnalyst() {
       let run = await runGenerated(py, gen.code);
       let usedCode = gen.code, usedExpl = gen.explanation, usedChart = gen.chart, retried = false;
       if (!run.ok) {
-        const gen2 = await fetchCode(q, schema, gen.code, run.error);
+        const gen2 = await fetchCode(q, schema, gen.code, run.error, project?.goal);
         if (!gen2.error) {
           await ensurePkgs(py, pkgsForCode(gen2.code));
           const run2 = await runGenerated(py, gen2.code);
@@ -748,7 +767,7 @@ export default function DataAnalyst() {
         try {
           const r = await fetch("/api/analyst/synthesis", {
             method: "POST", headers: JSON_HEADERS,
-            body: JSON.stringify({ question: q, result: resultToText(run.result) }),
+            body: JSON.stringify({ question: q, result: resultToText(run.result), goal: project?.goal }),
           });
           const d = await r.json();
           if (r.ok && !d.error && (d.descriptive || (d.scorecard && d.scorecard.length))) {
@@ -870,6 +889,40 @@ export default function DataAnalyst() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Left column — datasets + relationships + recon */}
           <div className="lg:col-span-1 space-y-4">
+            {/* Analysis Objective / Goal */}
+            {totalDatasets > 0 && (
+              <div className="glass-panel rounded-xl border border-white/5 p-4 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-xs font-bold font-mono uppercase tracking-widest text-[#859397] flex items-center gap-2">
+                    <Target className="w-4 h-4 text-[#8aebff]" /> Objective
+                  </h3>
+                  {project?.goal && (
+                    <button onClick={() => { setGoalInput(project.goal || ""); setEditingGoal(true); }} disabled={locked}
+                      className="p-1 text-[#5c6a6d] hover:text-[#8aebff] cursor-pointer disabled:opacity-40" title="Edit goal">
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+                {editingGoal || !project?.goal ? (
+                  <div className="space-y-2">
+                    <input value={goalInput} onChange={(e) => setGoalInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") saveProjectGoal(goalInput); }}
+                      placeholder="What are you looking for? (e.g. Find top churn drivers)" disabled={locked}
+                      className="w-full bg-[#0a0e1a]/60 border border-white/10 rounded-lg px-2.5 py-1.5 font-mono text-[11px] text-[#dfe2f3] focus:outline-none focus:border-[#8aebff]/40 placeholder:text-[#5c6a6d]" />
+                    <div className="flex justify-end gap-1.5">
+                      {project?.goal && (
+                        <button onClick={() => setEditingGoal(false)} disabled={locked}
+                          className="px-2.5 py-1 rounded text-[10px] font-bold font-mono border border-white/10 text-[#bbc9cd] hover:bg-white/5 cursor-pointer">CANCEL</button>
+                      )}
+                      <button onClick={() => saveProjectGoal(goalInput)} disabled={locked || !goalInput.trim()}
+                        className="px-2.5 py-1 rounded text-[10px] font-bold font-mono bg-[#8aebff] text-[#00363e] hover:bg-[#22d3ee] cursor-pointer disabled:opacity-40">SAVE</button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-[12px] font-medium text-[#dfe2f3] leading-relaxed italic">"{project.goal}"</p>
+                )}
+              </div>
+            )}
+
             {/* Datasets */}
             <div className="glass-panel rounded-xl border border-white/5 p-4">
               <h3 className="text-xs font-bold font-mono uppercase tracking-widest text-[#859397] flex items-center gap-2 mb-3">
@@ -919,11 +972,15 @@ export default function DataAnalyst() {
                 </h3>
                 <div className="space-y-1.5">
                   {prof.relationships.map((r, i) => (
-                    <div key={i} className="text-[10px] font-mono text-[#bbc9cd] flex items-center gap-1.5">
-                      <span className="text-[#c084fc]">{r.left}</span>.<span className="text-[#8aebff]">{r.leftCol}</span>
-                      <Link2 className="w-3 h-3 text-[#5c6a6d]" />
-                      <span className="text-[#c084fc]">{r.right}</span>.<span className="text-[#8aebff]">{r.rightCol}</span>
-                      <span className="ml-auto flex items-center gap-1.5">
+                    <div key={i} className="text-[10px] font-mono text-[#bbc9cd] flex flex-wrap items-center gap-x-1.5 gap-y-1 pb-1.5 last:pb-0 border-b border-white/5 last:border-b-0">
+                      <span className="text-[#c084fc] truncate max-w-[120px]" title={r.left}>{r.left}</span>
+                      <span className="text-[#5c6a6d] -mx-0.5">.</span>
+                      <span className="text-[#8aebff] truncate max-w-[80px]" title={r.leftCol}>{r.leftCol}</span>
+                      <Link2 className="w-3 h-3 text-[#5c6a6d] shrink-0" />
+                      <span className="text-[#c084fc] truncate max-w-[120px]" title={r.right}>{r.right}</span>
+                      <span className="text-[#5c6a6d] -mx-0.5">.</span>
+                      <span className="text-[#8aebff] truncate max-w-[80px]" title={r.rightCol}>{r.rightCol}</span>
+                      <span className="ml-auto flex items-center gap-1.5 shrink-0">
                         <span className="text-[8px] px-1 py-0.5 rounded bg-[#5eead4]/10 text-[#5eead4] uppercase tracking-wide">{r.card}</span>
                         <span className="text-[#5c6a6d]">{Math.round(r.overlap * 100)}%</span>
                       </span>
@@ -1080,6 +1137,54 @@ export default function DataAnalyst() {
               </div>
             ))}
           </div>
+          {/* Goal Modal */}
+          {showGoalModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+              <div className="glass-panel w-full max-w-md border border-white/10 bg-[#0c101d] p-6 rounded-2xl shadow-2xl space-y-4">
+                <div className="flex items-center gap-2.5 text-base font-mono font-bold uppercase tracking-widest text-[#8aebff]">
+                  <Target className="w-5 h-5 text-[#8aebff]" /> What is your analysis goal?
+                </div>
+                <p className="text-xs text-[#bbc9cd] leading-relaxed">
+                  Tell JARVIS what you are looking for in this dataset. It will tailor the generated hypotheses, KPIs, queries, and briefs to focus on this objective.
+                </p>
+                <input
+                  autoFocus
+                  value={goalInput}
+                  onChange={(e) => setGoalInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && goalInput.trim()) {
+                      saveProjectGoal(goalInput);
+                      setShowGoalModal(false);
+                    }
+                  }}
+                  placeholder="E.g. Identify key demographics driving customer churn"
+                  className="w-full bg-[#0a0e1a]/80 border border-white/10 rounded-xl px-3 py-2.5 font-mono text-xs text-[#dfe2f3] focus:outline-none focus:border-[#8aebff]/40 placeholder:text-[#5c6a6d]"
+                />
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    onClick={() => {
+                      setShowGoalModal(false);
+                    }}
+                    className="px-4 py-2 rounded-lg text-xs font-semibold font-mono border border-white/10 text-[#bbc9cd] hover:bg-white/5 cursor-pointer"
+                  >
+                    Explore Freely
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (goalInput.trim()) {
+                        saveProjectGoal(goalInput);
+                        setShowGoalModal(false);
+                      }
+                    }}
+                    disabled={!goalInput.trim()}
+                    className="px-4 py-2 rounded-lg text-xs font-semibold font-mono bg-[#8aebff] text-[#00363e] hover:bg-[#22d3ee] cursor-pointer disabled:opacity-40"
+                  >
+                    Set Objective
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </motion.div>
