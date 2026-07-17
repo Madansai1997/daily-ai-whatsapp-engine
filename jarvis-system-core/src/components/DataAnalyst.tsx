@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import {
   ResponsiveContainer, BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
@@ -296,8 +296,19 @@ export default function DataAnalyst() {
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
+  const [pyState, setPyState] = useState<"loading" | "ready" | "error">("loading");
   const fileRef = useRef<HTMLInputElement | null>(null);
   const lastFile = useRef<File | null>(null);
+
+  // Prefetch the ~20MB Pyodide + pandas/numpy runtime the moment this screen mounts, so the
+  // download overlaps with the user picking a file instead of starting only on upload. It's a
+  // one-time cost — the browser caches it for every later visit.
+  useEffect(() => {
+    let alive = true;
+    loadPy().then(() => { if (alive) setPyState("ready"); })
+            .catch(() => { if (alive) setPyState("error"); });
+    return () => { alive = false; };
+  }, []);
 
   const loadRecon = useCallback(async (profileText: string) => {
     setRecon(null); setReconLoading(true);
@@ -445,8 +456,25 @@ export default function DataAnalyst() {
             <p className="text-[11px] font-mono text-[#859397] max-w-lg">
               Supports <b className="text-[#bbc9cd]">CSV · TSV · JSON · XML · Excel (.xlsx) · Parquet · SQLite (.db)</b>. Everything —
               profiling, cleaning, the pandas & matplotlib you ask for — runs <b>in your browser</b> (Pyodide; nothing leaves your
-              machine, the server never executes code). First upload downloads the Python runtime (~a few MB).
+              machine, the server never executes code).
             </p>
+            {/* Runtime status — the honest ~20MB one-time cost, warming up in the background */}
+            {pyState === "loading" && (
+              <div className="flex items-center gap-2 text-[11px] font-mono text-[#8aebff] bg-[#8aebff]/[0.06] border border-[#8aebff]/20 rounded-full px-3 py-1.5 mt-1">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Warming up the Python runtime — one-time ~20MB download, then cached. Pick a file meanwhile.
+              </div>
+            )}
+            {pyState === "ready" && (
+              <div className="flex items-center gap-2 text-[11px] font-mono text-[#5eead4] bg-[#5eead4]/[0.06] border border-[#5eead4]/20 rounded-full px-3 py-1.5 mt-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#5eead4]" /> Runtime ready — upload a dataset.
+              </div>
+            )}
+            {pyState === "error" && (
+              <div className="flex items-center gap-2 text-[11px] font-mono text-[#ffb4ab] bg-[#ffb4ab]/[0.06] border border-[#ffb4ab]/20 rounded-full px-3 py-1.5 mt-1">
+                <AlertTriangle className="w-3.5 h-3.5" /> Couldn't load the Python runtime — check your connection and refresh.
+              </div>
+            )}
           </div>
         </div>
       ) : (
