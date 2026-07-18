@@ -58,10 +58,14 @@ RANKING_SYSTEM_PROMPT = (
     "You score job postings for a candidate. You are given the candidate PROFILE and a numbered "
     "list of JOBS. For EACH job return an object in a STRICT JSON array — no markdown, no prose:\n"
     '[{"id": "<the job id given>", "score": 0-100, "why": "<one short line>", '
-    '"flags": ["visa","salary_below","seniority_mismatch","location_mismatch"]}]\n'
+    '"flags": ["visa","salary_below","seniority_mismatch","location_mismatch","ghost_job"], '
+    '"ghost_job_risk": "none|low|medium|high", "ghost_job_reasons": ["list of reasons why, e.g. stale posting, vague description, placeholder text"]}]\n'
     "Score on: title/skill match, seniority fit (candidate is MID-LEVEL — penalize senior/lead/"
-    "intern roles), location/remote fit, salary vs floor, and freshness. Be harsh: 80+ means "
-    "'apply today'. Only include flags that actually apply. Never invent details not in the "
+    "intern roles), location/remote fit, salary vs floor, and freshness. "
+    "Evaluate GHOST JOB risk: Check if the posting is stale (posted over 30 days ago), has an "
+    "extremely generic/vague description, uses standard boilerplate without company-specific info, "
+    "or has mismatching title/requirements. Flag as 'ghost_job' in the flags array if risk is medium or high. "
+    "Be harsh: 80+ means 'apply today'. Only include flags that actually apply. Never invent details not in the "
     "posting. Return one array element per job, ids matching exactly. Keep 'why' under 10 words "
     "and never use double-quote characters inside it. JSON array only, no trailing text."
 )
@@ -93,9 +97,15 @@ def init_job_scout_tables():
         created_at TEXT
     )''')
     try:  # migrate older DBs that predate the publisher (real-board) column
-        cur.execute("ALTER TABLE matched_jobs ADD COLUMN publisher TEXT")
-    except Exception:
-        pass
+        cols = [r[1] for r in cur.execute("PRAGMA table_info(matched_jobs)").fetchall()]
+        if "publisher" not in cols:
+            cur.execute("ALTER TABLE matched_jobs ADD COLUMN publisher TEXT")
+        if "ghost_job_risk" not in cols:
+            cur.execute("ALTER TABLE matched_jobs ADD COLUMN ghost_job_risk TEXT")
+        if "ghost_job_reasons" not in cols:
+            cur.execute("ALTER TABLE matched_jobs ADD COLUMN ghost_job_reasons TEXT")
+    except Exception as e:
+        print(f"⚠️ matched_jobs migration failed: {e}")
     # Display state (NOT the dedup ledger): the exact list last shown to the user, so a
     # "TRACK <n>" reply can resolve index n back to a job — works for both the daily digest
     # and read-only on-demand results. Overwritten each time a digest/search is shown.
@@ -473,6 +483,8 @@ async def rank_jobs(jobs: list, profile: dict, call_llm_fn, batch_size: int = 6)
             j["score"] = int(s.get("score", 0))
             j["why"] = s.get("why", "")
             j["flags"] = s.get("flags", [])
+            j["ghost_job_risk"] = s.get("ghost_job_risk", "none")
+            j["ghost_job_reasons"] = s.get("ghost_job_reasons", [])
             ranked.append(j)
     ranked.sort(key=lambda x: x["score"], reverse=True)
     return ranked
@@ -491,12 +503,13 @@ async def persist_matches(scored: list):
             await db.execute(
                 """INSERT OR IGNORE INTO matched_jobs
                    (job_key, title, company, location, url, source, publisher, remote, salary, posted_at,
-                    score, why, flags, status, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'new', ?)""",
+                    score, why, flags, status, created_at, ghost_job_risk, ghost_job_reasons)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'new', ?, ?, ?)""",
                 (j["key"], j["title"], j["company"], j["location"], j["url"], j["source"],
                  j.get("publisher") or (j.get("source") or "").title(),
                  int(j["remote"]), j.get("salary"), j.get("posted_at"),
-                 j.get("score", 0), j.get("why", ""), json.dumps(j.get("flags", [])), now),
+                 j.get("score", 0), j.get("why", ""), json.dumps(j.get("flags", [])), now,
+                 j.get("ghost_job_risk", "none"), json.dumps(j.get("ghost_job_reasons", []))),
             )
         await db.commit()
 

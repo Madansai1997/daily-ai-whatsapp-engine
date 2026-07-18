@@ -14,14 +14,14 @@ const daySeries = (n: number) =>
 
 // ── Job board ──────────────────────────────────────────────────────────────
 const APPLICATIONS = [
-  { id: 1, job_key: "demo:1", title: "Data Analyst", company: "Nimbus Analytics", location: "Bengaluru", source: "LinkedIn", status: "interviewing", reviewed: 1, apply_method: "link", ats_score: 82, ats_scored_at: iso(2), recruiter_score: 78, recruiter_scored_at: iso(2), news_count: 2, applied_at: iso(11), updated_at: iso(2), url: "#" },
-  { id: 2, job_key: "demo:2", title: "Analytics Engineer", company: "Vela Systems", location: "Remote", source: "Wellfound", status: "applied", reviewed: 1, apply_method: "email", ats_score: 74, ats_scored_at: iso(4), recruiter_score: 71, recruiter_scored_at: iso(4), news_count: 0, applied_at: iso(5), updated_at: iso(5), url: "#" },
-  { id: 3, job_key: "demo:3", title: "BI Developer", company: "Corewave", location: "Hyderabad", source: "Naukri", status: "applied", reviewed: 1, apply_method: "link", ats_score: 68, ats_scored_at: iso(6), recruiter_score: null, recruiter_scored_at: null, news_count: 1, applied_at: iso(6), updated_at: iso(6), url: "#" },
-  { id: 4, job_key: "demo:4", title: "Product Data Analyst", company: "Lumen Labs", location: "Remote", source: "LinkedIn", status: "offer", reviewed: 1, apply_method: "email", ats_score: 88, ats_scored_at: iso(1), recruiter_score: 84, recruiter_scored_at: iso(1), news_count: 3, applied_at: iso(20), updated_at: iso(1), url: "#" },
-  { id: 5, job_key: "demo:5", title: "Data Scientist (Jr)", company: "Aster Health", location: "Pune", source: "Instahyre", status: "interested", reviewed: 0, apply_method: "link", ats_score: null, ats_scored_at: null, recruiter_score: null, recruiter_scored_at: null, news_count: 0, applied_at: null, updated_at: iso(1), url: "#" },
-  { id: 6, job_key: "demo:6", title: "Business Analyst", company: "Quill Finance", location: "Mumbai", source: "Naukri", status: "interested", reviewed: 0, apply_method: "link", ats_score: null, ats_scored_at: null, recruiter_score: null, recruiter_scored_at: null, news_count: 0, applied_at: null, updated_at: iso(0), url: "#" },
-  { id: 7, job_key: "demo:7", title: "Analytics Consultant", company: "Grid Dynamics", location: "Remote", source: "LinkedIn", status: "rejected", reviewed: 1, apply_method: "link", ats_score: 61, ats_scored_at: iso(15), recruiter_score: 55, recruiter_scored_at: iso(15), news_count: 0, applied_at: iso(24), updated_at: iso(9), url: "#" },
-  { id: 8, job_key: "demo:8", title: "Data Analyst II", company: "Pixel Retail", location: "Gurugram", source: "Wellfound", status: "applied", reviewed: 1, apply_method: "email", ats_score: 79, ats_scored_at: iso(3), recruiter_score: 73, recruiter_scored_at: iso(3), news_count: 1, applied_at: iso(3), updated_at: iso(3), url: "#" },
+  { id: 1, job_key: "demo:1", title: "Data Analyst", company: "Nimbus Analytics", location: "Bengaluru", source: "LinkedIn", status: "interviewing", reviewed: 1, apply_method: "link", ats_score: 82, ats_scored_at: iso(2), recruiter_score: 78, recruiter_scored_at: iso(2), news_count: 2, applied_at: iso(11), updated_at: iso(2), url: "#", ghost_job_risk: "none", ghost_job_reasons: [] },
+  { id: 2, job_key: "demo:2", title: "Analytics Engineer", company: "Vela Systems", location: "Remote", source: "Wellfound", status: "applied", reviewed: 1, apply_method: "email", ats_score: 74, ats_scored_at: iso(4), recruiter_score: 71, recruiter_scored_at: iso(4), news_count: 0, applied_at: iso(5), updated_at: iso(5), url: "#", ghost_job_risk: "none", ghost_job_reasons: [] },
+  { id: 3, job_key: "demo:3", title: "BI Developer", company: "Corewave", location: "Hyderabad", source: "Naukri", status: "applied", reviewed: 1, apply_method: "link", ats_score: 68, ats_scored_at: iso(6), recruiter_score: null, recruiter_scored_at: null, news_count: 1, applied_at: iso(6), updated_at: iso(6), url: "#", ghost_job_risk: "high", ghost_job_reasons: ["Posted over 60 days ago", "Generic boilerplate description", "No contact details"] },
+  { id: 4, job_key: "demo:4", title: "Product Data Analyst", company: "Lumen Labs", location: "Remote", source: "LinkedIn", status: "offer", reviewed: 1, apply_method: "email", ats_score: 88, ats_scored_at: iso(1), recruiter_score: 84, recruiter_scored_at: iso(1), news_count: 3, applied_at: iso(20), updated_at: iso(1), url: "#", ghost_job_risk: "none", ghost_job_reasons: [] },
+  { id: 5, job_key: "demo:5", title: "Data Scientist (Jr)", company: "Aster Health", location: "Pune", source: "Instahyre", status: "interested", reviewed: 0, apply_method: "link", ats_score: null, ats_scored_at: null, recruiter_score: null, recruiter_scored_at: null, news_count: 0, applied_at: null, updated_at: iso(1), url: "#", ghost_job_risk: "none", ghost_job_reasons: [] },
+  { id: 6, job_key: "demo:6", title: "Business Analyst", company: "Quill Finance", location: "Mumbai", source: "Naukri", status: "interested", reviewed: 0, apply_method: "link", ats_score: null, ats_scored_at: null, recruiter_score: null, recruiter_scored_at: null, news_count: 0, applied_at: null, updated_at: iso(0), url: "#", ghost_job_risk: "none", ghost_job_reasons: [] },
+  { id: 7, job_key: "demo:7", title: "Analytics Consultant", company: "Grid Dynamics", location: "Remote", source: "LinkedIn", status: "rejected", reviewed: 1, apply_method: "link", ats_score: 61, ats_scored_at: iso(15), recruiter_score: 55, recruiter_scored_at: iso(15), news_count: 0, applied_at: iso(24), updated_at: iso(9), url: "#", ghost_job_risk: "medium", ghost_job_reasons: ["Vague job description", "Salary range not disclosed"] },
+  { id: 8, job_key: "demo:8", title: "Data Analyst II", company: "Pixel Retail", location: "Gurugram", source: "Wellfound", status: "applied", reviewed: 1, apply_method: "email", ats_score: 79, ats_scored_at: iso(3), recruiter_score: 73, recruiter_scored_at: iso(3), news_count: 1, applied_at: iso(3), updated_at: iso(3), url: "#", ghost_job_risk: "none", ghost_job_reasons: [] },
 ];
 const STATUSES = ["interested", "applied", "interviewing", "offer", "accepted", "rejected"];
 
@@ -220,8 +220,63 @@ function fixtureFor(path: string): unknown | null {
   if (p.includes("/followups")) return { turns: [] };
   if (p.includes("/explain")) return { explanation: { tldr: "Retrieval-Augmented Generation (RAG) is a technique that grounds model responses in factual source documents." } };
   if (p.includes("/brief")) return { brief: "This is a detailed product design brief generated by JARVIS." };
+  if (p.includes("/recruiter-review")) return DEMO_RECRUITER_REVIEW;
+  if (p.includes("/prep")) return DEMO_PREP;
   return null;
 }
+
+const DEMO_RECRUITER_REVIEW = {
+  role_fit_score: 85,
+  verdict: "Strong candidate with solid Python/SQL foundations. Good match for a mid-level data analyst role, but needs to highlight more business impact in recent projects.",
+  six_second_test: {
+    role_clear: true,
+    skills_clear: true,
+    impact_clear: false,
+    note: "The candidate's core skills are highly visible, but business impact/metrics are buried."
+  },
+  strengths: [
+    "Proven experience building end-to-end data pipelines using Python and SQL.",
+    "Strong understanding of database internals and performance optimization.",
+    "Experienced in automated reporting and dashboard design."
+  ],
+  red_flags: [
+    "Lacks explicit cloud platform experience (AWS/GCP/Azure) in the résumé bullets.",
+    "Missing clear quantification of data pipeline performance improvements."
+  ],
+  learning_roadmap: [
+    { skill: "dbt (data build tool)", importance: "high", reason: "Required by the job description for modular SQL workflows.", est_time: "1 week" },
+    { skill: "Cloud Services (AWS/GCP)", importance: "medium", reason: "Important for deploying modern cloud data platforms.", est_time: "2 weeks" }
+  ]
+};
+
+const DEMO_PREP = {
+  job_ref: "demo:1",
+  outreach_linkedin: "Hi Sarah, saw your posting for the Data Analyst role. My background in building automated pipelines with Python & SQL aligns perfectly. Would love to connect and share how I optimized data queries by 40% at Nimbus. Thanks!",
+  outreach_email: "Subject: Data Analyst Application - Madan Sai\n\nHi Sarah,\n\nI hope you're doing well.\n\nI recently applied for the Data Analyst position at Nimbus Analytics. With 3+ years of experience designing data pipelines, writing complex SQL queries, and translating raw data into business insights, I'm confident I can make an immediate impact on your team.\n\nAt Nimbus, I built an automated reporting engine that saved the team 10+ hours weekly and reduced query latency by 40%. My master résumé is attached for your review.\n\nI would welcome the opportunity to chat briefly about how my skills align with your current needs. Do you have 10 minutes next Tuesday afternoon?\n\nBest regards,\nMadan Sai",
+  star_stories: [
+    {
+      question: "Tell me about a time you optimized a slow query or database pipeline.",
+      situation: "At Nimbus Analytics, a daily dashboard query was taking over 45 minutes to execute, causing delayed morning briefings for executives.",
+      task: "I was tasked with identifying the bottleneck and optimizing the query execution time to under 10 minutes.",
+      action: "I analyzed the execution plan, added missing compound indexes on frequently joined tables, and rewritten nested subqueries into CTEs.",
+      result: "The execution time dropped from 45 minutes to just 3 minutes (a 93% improvement), and the executive briefing was fully automated."
+    },
+    {
+      question: "How do you handle missing or messy data in your analysis?",
+      situation: "We received a batch of customer interaction data from a third-party vendor that had over 30% missing values in critical columns like location and timestamp.",
+      task: "I needed to clean and prepare this data for a quarterly customer retention report without skewing the results.",
+      action: "I designed an auto-imputation script in Python using pandas, applying median values for numeric gaps and forward-filling categorical markers based on historical user sessions.",
+      result: "The cleaned dataset achieved a 98% validity rate, allowing us to successfully deliver the retention report on schedule."
+    },
+    {
+      question: "Explain a project where you translated business requests into technical requirements.",
+      situation: "The product manager wanted to track user drop-offs in the checkout funnel but couldn't specify the exact event triggers needed.",
+      task: "I needed to design the tracking schema and funnel visualization that the engineering team could implement.",
+      action: "I interviewed the product manager to define key conversion milestones, mapped these to specific page events, and built a prototype dashboard in Tableau.",
+      result: "The engineering team successfully instrumented the events within one sprint, and the new funnel dashboard identified a 15% checkout drop-off bottleneck."
+    }
+  ]
+};
 
 /** Build a synthetic Response for a demo request, or null to let it hit the network. */
 export function demoResponse(url: string, method: string): Response | null {
@@ -237,6 +292,9 @@ export function demoResponse(url: string, method: string): Response | null {
     new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } });
 
   if (m !== "GET") {
+    if (path.includes("/recruiter-review") || path.includes("/prep")) {
+      return json(fixtureFor(path));
+    }
     // Read-only demo: acknowledge without persisting anything.
     return json({ ok: false, demo: true, error: "This is a read-only demo — sign in to make changes." }, 200);
   }

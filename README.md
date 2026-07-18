@@ -145,6 +145,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- feat: implement Career-Ops Feature Suite (A-F fit grading, ghost job warnings, LinkedIn/email outreach, and STAR interview prep) _(2026-07-18)_
 - fix(demo): Align influencer feed array format and mock trends pulse endpoint _(2026-07-17)_
 - fix(demo): Prevent Discover tab crashes by adding missing mock fixtures for study, trends, and influencers _(2026-07-17)_
 - fix(header): Resolve demo-mode banner overlap by dynamically shifting header and main containers _(2026-07-17)_
@@ -156,10 +157,9 @@ npm install && npm run build     # served by the engine at /console
 - feat(analyst): multi-dataset projects — combine & join many sheets in the browser _(2026-07-17)_
 - build(readme): auto-changelog via post-commit hook so it includes the current commit _(2026-07-17)_
 - fix(analyst): on-demand scikit-learn + reconcile chart to real columns _(2026-07-17)_
-- fix(analyst): serve Pyodide from our own origin (jsdelivr blocked on some ISPs) _(2026-07-17)_
 <!-- /AUTO:changelog -->
 
 ---
 
-_Last updated: 2026-07-17 · this README's inventory and changelog are auto-maintained by
+_Last updated: 2026-07-18 · this README's inventory and changelog are auto-maintained by
 `scripts/gen_readme.py` on every commit._

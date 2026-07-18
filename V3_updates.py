@@ -230,6 +230,8 @@ from resume_ats_agent import (
     get_tailored_docx,
     recruiter_review as run_recruiter_review,
     get_recruiter_review,
+    generate_job_prep,
+    get_job_prep,
 )
 try:
     from resume_editor import apply_rewrites, append_bullet
@@ -6773,6 +6775,8 @@ async def applications_list_api():
         s = scores.get(k)
         a["ats_score"] = s["ats_score"] if s else None
         a["ats_scored_at"] = s["created_at"] if s else None
+        a["ghost_job_risk"] = s["ghost_job_risk"] if s else None
+        a["ghost_job_reasons"] = s["ghost_job_reasons"] if s else None
         rs = rec_scores.get(k)
         a["recruiter_score"] = rs["recruiter_score"] if rs else None
         a["recruiter_scored_at"] = rs["created_at"] if rs else None
@@ -7527,6 +7531,46 @@ async def recruiter_review_get_api(job_ref: str):
     if not r:
         return JSONResponse({"error": "no review"}, status_code=404)
     return JSONResponse(r)
+
+
+@app.get("/ats/{job_ref}/prep")
+async def job_prep_get_api(job_ref: str):
+    p = await get_job_prep(job_ref)
+    if not p:
+        return JSONResponse({"error": "no prep kit generated yet"}, status_code=404)
+    return JSONResponse(p)
+
+
+@app.post("/applications/{app_id}/prep")
+async def application_job_prep_api(app_id: int, request: Request):
+    """Run (or refresh) the outreach & STAR interview story preparation for one application —
+    an on-demand LLM call. Tailored to your resume and this job posting."""
+    app_row = await get_application(app_id)
+    if not app_row:
+        return JSONResponse({"error": "application not found"}, status_code=404)
+    pasted_jd = ""
+    try:
+        body = await request.json()
+        pasted_jd = (body.get("job_description") or "").strip()
+    except Exception:
+        pasted_jd = ""
+    if pasted_jd:
+        await update_application_description(app_id, pasted_jd)
+    description = pasted_jd or (app_row.get("description") or "").strip()
+    if not description:
+        return JSONResponse({
+            "needs_jd": True,
+            "title": app_row.get("title"),
+            "company": app_row.get("company"),
+            "message": "This job has no description saved. Paste the job posting so I can prepare outreach & interview stories.",
+        })
+    job = {"key": app_row.get("job_key") or f"app:{app_id}", "title": app_row.get("title"),
+           "company": app_row.get("company"), "location": app_row.get("location"),
+           "description": description}
+    result = await generate_job_prep(job, call_llm)
+    if result.get("error"):
+        return JSONResponse({"error": result["error"]}, status_code=400)
+    return JSONResponse(result)
 
 
 @app.get("/ats/{job_ref}/download")

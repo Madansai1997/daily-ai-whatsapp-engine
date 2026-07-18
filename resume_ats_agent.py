@@ -44,6 +44,10 @@ RESUME_ATS_PROMPT = (
     "DevOps, QA, Web/Mobile Dev, HR, Sales, Marketing, SysAdmin) not aligned to a Data Analyst>,\n"
     '    "reason": "<string: one line if mismatched is true, else empty string>"\n'
     "  },\n"
+    '  "ghost_job_evaluation": {\n'
+    '    "risk": "none|low|medium|high",\n'
+    '    "reasons": [<list of strings: specific indicators why this might be a ghost job/suspicious posting, e.g. stale posting date, extremely generic, missing recruiter info>]\n'
+    "  },\n"
     '  "star_xyz_breakdown": [\n'
     '    {"section_name": "<company or project + which bullet>",\n'
     '     "current_text": "<the existing bullet copied VERBATIM from the resume>",\n'
@@ -142,6 +146,21 @@ def init_resume_ats_tables():
         data TEXT,
         created_at TEXT
     )''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS job_prep_cache (
+        job_ref TEXT PRIMARY KEY,
+        outreach_linkedin TEXT,
+        outreach_email TEXT,
+        star_stories TEXT,
+        created_at TEXT
+    )''')
+    try:
+        cols = [r[1] for r in cur.execute("PRAGMA table_info(ats_analysis_cache)").fetchall()]
+        if "ghost_job_risk" not in cols:
+            cur.execute("ALTER TABLE ats_analysis_cache ADD COLUMN ghost_job_risk TEXT")
+        if "ghost_job_reasons" not in cols:
+            cur.execute("ALTER TABLE ats_analysis_cache ADD COLUMN ghost_job_reasons TEXT")
+    except Exception as e:
+        print(f"⚠️ ats_analysis_cache migration failed: {e}")
     conn.commit()
     conn.close()
     print("✅ Resume ATS tables ready.")
@@ -313,23 +332,28 @@ async def analyze(job: dict, call_llm_fn, domain: str = DEFAULT_DOMAIN) -> dict:
     analysis = _reconcile_keyword_matrix(analysis, resume)
     analysis = _score_from_matrix(analysis)
     txt = compile_txt(job, analysis)
+    ghost_eval = analysis.get("ghost_job_evaluation", {})
+    ghost_risk = ghost_eval.get("risk", "none")
+    ghost_reasons = ghost_eval.get("reasons", [])
     now = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """INSERT INTO ats_analysis_cache
                (job_ref, job_title, company, location, ats_score, keyword_matrix,
-                star_xyz_breakdown, downloadable_txt_content, viewed, created_at, domain_mismatch)
-               VALUES (?,?,?,?,?,?,?,?,0,?,?)
+                star_xyz_breakdown, downloadable_txt_content, viewed, created_at, domain_mismatch,
+                ghost_job_risk, ghost_job_reasons)
+               VALUES (?,?,?,?,?,?,?,?,0,?,?,?,?)
                ON CONFLICT(job_ref) DO UPDATE SET
                  job_title=excluded.job_title, company=excluded.company, location=excluded.location,
                  ats_score=excluded.ats_score, keyword_matrix=excluded.keyword_matrix,
                  star_xyz_breakdown=excluded.star_xyz_breakdown,
                  downloadable_txt_content=excluded.downloadable_txt_content, viewed=0,
-                 created_at=excluded.created_at, domain_mismatch=excluded.domain_mismatch""",
+                 created_at=excluded.created_at, domain_mismatch=excluded.domain_mismatch,
+                 ghost_job_risk=excluded.ghost_job_risk, ghost_job_reasons=excluded.ghost_job_reasons""",
             (job_ref, job.get("title"), job.get("company"), job.get("location"),
              int(analysis.get("ats_score", 0)), json.dumps(analysis.get("keyword_matrix", {})),
              json.dumps(analysis.get("star_xyz_breakdown", [])), txt, now,
-             json.dumps(analysis.get("domain_mismatch", {}))))
+             json.dumps(analysis.get("domain_mismatch", {})), ghost_risk, json.dumps(ghost_reasons)))
         await db.commit()
     return await get_analysis(job_ref)
 
@@ -345,6 +369,7 @@ async def get_analysis(job_ref: str) -> dict:
     a["keyword_matrix"] = json.loads(a.get("keyword_matrix") or "{}")
     a["star_xyz_breakdown"] = json.loads(a.get("star_xyz_breakdown") or "[]")
     a["domain_mismatch"] = json.loads(a.get("domain_mismatch") or "{}")
+    a["ghost_job_reasons"] = json.loads(a.get("ghost_job_reasons") or "[]")
     return a
 
 
@@ -472,11 +497,19 @@ async def get_scores_map(keys=None) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            f"SELECT job_ref, ats_score, created_at FROM ats_analysis_cache WHERE job_ref IN ({placeholders})",
+            f"SELECT job_ref, ats_score, created_at, ghost_job_risk, ghost_job_reasons FROM ats_analysis_cache WHERE job_ref IN ({placeholders})",
             tuple(keys),
         )
         rows = await cur.fetchall()
-    return {r["job_ref"]: {"ats_score": r["ats_score"], "created_at": r["created_at"]} for r in rows}
+    return {
+        r["job_ref"]: {
+            "ats_score": r["ats_score"],
+            "created_at": r["created_at"],
+            "ghost_job_risk": r["ghost_job_risk"],
+            "ghost_job_reasons": json.loads(r["ghost_job_reasons"] or "[]")
+        }
+        for r in rows
+    }
 
 
 async def skill_gap_summary(top_n: int = 24) -> dict:
@@ -941,3 +974,84 @@ async def get_tailored_docx(job_ref: str):
     if not row or not row[1]:
         return None
     return row[0], _b64.b64decode(row[1])
+
+
+JOB_PREP_PROMPT = (
+    "You are a master career coach and technical recruiter. You are given the candidate's MASTER RESUME "
+    "and a target JOB DESCRIPTION. Generate a tailored outreach and interview preparation kit in "
+    "STRICT JSON format containing:\n"
+    "1. 'outreach_linkedin': A highly personalized LinkedIn connection request message (strictly under 300 characters, short and punchy, referencing matching points between the candidate's background and the job).\n"
+    "2. 'outreach_email': A cold outreach email message (subject line + body) to send to a hiring manager, highlighting the candidate's relevant skills and suggesting a brief chat.\n"
+    "3. 'star_stories': An array of exactly 3 behavioral interview questions that are highly likely to be asked for this role, along with proposed answers. The answers MUST draw directly and truthfully from the candidate's actual experience in their master resume, structured clearly in the STAR framework: Situation, Task, Action, Result.\n"
+    "Return a STRICT JSON object only with these exact keys: 'outreach_linkedin', 'outreach_email', and 'star_stories'. "
+    "Under 'star_stories', each object must have: 'question', 'situation', 'task', 'action', 'result'. Output JSON only."
+)
+
+
+async def generate_job_prep(job: dict, call_llm_fn, domain: str = DEFAULT_DOMAIN) -> dict:
+    """Generate customized outreach templates and STAR interview prep stories. Cached."""
+    resume = await get_resume_template(domain)
+    if not resume:
+        return {"error": "No master resume saved yet. Upload your resume first."}
+    jd = (job.get("description") or "").strip()
+    if not jd:
+        return {"error": "This job has no description text to prepare outreach/stories for."}
+
+    job_ref = str(job.get("key") or job.get("job_ref") or job.get("id") or job.get("url") or job.get("title"))
+    user = (f"MASTER RESUME:\n{resume}\n\n"
+            f"TARGET JOB — {job.get('title','')} @ {job.get('company','')} ({job.get('location','')}):\n{jd[:4000]}")
+    try:
+        raw = await call_llm_fn(JOB_PREP_PROMPT, user, max_tokens=1800, temperature=0.3)
+        prep = _parse_json_object(raw)
+    except Exception as e:
+        print(f"⚠️ [resume_ats] job prep generation failed: {e}")
+        return {"error": "Job prep generation failed — try again in a moment."}
+
+    now = datetime.now(timezone.utc).isoformat()
+    outreach_linkedin = prep.get("outreach_linkedin", "")
+    outreach_email = prep.get("outreach_email", "")
+    star_stories = prep.get("star_stories", [])
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO job_prep_cache (job_ref, outreach_linkedin, outreach_email, star_stories, created_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(job_ref) DO UPDATE SET
+                 outreach_linkedin=excluded.outreach_linkedin,
+                 outreach_email=excluded.outreach_email,
+                 star_stories=excluded.star_stories,
+                 created_at=excluded.created_at""",
+            (job_ref, outreach_linkedin, outreach_email, json.dumps(star_stories), now)
+        )
+        await db.commit()
+    return {
+        "job_ref": job_ref,
+        "outreach_linkedin": outreach_linkedin,
+        "outreach_email": outreach_email,
+        "star_stories": star_stories,
+        "created_at": now
+    }
+
+
+async def get_job_prep(job_ref: str) -> dict:
+    """Return cached outreach and prep data for a job_ref, or None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT outreach_linkedin, outreach_email, star_stories, created_at FROM job_prep_cache WHERE job_ref = ?",
+            (str(job_ref),)
+        )
+        row = await cur.fetchone()
+    if not row:
+        return None
+    try:
+        stories = json.loads(row["star_stories"] or "[]")
+    except Exception:
+        stories = []
+    return {
+        "job_ref": job_ref,
+        "outreach_linkedin": row["outreach_linkedin"] or "",
+        "outreach_email": row["outreach_email"] or "",
+        "star_stories": stories,
+        "created_at": row["created_at"]
+    }

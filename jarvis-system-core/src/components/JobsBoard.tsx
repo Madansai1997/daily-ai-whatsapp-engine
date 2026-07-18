@@ -67,6 +67,8 @@ interface Application {
   news_count?: number;
   applied_at?: string | null;
   updated_at?: string | null;
+  ghost_job_risk?: string | null;
+  ghost_job_reasons?: string | null;
 }
 
 interface ApplicationsResponse {
@@ -106,6 +108,8 @@ interface AtsResult {
   keyword_matrix: KeywordMatrix;
   star_xyz_breakdown: StarXyzItem[];
   domain_mismatch?: { mismatched: boolean; reason: string };
+  ghost_job_risk?: string | null;
+  ghost_job_reasons?: string[] | null;
 }
 
 interface AtsErrorResult {
@@ -129,6 +133,20 @@ interface RecruiterReview {
     reason: string;
     est_time: string;
   }[];
+}
+
+interface JobPrep {
+  job_ref: string;
+  outreach_linkedin: string;
+  outreach_email: string;
+  star_stories: {
+    question: string;
+    situation: string;
+    task: string;
+    action: string;
+    result: string;
+  }[];
+  created_at?: string;
 }
 
 /* ---- Visual config per status (preserves original HUD styling) ---- */
@@ -161,6 +179,15 @@ const atsColor = (score: number) =>
     : score >= 50
     ? { text: "#ffd6a3", border: "#ffd6a3", bg: "#ffd6a3" }
     : { text: "#ffb4ab", border: "#ffb4ab", bg: "#ffb4ab" };
+
+const scoreToGrade = (score: number | null | undefined): string => {
+  if (score == null || typeof score !== "number") return "—";
+  if (score >= 90) return "A";
+  if (score >= 80) return "B";
+  if (score >= 70) return "C";
+  if (score >= 60) return "D";
+  return "F";
+};
 
 /* Apply-method tag — email-apply jobs can auto-send; link jobs you submit on the board yourself. */
 const ApplyTag = ({ method }: { method?: string }) =>
@@ -210,7 +237,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [activeTab, setActiveTab] = useState<"keyword" | "star" | "recruiter" | "error">("keyword");
+  const [activeTab, setActiveTab] = useState<"keyword" | "star" | "recruiter" | "prep" | "error">("keyword");
   const [atsResult, setAtsResult] = useState<AtsResult | null>(null);
   const [atsLoadingId, setAtsLoadingId] = useState<number | null>(null);
   const [docLoading, setDocLoading] = useState(false);
@@ -218,6 +245,11 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
   const [recruiterReview, setRecruiterReview] = useState<RecruiterReview | null>(null);
   const [recruiterLoading, setRecruiterLoading] = useState(false);
   const [recruiterError, setRecruiterError] = useState<string | null>(null);
+
+  // Outreach & STAR Prep — separate on-demand LLM call, lazy-loaded when its tab opens.
+  const [jobPrep, setJobPrep] = useState<JobPrep | null>(null);
+  const [prepLoading, setPrepLoading] = useState(false);
+  const [prepError, setPrepError] = useState<string | null>(null);
 
   // Résumé modal
   const [resumeOpen, setResumeOpen] = useState(false);
@@ -1041,9 +1073,11 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       }
       setAtsResult(data as AtsResult);
       setActiveAtsAppId(id);
-      // New analysis → clear any recruiter feedback from the previous job.
+      // New analysis → clear any recruiter feedback and prep from the previous job.
       setRecruiterReview(null);
       setRecruiterError(null);
+      setJobPrep(null);
+      setPrepError(null);
       if (data?.domain_mismatch?.mismatched) {
         setActiveTab("error");
       } else {
@@ -1094,6 +1128,45 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       setRecruiterError(e instanceof Error ? e.message : String(e));
     } finally {
       setRecruiterLoading(false);
+    }
+  };
+
+  /* ---- Outreach & STAR Prep (separate on-demand call, lazy-loaded on its tab) ---- */
+  const openPrepTab = () => {
+    setActiveTab("prep");
+    if (jobPrep || prepLoading || activeAtsAppId == null) return;
+    // Try the cached prep first; if none, run a fresh one.
+    void loadJobPrep(activeAtsAppId, false);
+  };
+
+  const loadJobPrep = async (id: number, force: boolean) => {
+    setPrepLoading(true);
+    setPrepError(null);
+    try {
+      if (!force && atsResult) {
+        const cached = await fetch(`/ats/${encodeURIComponent(atsResult.job_ref)}/prep`);
+        if (cached.ok) {
+          setJobPrep((await cached.json()) as JobPrep);
+          return;
+        }
+      }
+      const res = await fetch(`/applications/${id}/prep`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data: any = await res.json();
+      if (!res.ok || "error" in data || data?.needs_jd) {
+        setPrepError(
+          data?.message || data?.error || `Outreach & STAR Prep generation failed (HTTP ${res.status})`
+        );
+        return;
+      }
+      setJobPrep(data as JobPrep);
+    } catch (e) {
+      setPrepError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPrepLoading(false);
     }
   };
 
@@ -1938,16 +2011,23 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                                 <div className="flex items-center gap-1 shrink-0">
                                   {typeof card.ats_score === "number" && (() => {
                                     const c = atsColor(card.ats_score);
+                                    const grade = scoreToGrade(card.ats_score);
                                     return (
                                       <span
                                         title={`ATS — keyword match with the job description${card.ats_scored_at ? `, as of ${new Date(card.ats_scored_at).toLocaleDateString()}` : ""}`}
-                                        className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold font-mono border cursor-help"
+                                        className="flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold font-mono border cursor-help"
                                         style={{ color: c.text, borderColor: `${c.border}55`, backgroundColor: `${c.bg}1a` }}
                                       >
-                                        <Gauge className="w-3 h-3" />{card.ats_score}
+                                        <Gauge className="w-3 h-3" />
+                                        <span>ATS {card.ats_score} ({grade})</span>
                                       </span>
                                     );
                                   })()}
+                                  {(card.ghost_job_risk === "medium" || card.ghost_job_risk === "high") && (
+                                    <span title={`Ghost Job Risk: ${card.ghost_job_risk.toUpperCase()}`} className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold font-mono border border-red-500/30 text-[#ffb4ab] bg-red-950/20 cursor-help">
+                                      👻 GHOST
+                                    </span>
+                                  )}
                                   {(card.news_count ?? 0) > 0 && (
                                     <span title={`${card.news_count} company news signal(s) — open ⋯`} className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold font-mono border border-[#a3e635]/40 text-[#a3e635] bg-[#a3e635]/10 cursor-help">
                                       <Newspaper className="w-3 h-3" />{card.news_count}
@@ -2277,11 +2357,31 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                         {score}
                       </span>
                       <span className="text-[10px] font-mono text-[#859397] uppercase tracking-widest mt-1">
-                        / 100 MATCH
+                        / 100 • FIT {scoreToGrade(score)}
                       </span>
                     </div>
                   </div>
                 </div>
+
+                {/* Ghost job warning banner */}
+                {(atsResult.ghost_job_risk === "medium" || atsResult.ghost_job_risk === "high") && (
+                  <div className="p-4 rounded-xl border border-red-500/20 bg-red-950/10 text-red-200 flex items-start gap-3">
+                    <span className="text-xl">👻</span>
+                    <div className="space-y-1">
+                      <h4 className="text-xs font-bold font-mono uppercase tracking-wider text-red-400">Potential Ghost Job Warning</h4>
+                      <p className="text-[11px] leading-relaxed">
+                        This job posting shows signs of being inactive, outdated, or generic. Proceed with caution.
+                      </p>
+                      {atsResult.ghost_job_reasons && atsResult.ghost_job_reasons.length > 0 && (
+                        <ul className="list-disc pl-4 space-y-0.5 text-[10px] text-red-300/80 font-mono">
+                          {atsResult.ghost_job_reasons.map((reason, i) => (
+                            <li key={i}>{reason}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {/* Tab buttons */}
                 <div className="flex border-b border-[#3c494c]/40 font-mono text-xs">
@@ -2314,6 +2414,16 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                     }`}
                   >
                     RECRUITER READ
+                  </button>
+                  <button
+                    onClick={openPrepTab}
+                    className={`px-6 py-2.5 border-b-2 font-semibold transition-all cursor-pointer ${
+                      activeTab === "prep"
+                        ? "border-[#8aebff] text-[#8aebff]"
+                        : "border-transparent text-[#859397] hover:text-[#dfe2f3]"
+                    }`}
+                  >
+                    OUTREACH & PREP
                   </button>
                   {atsResult.domain_mismatch?.mismatched && (
                     <button
@@ -2556,6 +2666,121 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                     )}
                   </div>
                 )}
+
+                {activeTab === "prep" && (
+                  <div className="space-y-4 font-mono text-xs">
+                    {prepLoading && (
+                      <div className="flex items-center gap-2 text-[#8aebff] py-6 justify-center">
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        <span>Generating custom outreach templates & STAR stories…</span>
+                      </div>
+                    )}
+                    {!prepLoading && prepError && (
+                      <div className="p-4 rounded-lg bg-[#ffb4ab]/10 border border-[#ffb4ab]/30 text-[#ffb4ab] space-y-3">
+                        <p>{prepError}</p>
+                        {activeAtsAppId != null && (
+                          <button
+                            onClick={() => loadJobPrep(activeAtsAppId, true)}
+                            className="px-3 py-1.5 rounded border border-[#ffb4ab]/40 hover:bg-[#ffb4ab]/10 transition-all cursor-pointer"
+                          >
+                            Retry
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {!prepLoading && !prepError && jobPrep && (
+                      <>
+                        {/* LinkedIn Outreach */}
+                        <div className="p-4 bg-white/5 rounded-lg border border-white/5 space-y-2">
+                          <div className="flex justify-between items-center">
+                            <span className="text-[10px] uppercase tracking-wider text-[#8aebff] font-bold">
+                              LinkedIn Connection Request (300 Chars Limit)
+                            </span>
+                            <button
+                              onClick={() => {
+                                navigator.clipboard.writeText(jobPrep.outreach_linkedin);
+                                alert("Copied LinkedIn outreach to clipboard!");
+                              }}
+                              className="px-2 py-1 rounded bg-[#8aebff]/10 hover:bg-[#8aebff]/20 text-[#8aebff] text-[10px] border border-[#8aebff]/30 cursor-pointer"
+                            >
+                              Copy Message
+                            </button>
+                          </div>
+                          <div className="p-3 bg-[#0a0e1a]/60 rounded-lg border border-white/5 text-[#dfe2f3] whitespace-pre-wrap leading-relaxed">
+                            {jobPrep.outreach_linkedin}
+                          </div>
+                          <p className="text-[9px] text-[#859397] text-right">
+                            {jobPrep.outreach_linkedin.length} / 300 characters
+                          </p>
+                        </div>
+
+                        {/* Cold Email Outreach */}
+                        <div className="p-4 bg-white/5 rounded-lg border border-white/5 space-y-2">
+                          <div className="flex justify-between items-center">
+                            <span className="text-[10px] uppercase tracking-wider text-[#8aebff] font-bold">
+                              Cold Email Outreach Template
+                            </span>
+                            <button
+                              onClick={() => {
+                                navigator.clipboard.writeText(jobPrep.outreach_email);
+                                alert("Copied email outreach to clipboard!");
+                              }}
+                              className="px-2 py-1 rounded bg-[#8aebff]/10 hover:bg-[#8aebff]/20 text-[#8aebff] text-[10px] border border-[#8aebff]/30 cursor-pointer"
+                            >
+                              Copy Email
+                            </button>
+                          </div>
+                          <div className="p-3 bg-[#0a0e1a]/60 rounded-lg border border-white/5 text-[#dfe2f3] whitespace-pre-wrap leading-relaxed max-h-60 overflow-y-auto font-sans">
+                            {jobPrep.outreach_email}
+                          </div>
+                        </div>
+
+                        {/* STAR Interview Stories */}
+                        <div className="space-y-3">
+                          <span className="text-[10px] uppercase tracking-wider text-[#859397] font-bold">
+                            Tailored STAR Interview Prep (3 Q&As)
+                          </span>
+                          {jobPrep.star_stories.map((story, i) => (
+                            <div key={i} className="p-4 bg-[#8aebff]/5 rounded-lg border border-[#8aebff]/15 space-y-3">
+                              <h4 className="font-bold text-[#8aebff] leading-relaxed text-xs">
+                                Q{i + 1}: {story.question}
+                              </h4>
+                              <div className="grid grid-cols-1 md:grid-cols-4 gap-3 pt-1 text-[11px] font-sans">
+                                <div className="p-2 bg-[#0a0e1a]/40 rounded border border-white/5">
+                                  <span className="text-[9px] font-mono font-bold uppercase text-[#ffd6a3] block mb-1">Situation</span>
+                                  <span className="text-[#dfe2f3]">{story.situation}</span>
+                                </div>
+                                <div className="p-2 bg-[#0a0e1a]/40 rounded border border-white/5">
+                                  <span className="text-[9px] font-mono font-bold uppercase text-[#ffd6a3] block mb-1">Task</span>
+                                  <span className="text-[#dfe2f3]">{story.task}</span>
+                                </div>
+                                <div className="p-2 bg-[#0a0e1a]/40 rounded border border-white/5">
+                                  <span className="text-[9px] font-mono font-bold uppercase text-[#ffd6a3] block mb-1">Action</span>
+                                  <span className="text-[#dfe2f3]">{story.action}</span>
+                                </div>
+                                <div className="p-2 bg-[#0a0e1a]/40 rounded border border-white/5">
+                                  <span className="text-[9px] font-mono font-bold uppercase text-[#a3e635] block mb-1">Result</span>
+                                  <span className="text-[#dfe2f3]">{story.result}</span>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Regenerate Button */}
+                        <div className="flex justify-end pt-2">
+                          <button
+                            onClick={() => loadJobPrep(activeAtsAppId!, true)}
+                            className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-[#dfe2f3] font-bold border border-white/10 cursor-pointer flex items-center gap-1.5"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" /> Regenerate Prep Kit
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )
+              }
 
                 {activeTab === "error" && atsResult.domain_mismatch && (
                   <div className="p-5 rounded-xl bg-[#ffb4ab]/10 border border-[#ffb4ab]/30 text-[#ffb4ab] space-y-3 font-mono text-xs">
