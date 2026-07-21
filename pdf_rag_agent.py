@@ -360,3 +360,8 @@ async def assess_document(doc_id: int, criteria: list[str], call_llm) -> dict:
     total = len(results)
     score = round(100 * met / total) if total else 0
     return {"results": results, "score": score, "met": met, "total": total}
+
+
+async def get_doc_chunks(doc_id: int) -> list[dict]:
+    """Expose document chunks for multi-source context assembly."""
+    return await _doc_chunks(doc_id)

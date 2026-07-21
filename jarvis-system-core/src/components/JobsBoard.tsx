@@ -36,6 +36,8 @@ import {
   Volume2,
   Square,
   Wrench,
+  BookOpen,
+  Globe,
 } from "lucide-react";
 import { getToken } from "../lib/auth";
 
@@ -250,6 +252,76 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
   const [jobPrep, setJobPrep] = useState<JobPrep | null>(null);
   const [prepLoading, setPrepLoading] = useState(false);
   const [prepError, setPrepError] = useState<string | null>(null);
+
+  // Gemini Live Search Dossier
+  const [dossierData, setDossierData] = useState<any | null>(null);
+  const [dossierLoading, setDossierLoading] = useState(false);
+  const [dossierError, setDossierError] = useState<string | null>(null);
+
+  // Gemini Multimodal Vision Job Scanner
+  const [scanningImage, setScanningImage] = useState(false);
+  const imageFileRef = useRef<HTMLInputElement>(null);
+
+  const openDossierTab = async (jobRef: string) => {
+    setActiveTab("dossier");
+    setDossierLoading(true);
+    setDossierError(null);
+    try {
+      const tok = getToken();
+      const res = await fetch(`/ats/${encodeURIComponent(jobRef)}/dossier`, {
+        headers: tok ? { Authorization: `Bearer ${tok}` } : {},
+      });
+      const data = await res.json();
+      if (data.dossier) {
+        setDossierData(data);
+      } else {
+        const genRes = await fetch(`/ats/${encodeURIComponent(jobRef)}/dossier`, {
+          method: "POST",
+          headers: tok ? { Authorization: `Bearer ${tok}` } : {},
+        });
+        const genData = await genRes.json();
+        if (genData.dossier) {
+          setDossierData(genData);
+        } else {
+          setDossierError(genData.error || "Failed to generate Live Search dossier.");
+        }
+      }
+    } catch {
+      setDossierError("Error reaching the dossier engine.");
+    } finally {
+      setDossierLoading(false);
+    }
+  };
+
+  const handleImageScan = async (file: File) => {
+    if (!file.type.startsWith("image/")) {
+      alert("Please upload an image file (PNG/JPG/WebP).");
+      return;
+    }
+    setScanningImage(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const tok = getToken();
+      const res = await fetch("/api/jobs/upload-image", {
+        method: "POST",
+        headers: tok ? { Authorization: `Bearer ${tok}` } : {},
+        body: fd,
+      });
+      const data = await res.json();
+      if (data.ok) {
+        alert(`Successfully scanned job: ${data.title} @ ${data.company}`);
+        fetchCards();
+      } else {
+        alert(`Image scan failed: ${data.error || "Unknown error"}`);
+      }
+    } catch {
+      alert("Error uploading image for scanning.");
+    } finally {
+      setScanningImage(false);
+      if (imageFileRef.current) imageFileRef.current.value = "";
+    }
+  };
 
   // Résumé modal
   const [resumeOpen, setResumeOpen] = useState(false);
@@ -1626,6 +1698,30 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
               ADD JOB
             </button>
 
+            {/* SCAN SCREENSHOT BUTTON */}
+            <input
+              ref={imageFileRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleImageScan(file);
+              }}
+            />
+            <button
+              onClick={() => imageFileRef.current?.click()}
+              disabled={scanningImage}
+              className="flex items-center gap-2 px-4 py-2 bg-[#c084fc]/10 border border-[#c084fc]/30 rounded-lg text-xs font-semibold hover:bg-[#c084fc]/20 transition-all text-[#c084fc] cursor-pointer disabled:opacity-50"
+              title="Upload a screenshot of a job posting or flyer to automatically create a card"
+            >
+              {scanningImage ? (
+                <><RefreshCw className="w-4 h-4 animate-spin" /> SCANNING…</>
+              ) : (
+                <><Upload className="w-4 h-4" /> SCAN SCREENSHOT</>
+              )}
+            </button>
+
             {/* Tools dropdown — collapses scan/follow-ups/interviews/standup/network/notes/résumé */}
             <div className="relative">
               <button
@@ -2425,6 +2521,16 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                   >
                     OUTREACH & PREP
                   </button>
+                  <button
+                    onClick={() => openDossierTab(atsResult.job_ref)}
+                    className={`px-6 py-2.5 border-b-2 font-semibold transition-all cursor-pointer ${
+                      activeTab === "dossier"
+                        ? "border-[#c084fc] text-[#c084fc]"
+                        : "border-transparent text-[#859397] hover:text-[#dfe2f3]"
+                    }`}
+                  >
+                    LIVE DOSSIER 🌐
+                  </button>
                   {atsResult.domain_mismatch?.mismatched && (
                     <button
                       onClick={() => setActiveTab("error")}
@@ -2779,8 +2885,69 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                       </>
                     )}
                   </div>
-                )
-              }
+                )}
+
+                {activeTab === "dossier" && (
+                  <div className="space-y-4 p-4 font-mono">
+                    <div className="flex items-center justify-between border-b border-white/5 pb-3">
+                      <div>
+                        <h3 className="text-sm font-bold text-[#dfe2f3] flex items-center gap-2">
+                          <Globe className="w-4 h-4 text-[#c084fc]" /> Pre-Interview Intelligence Dossier
+                        </h3>
+                        <p className="text-[11px] text-[#859397]">
+                          Live Google Search Grounding: recent news, Glassdoor/Reddit questions & executive notes.
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => openDossierTab(atsResult.job_ref)}
+                        disabled={dossierLoading}
+                        className="px-3 py-1.5 rounded text-xs font-bold bg-[#c084fc]/20 border border-[#c084fc]/40 text-[#c084fc] hover:bg-[#c084fc] hover:text-[#0a0e1a] cursor-pointer disabled:opacity-50"
+                      >
+                        {dossierLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : "REFRESH LIVE SCAN"}
+                      </button>
+                    </div>
+
+                    {dossierLoading ? (
+                      <div className="py-12 text-center text-xs text-[#859397] space-y-2">
+                        <RefreshCw className="w-6 h-6 animate-spin text-[#c084fc] mx-auto" />
+                        <p>Scanning Google Web, Glassdoor, and Reddit for real-time intelligence...</p>
+                      </div>
+                    ) : dossierError ? (
+                      <div className="p-3 rounded bg-red-950/20 border border-red-500/20 text-red-200 text-xs">
+                        {dossierError}
+                      </div>
+                    ) : dossierData ? (
+                      <div className="space-y-4 max-h-[380px] overflow-y-auto pr-1">
+                        <div className="p-4 rounded-xl bg-white/[0.02] border border-white/5 text-xs text-[#dfe2f3] leading-relaxed whitespace-pre-wrap">
+                          {dossierData.dossier}
+                        </div>
+
+                        {dossierData.citations && dossierData.citations.length > 0 && (
+                          <div className="space-y-2 border-t border-white/5 pt-3">
+                            <h4 className="text-[10px] uppercase font-bold text-[#c084fc]">Google Search Verified Sources:</h4>
+                            <div className="flex flex-wrap gap-2">
+                              {dossierData.citations.map((c: any, idx: number) => (
+                                <a
+                                  key={idx}
+                                  href={c.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="px-2.5 py-1 rounded bg-[#c084fc]/10 border border-[#c084fc]/20 text-[10px] text-[#c084fc] hover:bg-[#c084fc]/20 flex items-center gap-1"
+                                >
+                                  <ArrowUpRight className="w-3 h-3" /> {c.title}
+                                </a>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="py-8 text-center text-xs text-[#859397]">
+                        Click "REFRESH LIVE SCAN" to generate real-time company news & interview dossiers.
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {activeTab === "error" && atsResult.domain_mismatch && (
                   <div className="p-5 rounded-xl bg-[#ffb4ab]/10 border border-[#ffb4ab]/30 text-[#ffb4ab] space-y-3 font-mono text-xs">

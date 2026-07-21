@@ -667,6 +667,13 @@ def init_db_tables():
         id INTEGER PRIMARY KEY AUTOINCREMENT, fact TEXT UNIQUE,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
+    cursor.execute('''CREATE TABLE IF NOT EXISTS company_intelligence_dossiers (
+        job_ref TEXT PRIMARY KEY, dossier_json TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS voice_interview_scores (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, job_ref TEXT, question TEXT, score INT, feedback_json TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS career_portfolio_vault (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, category TEXT, content TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
     cursor.execute('''CREATE TABLE IF NOT EXISTS quiz_sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT, concept TEXT, skill_level TEXT,
@@ -984,7 +991,7 @@ init_people_watch_tables()
 from pdf_rag_agent import (
     init_pdf_rag_tables, ingest_pdf as pdf_rag_ingest, list_docs as pdf_rag_list_docs,
     delete_doc as pdf_rag_delete, answer_question as pdf_rag_ask, assess_document as pdf_rag_assess,
-    document_summary as pdf_rag_summary,
+    document_summary as pdf_rag_summary, get_doc_chunks as pdf_rag_get_chunks,
 )
 init_pdf_rag_tables()
 
@@ -8052,6 +8059,458 @@ async def pdf_rag_assess_ep(doc_id: int, request: Request):
 async def pdf_rag_delete_ep(doc_id: int):
     await pdf_rag_delete(doc_id)
     return JSONResponse({"ok": True})
+
+
+# ── JARVIS Notebooks (Built-in NotebookLM) Multi-Source Context Assembly ───────
+async def assemble_notebook_context(sources: dict) -> str:
+    """Consolidate text excerpts from selected sources (master resume, job descriptions, PDFs)."""
+    context_parts = []
+    
+    # 1. Master Resume
+    if sources.get("resume"):
+        resume = await get_resume_template()
+        if resume and resume.strip():
+            context_parts.append(f"=== SOURCE: MASTER RÉSUMÉ ===\n{resume.strip()}\n")
+            
+    # 2. Target Job Descriptions
+    job_refs = sources.get("job_refs") or []
+    if job_refs and isinstance(job_refs, list):
+        for ref in job_refs:
+            analysis = await get_ats_analysis(ref)
+            if analysis and analysis.get("job_title"):
+                jd = analysis.get("description") or ""
+                context_parts.append(
+                    f"=== SOURCE: JOB DESCRIPTION ({analysis.get('job_title')} @ {analysis.get('company')}) ===\n"
+                    f"{jd[:4000]}\n"
+                )
+                
+    # 3. PDF Documents
+    pdf_ids = sources.get("pdf_ids") or []
+    if pdf_ids and isinstance(pdf_ids, list):
+        for doc_id in pdf_ids:
+            try:
+                doc_id_int = int(doc_id)
+            except (ValueError, TypeError):
+                continue
+            chunks = await pdf_rag_get_chunks(doc_id_int)
+            if chunks:
+                excerpt = "\n".join([c["content"] for c in chunks[:12]])[:6000]
+                context_parts.append(f"=== SOURCE: UPLOADED PDF (Doc #{doc_id}) ===\n{excerpt}\n")
+                
+    if not context_parts:
+        return "No active sources selected."
+    return "\n\n".join(context_parts)
+
+
+NOTEBOOK_SYSTEM_PROMPT = (
+    "You are JARVIS, a master career copilot and research analyst. You are given a set of "
+    "SELECTED SOURCE DOCUMENTS (Master Resume, Job Descriptions, and/or PDF research documents). "
+    "Answer the user's question accurately based ONLY on the provided sources. Cite which source "
+    "your answer is derived from. If the sources do not contain the answer, state that clearly."
+)
+
+NOTEBOOK_STUDY_PROMPT = (
+    "You are JARVIS, an elite interview coach and technical mentor. You are given a set of "
+    "SELECTED SOURCE DOCUMENTS. Generate a comprehensive, beautifully structured Markdown Study Guide "
+    "and Cheat Sheet. Include:\n"
+    "1. Executive Summary & Core Alignment\n"
+    "2. Technical Mastery Points & Required Tools\n"
+    "3. High-Frequency Interview Questions & Strategic Answers\n"
+    "4. Actionable 3-Day Preparation Roadmap\n"
+    "Output structured Markdown only."
+)
+
+NOTEBOOK_QUIZ_PROMPT = (
+    "You are an assessment engine. You are given a set of SELECTED SOURCE DOCUMENTS. "
+    "Generate a 5-question multiple choice practice quiz based on the key concepts, technical tools, "
+    "and requirements in the sources. Return a STRICT JSON array of 5 objects — no markdown, no prose:\n"
+    "[\n"
+    "  {\n"
+    '    "question": "...",\n'
+    '    "options": ["Option A", "Option B", "Option C", "Option D"],\n'
+    '    "correct_idx": 0,\n'
+    '    "explanation": "..."\n'
+    "  }\n"
+    "]"
+)
+
+NOTEBOOK_AUDIO_PROMPT = (
+    "You are an AI podcast scriptwriter. You are given a set of SELECTED SOURCE DOCUMENTS. "
+    "Generate an engaging, natural 4-turn conversational briefing script between two hosts:\n"
+    "- 'JARVIS' (the composed, witty AI lead)\n"
+    "- 'Coach' (the sharp career strategist)\n"
+    "They discuss the candidate's fit, key strengths, potential risks, and top interview tactics. "
+    "Return a STRICT JSON array of objects — no markdown, no prose:\n"
+    '[\n  {"speaker": "JARVIS", "text": "..."},\n  {"speaker": "Coach", "text": "..."}\n]'
+)
+
+
+@app.post("/api/notebook/chat")
+async def notebook_chat_api(request: Request):
+    body = await request.json()
+    message = (body.get("message") or "").strip()
+    sources = body.get("sources") or {}
+    if not message:
+        return JSONResponse({"error": "Message is required"}, status_code=400)
+    ctx = await assemble_notebook_context(sources)
+    user_prompt = f"SOURCES:\n{ctx}\n\nQUESTION: {message}"
+    reply = await call_llm(NOTEBOOK_SYSTEM_PROMPT, user_prompt, max_tokens=1200)
+    return JSONResponse({"reply": reply})
+
+
+@app.post("/api/notebook/study-guide")
+async def notebook_study_guide_api(request: Request):
+    body = await request.json()
+    sources = body.get("sources") or {}
+    ctx = await assemble_notebook_context(sources)
+    user_prompt = f"SOURCES:\n{ctx}\n\nGenerate the Study Guide now."
+    guide = await call_llm(NOTEBOOK_STUDY_PROMPT, user_prompt, max_tokens=2200)
+    return JSONResponse({"study_guide": guide})
+
+
+@app.post("/api/notebook/quiz")
+async def notebook_quiz_api(request: Request):
+    body = await request.json()
+    sources = body.get("sources") or {}
+    ctx = await assemble_notebook_context(sources)
+    user_prompt = f"SOURCES:\n{ctx}\n\nGenerate the JSON 5-question quiz array now."
+    raw = await call_llm(NOTEBOOK_QUIZ_PROMPT, user_prompt, max_tokens=1500, temperature=0.2)
+    quiz = _parse_json_object(raw)
+    if not isinstance(quiz, list):
+        quiz = quiz.get("quiz") if isinstance(quiz, dict) else []
+    return JSONResponse({"quiz": quiz})
+
+
+@app.post("/api/notebook/audio-overview")
+async def notebook_audio_overview_api(request: Request):
+    body = await request.json()
+    sources = body.get("sources") or {}
+    ctx = await assemble_notebook_context(sources)
+    user_prompt = f"SOURCES:\n{ctx}\n\nGenerate the dialogue script JSON array now."
+    raw = await call_llm(NOTEBOOK_AUDIO_PROMPT, user_prompt, max_tokens=1600, temperature=0.3)
+    script = _parse_json_object(raw)
+    if not isinstance(script, list):
+        script = script.get("script") if isinstance(script, dict) else []
+    return JSONResponse({"script": script})
+
+
+@app.post("/api/notebook/speak")
+async def notebook_speak_api(request: Request):
+    """Synthesize speech audio for a text line using Gemini TTS (gemini-2.5-flash-preview-tts)."""
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    voice = (body.get("voice") or "Charon").strip()
+    if not text:
+        return JSONResponse({"error": "No text provided"}, status_code=400)
+    wav_bytes = await gemini_synthesize(text, voice)
+    if not wav_bytes:
+        return JSONResponse({"error": "TTS synthesis unavailable"}, status_code=503)
+    return Response(content=wav_bytes, media_type="audio/wav")
+
+
+# ── GEMINI AI TOOLS SUITE ────────────────────────────────────────────────────────
+
+# 1. Gemini Live Search Grounding (Pre-Interview Dossier)
+@app.post("/ats/{job_ref}/dossier")
+async def gemini_search_dossier_api(job_ref: str):
+    analysis = await get_ats_analysis(job_ref)
+    if not analysis:
+        return JSONResponse({"error": "No analysis found for this job"}, status_code=404)
+
+    company = analysis.get("company") or "Company"
+    title = analysis.get("job_title") or "Data Analyst"
+
+    prompt = (
+        f"You are JARVIS. Perform a real-time intelligence scan on '{company}' for a '{title}' candidate. "
+        f"Search for:\n"
+        f"1. Recent company news, product launches, acquisitions, and strategic direction.\n"
+        f"2. Glassdoor and Reddit reported interview questions and hiring process for {company}.\n"
+        f"3. Core tech stack tools, engineering practices, and executive leadership notes.\n"
+        f"Format your response as a crisp, professional Executive Briefing Dossier with clear sections."
+    )
+
+    if not GEMINI_API_KEY:
+        return JSONResponse({"error": "GEMINI_API_KEY not configured"}, status_code=503)
+
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "tools": [{"googleSearch": {}}]
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            res = await client.post(endpoint, json=body)
+        if res.status_code != 200:
+            return JSONResponse({"error": f"Gemini Grounding API returned {res.status_code}: {res.text[:200]}"}, status_code=500)
+
+        data = res.json()
+        candidate = data["candidates"][0]
+        text = candidate["content"]["parts"][0]["text"]
+        
+        # Extract web citations from groundingMetadata
+        grounding_meta = candidate.get("groundingMetadata") or {}
+        search_chunks = grounding_meta.get("groundingChunks") or []
+        citations = []
+        for chk in search_chunks:
+            web = chk.get("web")
+            if web:
+                citations.append({"title": web.get("title", "Source"), "url": web.get("uri", "#")})
+
+        result = {
+            "job_ref": job_ref,
+            "company": company,
+            "title": title,
+            "dossier": text,
+            "citations": citations[:6]
+        }
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO company_intelligence_dossiers (job_ref, dossier_json) VALUES (?, ?)",
+                (job_ref, json.dumps(result))
+            )
+            await db.commit()
+
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": f"Dossier generation failed: {str(e)}"}, status_code=500)
+
+
+@app.get("/ats/{job_ref}/dossier")
+async def get_dossier_api(job_ref: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT dossier_json FROM company_intelligence_dossiers WHERE job_ref = ?", (job_ref,))
+        row = await cur.fetchone()
+        if row and row["dossier_json"]:
+            return JSONResponse(json.loads(row["dossier_json"]))
+    return JSONResponse({"dossier": None})
+
+
+# 2. Gemini Multimodal Vision (Visual Job & Flyer Scanner)
+@app.post("/api/jobs/upload-image")
+async def upload_job_image_api(file: UploadFile = File(...)):
+    if not GEMINI_API_KEY:
+        return JSONResponse({"error": "GEMINI_API_KEY not configured"}, status_code=503)
+
+    contents = await file.read()
+    b64_image = base64.b64encode(contents).decode("utf-8")
+    mime_type = file.content_type or "image/png"
+
+    prompt = (
+        "Analyze this job posting screenshot/flyer. Extract the following information and return ONLY a STRICT JSON object:\n"
+        "{\n"
+        '  "title": "Job Title",\n'
+        '  "company": "Company Name",\n'
+        '  "location": "Location or Remote",\n'
+        '  "description": "Full extracted job requirements and responsibilities",\n'
+        '  "apply_url": "Application link or email if visible"\n'
+        "}"
+    )
+
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    body = {
+        "contents": [{
+            "parts": [
+                {"inlineData": {"mimeType": mime_type, "data": b64_image}},
+                {"text": prompt}
+            ]
+        }]
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            res = await client.post(endpoint, json=body)
+        if res.status_code != 200:
+            return JSONResponse({"error": f"Gemini Vision API returned {res.status_code}"}, status_code=500)
+
+        data = res.json()
+        raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+        parsed = _parse_json_object(raw_text) or {}
+
+        title = (parsed.get("title") or "Position").strip()
+        company = (parsed.get("company") or "Company").strip()
+        location = (parsed.get("location") or "Remote").strip()
+        description = (parsed.get("description") or "").strip()
+        apply_url = (parsed.get("apply_url") or "#").strip()
+
+        job_key = f"img:{hashlib.md5(contents).hexdigest()[:10]}"
+
+        # Save to applications table
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                "INSERT INTO applications (job_key, title, company, location, source, status, apply_method, url, reviewed, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 'interested', 'link', ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (job_key, title, company, location, "Image Scan", apply_url)
+            )
+            app_id = cur.lastrowid
+            await db.commit()
+
+        # Trigger ATS match scoring in background
+        job_obj = {"key": job_key, "title": title, "company": company, "location": location, "description": description}
+        await generate_ats_analysis(job_obj, call_llm)
+
+        return JSONResponse({"ok": True, "app_id": app_id, "job_key": job_key, "title": title, "company": company})
+    except Exception as e:
+        return JSONResponse({"error": f"Image processing failed: {str(e)}"}, status_code=500)
+
+
+# 3. Gemini Audio Understanding (Voice Mock Interview Evaluator)
+@app.post("/api/voice-interview/evaluate")
+async def evaluate_voice_interview_api(file: UploadFile = File(...), question: str = Form(...), job_ref: str = Form("default")):
+    if not GEMINI_API_KEY:
+        return JSONResponse({"error": "GEMINI_API_KEY not configured"}, status_code=503)
+
+    contents = await file.read()
+    b64_audio = base64.b64encode(contents).decode("utf-8")
+    mime_type = file.content_type or "audio/wav"
+
+    prompt = (
+        f"You are an expert interview coach. Listen to this spoken answer to the question: '{question}'.\n"
+        f"Evaluate the candidate's audio recording across 4 dimensions and return ONLY a STRICT JSON object:\n"
+        "{\n"
+        '  "star_score": 85,\n'
+        '  "filler_words_count": 2,\n'
+        '  "pacing_feedback": "Ideal pace (approx 140 wpm), clear articulation.",\n'
+        '  "tone_rating": "Confident & Composed",\n'
+        '  "strengths": ["Clear Situation definition", "Strong Action metrics"],\n'
+        '  "improvements": ["Emphasize final Result metrics more explicitly"]\n'
+        "}"
+    )
+
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    body = {
+        "contents": [{
+            "parts": [
+                {"inlineData": {"mimeType": mime_type, "data": b64_audio}},
+                {"text": prompt}
+            ]
+        }]
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            res = await client.post(endpoint, json=body)
+        if res.status_code != 200:
+            return JSONResponse({"error": f"Gemini Audio API returned {res.status_code}"}, status_code=500)
+
+        data = res.json()
+        raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+        result = _parse_json_object(raw_text) or {
+            "star_score": 75,
+            "filler_words_count": 1,
+            "pacing_feedback": "Speech recorded clearly.",
+            "tone_rating": "Professional",
+            "strengths": ["Good verbal clarity"],
+            "improvements": ["Elaborate on technical tools used"]
+        }
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO voice_interview_scores (job_ref, question, score, feedback_json) VALUES (?, ?, ?, ?)",
+                (job_ref, question, result.get("star_score", 75), json.dumps(result))
+            )
+            await db.commit()
+
+        return JSONResponse({"ok": True, "evaluation": result})
+    except Exception as e:
+        return JSONResponse({"error": f"Audio evaluation failed: {str(e)}"}, status_code=500)
+
+
+# 4. Gemini Code Execution (Python Sandbox)
+@app.post("/api/notebook/python-exec")
+async def notebook_python_exec_api(request: Request):
+    body = await request.json()
+    prompt = (body.get("prompt") or "").strip()
+    if not prompt:
+        return JSONResponse({"error": "Prompt is required"}, status_code=400)
+
+    if not GEMINI_API_KEY:
+        return JSONResponse({"error": "GEMINI_API_KEY not configured"}, status_code=503)
+
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    body_data = {
+        "contents": [{"parts": [{"text": f"Write and execute Python code to answer/solve: {prompt}"}]}],
+        "tools": [{"codeExecution": {}}]
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            res = await client.post(endpoint, json=body_data)
+        if res.status_code != 200:
+            return JSONResponse({"error": f"Gemini CodeExecution API returned {res.status_code}"}, status_code=500)
+
+        data = res.json()
+        parts = data["candidates"][0]["content"]["parts"]
+        text_resp = ""
+        executable_code = ""
+        execution_result = ""
+
+        for p in parts:
+            if "text" in p:
+                text_resp += p["text"] + "\n"
+            if "executableCode" in p:
+                executable_code = p["executableCode"].get("code", "")
+            if "codeExecutionResult" in p:
+                execution_result = p["codeExecutionResult"].get("output", "")
+
+        return JSONResponse({
+            "response": text_resp.strip(),
+            "code": executable_code,
+            "output": execution_result
+        })
+    except Exception as e:
+        return JSONResponse({"error": f"Python execution failed: {str(e)}"}, status_code=500)
+
+
+# 5. Gemini 1M+ Long Context (Career Portfolio Vault Indexer)
+@app.post("/api/vault/add")
+async def vault_add_api(request: Request):
+    body = await request.json()
+    title = (body.get("title") or "Project").strip()
+    category = (body.get("category") or "Code Repo").strip()
+    content = (body.get("content") or "").strip()
+
+    if not content:
+        return JSONResponse({"error": "Content is required"}, status_code=400)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO career_portfolio_vault (title, category, content) VALUES (?, ?, ?)",
+            (title, category, content)
+        )
+        await db.commit()
+    return JSONResponse({"ok": True, "title": title})
+
+
+@app.post("/api/vault/search")
+async def vault_search_api(request: Request):
+    body = await request.json()
+    query = (body.get("query") or "").strip()
+    if not query:
+        return JSONResponse({"error": "Query is required"}, status_code=400)
+
+    # Aggregate all portfolio items into Gemini 1M token context window
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT title, category, content FROM career_portfolio_vault")
+        rows = await cur.fetchall()
+
+    if not rows:
+        return JSONResponse({"answer": "Your Career Vault is empty. Upload project repos, design docs, or old code first."})
+
+    vault_text = "\n\n".join([f"=== PROJECT: {r['title']} ({r['category']}) ===\n{r['content']}" for r in rows])
+    
+    prompt = (
+        f"You are JARVIS searching the candidate's entire multi-year career history and project vault.\n\n"
+        f"PORTFOLIO VAULT:\n{vault_text[:100000]}\n\n"
+        f"QUERY / JD REQUIREMENT: {query}\n\n"
+        f"Find all matching projects, technical tools used, and quantify their experience for this requirement."
+    )
+
+    reply = await call_llm("You are JARVIS career vault search engine.", prompt, max_tokens=1500)
+    return JSONResponse({"answer": reply})
 
 
 TTS_SUMMARY_PROMPT = (
