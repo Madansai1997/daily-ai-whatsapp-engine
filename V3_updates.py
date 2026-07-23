@@ -17,6 +17,22 @@ if SAFE_MODE:
 import db_compat as aiosqlite
 import asyncio
 import json
+
+def _parse_json_object(raw: str):
+    raw = (raw or "").strip()
+    start_obj = raw.find("{")
+    start_arr = raw.find("[")
+    if start_obj == -1 and start_arr == -1:
+        raise ValueError("no JSON object or array found")
+    if start_obj == -1:
+        start = start_arr
+    elif start_arr == -1:
+        start = start_obj
+    else:
+        start = min(start_obj, start_arr)
+    obj, _ = json.JSONDecoder().raw_decode(raw[start:])
+    return obj
+
 import threading
 import random
 import requests
