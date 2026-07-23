@@ -893,7 +893,8 @@ def init_db_tables():
         contact_id INTEGER,
         seen_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     for _ddl in ("ALTER TABLE influencer_posts ADD COLUMN domain TEXT DEFAULT ''",
-                 "ALTER TABLE influencer_posts ADD COLUMN contact_id INTEGER"):
+                 "ALTER TABLE influencer_posts ADD COLUMN contact_id INTEGER",
+                 "ALTER TABLE influencer_posts ADD COLUMN grounded_context TEXT"):
         try:
             cursor.execute(_ddl)
         except Exception:
@@ -6893,6 +6894,92 @@ async def trends_brief_get_api(idea_id: int):
     return JSONResponse(brief)
 
 
+@app.post("/api/trends/{idea_id}/market-validation")
+async def trends_market_validation_generate_api(idea_id: int):
+    """Generate live search grounded market validation for a trend idea."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT title, summary, pain FROM trend_ideas WHERE id = ?", (idea_id,)
+        )
+        row = await cur.fetchone()
+    if not row:
+        return JSONResponse({"error": "Trend idea not found"}, status_code=404)
+    
+    title = row["title"]
+    summary = row["summary"]
+    pain = row["pain"] or ""
+
+    prompt = (
+        f"You are JARVIS. Perform a real-time Google Search market validation for the following app idea:\n"
+        f"TITLE: {title}\n"
+        f"SUMMARY/PAIN: {summary} (Pain: {pain})\n\n"
+        f"Search for:\n"
+        f"1. Existing apps, SaaS platforms, or Chrome extensions solving this exact pain point.\n"
+        f"2. GitHub open-source repositories doing similar things.\n"
+        f"3. Highlight 3 direct competitors, their pricing models (if visible), and potential product gaps we can exploit.\n"
+        f"Format your response as a professional Market Validation & Competitor Brief."
+    )
+
+    if not GEMINI_API_KEY:
+        return JSONResponse({"error": "GEMINI_API_KEY not configured"}, status_code=503)
+
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "tools": [{"googleSearch": {}}]
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            res = await client.post(endpoint, json=body)
+        if res.status_code != 200:
+            return JSONResponse({"error": f"Gemini Grounding API returned {res.status_code}"}, status_code=500)
+
+        data = res.json()
+        candidate = data["candidates"][0]
+        text = candidate["content"]["parts"][0]["text"]
+        
+        grounding_meta = candidate.get("groundingMetadata") or {}
+        search_chunks = grounding_meta.get("groundingChunks") or []
+        citations = []
+        for chk in search_chunks:
+            web = chk.get("web")
+            if web:
+                citations.append({"title": web.get("title", "Source"), "url": web.get("uri", "#")})
+
+        result = {
+            "validation": text,
+            "citations": citations[:6]
+        }
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE trend_ideas SET market_validation = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(result), datetime.now(timezone.utc).isoformat(), idea_id)
+            )
+            await db.commit()
+
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": f"Validation failed: {str(e)}"}, status_code=500)
+
+
+@app.get("/api/trends/{idea_id}/market-validation")
+async def trends_market_validation_get_api(idea_id: int):
+    """Retrieve cached market validation for a trend idea."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT market_validation FROM trend_ideas WHERE id = ?", (idea_id,))
+        row = await cur.fetchone()
+    if not row or not row["market_validation"]:
+        return JSONResponse({"error": "No market validation found"}, status_code=404)
+    try:
+        return JSONResponse(json.loads(row["market_validation"]))
+    except Exception:
+        return JSONResponse({"error": "Invalid validation cache"}, status_code=500)
+
+
 @app.post("/cron/trend-scan")
 async def cron_trend_scan(token: str = ""):
     """Weekly external trigger (cron-job.org). Fetches + clusters + scores app ideas."""
@@ -10413,6 +10500,95 @@ async def api_influencer_post_insight(post_id: str):
     result = await generate_post_insight(call_llm, post_id)
     _malloc_trim()  # release the video transcript / article text pulled during analysis
     return JSONResponse(result)
+
+
+@app.post("/api/influencers/post/{post_id}/ground")
+async def api_influencer_post_ground(post_id: str):
+    """On-demand: perform real-time Google Search Grounding to verify / gather context on an influencer update."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT title, summary, name FROM influencer_posts WHERE post_id = ?", (post_id,)
+        )
+        row = await cur.fetchone()
+    if not row:
+        return JSONResponse({"error": "Post not found"}, status_code=404)
+
+    title = row["title"]
+    summary = row["summary"] or ""
+    author = row["name"] or "Influencer"
+
+    prompt = (
+        f"You are JARVIS. Perform a real-time Google Search context validation and fact-check for this update "
+        f"posted by {author}:\n"
+        f"TITLE: {title}\n"
+        f"CONTENT: {summary}\n\n"
+        f"Search for:\n"
+        f"1. Official documentation, release announcements, or GitHub repository activity relating to this update.\n"
+        f"2. Validate the claims and state of the technology mentioned.\n"
+        f"3. Provide clear links to official sources, doc pages, or repository URLs.\n"
+        f"Format your response as a professional Factual Context & Grounding Brief."
+    )
+
+    if not GEMINI_API_KEY:
+        return JSONResponse({"error": "GEMINI_API_KEY not configured"}, status_code=503)
+
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "tools": [{"googleSearch": {}}]
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            res = await client.post(endpoint, json=body)
+        if res.status_code != 200:
+            return JSONResponse({"error": f"Gemini Grounding API returned {res.status_code}"}, status_code=500)
+
+        data = res.json()
+        candidate = data["candidates"][0]
+        text = candidate["content"]["parts"][0]["text"]
+        
+        grounding_meta = candidate.get("groundingMetadata") or {}
+        search_chunks = grounding_meta.get("groundingChunks") or []
+        citations = []
+        for chk in search_chunks:
+            web = chk.get("web")
+            if web:
+                citations.append({"title": web.get("title", "Source"), "url": web.get("uri", "#")})
+
+        result = {
+            "grounded_context": text,
+            "citations": citations[:6]
+        }
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE influencer_posts SET grounded_context = ? WHERE post_id = ?",
+                (json.dumps(result), post_id)
+            )
+            await db.commit()
+
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": f"Grounding failed: {str(e)}"}, status_code=500)
+
+
+@app.get("/api/influencers/post/{post_id}/ground")
+async def api_influencer_post_ground_get(post_id: str):
+    """Retrieve cached grounding context for an influencer post."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT grounded_context FROM influencer_posts WHERE post_id = ?", (post_id,)
+        )
+        row = await cur.fetchone()
+    if not row or not row["grounded_context"]:
+        return JSONResponse({"error": "No grounding context found"}, status_code=404)
+    try:
+        return JSONResponse(json.loads(row["grounded_context"]))
+    except Exception:
+        return JSONResponse({"error": "Invalid grounding context cache"}, status_code=500)
 
 
 @app.get("/api/influencers/domains")

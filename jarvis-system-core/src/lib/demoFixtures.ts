@@ -256,6 +256,20 @@ function fixtureFor(path: string): unknown | null {
     output: "Mean: 55.9\nStd Dev: 25.1\n95th Pct: 89.55"
   };
   if (p === "/api/vault/search") return { answer: "JARVIS Vault Match: Found 2 past projects matching this requirement:\n1. **WASM Data Profiler (2025)**: Built in-browser profiling using Pandas and WebAssembly.\n2. **PDF RAG Engine (2026)**: Designed page-chunked BM25 lexical retrieval and Gemini LLM verification." };
+  if (p.includes("/market-validation")) return {
+    validation: "## Live Google Search Grounded Validation\n\n### 1. Existing Solutions\n- **ProductivityHub (SaaS)**: A web portal mapping calendar tasks to daily priority slots.\n- **TaskSync (Chrome Extension)**: Simple side-panel helper but lacks LLM prioritization.\n\n### 2. GitHub Repositories\n- `priority-schedule-optimizer` (Python, 450 stars)\n- `local-calendar-rag` (NodeJS, 120 stars)\n\n### 3. Competitor Gaps\nNone of the existing tools support offline privacy-first local databases or outbound WhatsApp scheduling reminders. Building a WhatsApp-native agent gives us a 10x distribution advantage.",
+    citations: [
+      { title: "ProductivityHub Official Page", url: "#" },
+      { title: "GitHub task-sync repo", url: "#" }
+    ]
+  };
+  if (p.includes("/ground")) return {
+    grounded_context: "## Factual Grounded Context\n\n- **Official Status**: Verified release of Vite 6.0.0-beta.2 on July 15, 2026.\n- **Breaking Changes**: Introduces deprecation of legacy CSS import syntax and upgrades to Rollup 4.\n- **Performance**: Up to 18% improvement in dev cold-start timings.",
+    citations: [
+      { title: "Vite 6 Changelog & Release Notes", url: "#" },
+      { title: "Vite Official Documentation", url: "#" }
+    ]
+  };
   return null;
 }
 

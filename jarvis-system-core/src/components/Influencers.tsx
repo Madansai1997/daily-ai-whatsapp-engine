@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { RefreshCw, Plus, X, Trash2, Radio, Youtube, Instagram, Twitter, Rss, CheckCircle2, AlertTriangle, ExternalLink, CheckCheck, Compass, Sparkles, ChevronDown, ChevronRight } from "lucide-react";
+import { RefreshCw, Plus, X, Trash2, Radio, Youtube, Instagram, Twitter, Rss, CheckCircle2, AlertTriangle, ExternalLink, CheckCheck, Compass, Sparkles, ChevronDown, ChevronRight, Globe } from "lucide-react";
 
 interface Influencer {
   id: number;
@@ -57,6 +57,50 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
   const [feedLoading, setFeedLoading] = useState(true);
   const [showFiltered, setShowFiltered] = useState(false);
   const [insights, setInsights] = useState<Record<string, Insight>>({});
+
+  const [groundingState, setGroundingState] = useState<Record<string, { open?: boolean; loading?: boolean; context?: string; citations?: any[]; error?: string; }>>({});
+
+  const toggleGrounding = async (p: FeedPost) => {
+    const cur = groundingState[p.post_id];
+    if (cur?.open) {
+      setGroundingState((s) => ({ ...s, [p.post_id]: { ...cur, open: false } }));
+      return;
+    }
+    if (cur?.context) {
+      setGroundingState((s) => ({ ...s, [p.post_id]: { ...cur, open: true } }));
+      return;
+    }
+    setGroundingState((s) => ({ ...s, [p.post_id]: { open: true, loading: true } }));
+    try {
+      const checkRes = await fetch(`/api/influencers/post/${encodeURIComponent(p.post_id)}/ground`);
+      if (checkRes.ok) {
+        const d = await checkRes.json();
+        setGroundingState((s) => ({
+          ...s,
+          [p.post_id]: { open: true, context: d.grounded_context, citations: d.citations }
+        }));
+        return;
+      }
+      const res = await fetch(`/api/influencers/post/${encodeURIComponent(p.post_id)}/ground`, { method: "POST" });
+      const d = await res.json();
+      if (d.grounded_context) {
+        setGroundingState((s) => ({
+          ...s,
+          [p.post_id]: { open: true, context: d.grounded_context, citations: d.citations }
+        }));
+      } else {
+        setGroundingState((s) => ({
+          ...s,
+          [p.post_id]: { open: true, error: d.error || "Failed to generate grounding brief." }
+        }));
+      }
+    } catch {
+      setGroundingState((s) => ({
+        ...s,
+        [p.post_id]: { open: true, error: "Failed to connect to grounding engine." }
+      }));
+    }
+  };
 
   // "What's in it + use it in your project" — brief summary + a concrete project takeaway,
   // generated on demand and cached on the server so re-opening is instant.
@@ -526,6 +570,11 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
                                     <Sparkles className="w-3 h-3" /> {open ? "hide" : (ins?.brief || p.brief ? "brief + use it" : "what's in it + use it")}
                                     <ChevronDown className={`w-3 h-3 transition-transform ${open ? "rotate-180" : ""}`} />
                                   </button>
+                                  <button onClick={() => toggleGrounding(p)}
+                                    className="text-[10px] font-mono text-[#c084fc]/90 bg-[#c084fc]/10 hover:bg-[#c084fc]/20 px-1.5 py-0.5 rounded inline-flex items-center gap-1 cursor-pointer transition-all">
+                                    <Globe className="w-3 h-3" /> Verify Live Context
+                                    <ChevronDown className={`w-3 h-3 transition-transform ${groundingState[p.post_id]?.open ? "rotate-180" : ""}`} />
+                                  </button>
                                 </div>
                               </div>
                             </div>
@@ -551,6 +600,44 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
                                       <p className="text-[9px] font-mono text-[#859397]/70 pt-1 border-t border-white/5">
                                         {SOURCE_LABEL[(ins?.source || p.insight_source) as string] || (ins?.source || p.insight_source)}
                                       </p>
+                                    )}
+                                  </>
+                                )}
+                              </div>
+                            )}
+                            {groundingState[p.post_id]?.open && (
+                              <div className="mt-2 ml-5 rounded-lg border border-[#c084fc]/15 bg-[#c084fc]/[0.04] p-3 space-y-2 font-mono text-xs">
+                                {groundingState[p.post_id]?.loading ? (
+                                  <div className="flex items-center gap-2 text-[11px] text-[#859397]">
+                                    <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Verifying facts and documentation...
+                                  </div>
+                                ) : groundingState[p.post_id]?.error ? (
+                                  <p className="text-[11px] text-red-400">{groundingState[p.post_id]?.error}</p>
+                                ) : (
+                                  <>
+                                    <div>
+                                      <div className="text-[9px] uppercase tracking-widest text-[#c084fc] mb-1">Factual Context & Grounding Brief</div>
+                                      <p className="text-[12px] text-[#dfe2f3] leading-relaxed whitespace-pre-wrap">
+                                        {groundingState[p.post_id]?.context}
+                                      </p>
+                                    </div>
+                                    {groundingState[p.post_id]?.citations && (groundingState[p.post_id]?.citations || []).length > 0 && (
+                                      <div className="pt-2 border-t border-white/5 space-y-1">
+                                        <div className="text-[9px] uppercase tracking-widest text-[#859397]">Verified Documentation URLs:</div>
+                                        <div className="flex flex-wrap gap-2 pt-1">
+                                          {(groundingState[p.post_id]?.citations || []).map((cit: any, i: number) => (
+                                            <a
+                                              key={i}
+                                              href={cit.url}
+                                              target="_blank"
+                                              rel="noopener noreferrer"
+                                              className="px-2 py-0.5 rounded bg-[#c084fc]/10 border border-[#c084fc]/20 text-[10px] text-[#c084fc] hover:bg-[#c084fc]/20 flex items-center gap-1"
+                                            >
+                                              {cit.title}
+                                            </a>
+                                          ))}
+                                        </div>
+                                      </div>
                                     )}
                                   </>
                                 )}

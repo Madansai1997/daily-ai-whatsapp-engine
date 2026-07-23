@@ -145,6 +145,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- feat: implement Google Search Grounding for Trend Lab validation and Influencer posts context scan _(2026-07-23)_
 - feat: implement 5-tool Gemini AI suite (grounded dossiers, vision OCR, voice interview coach, python sandbox, and 1M-token vault) _(2026-07-21)_
 - feat: implement Career-Ops Feature Suite (A-F fit grading, ghost job warnings, LinkedIn/email outreach, and STAR interview prep) _(2026-07-18)_
 - fix(demo): Align influencer feed array format and mock trends pulse endpoint _(2026-07-17)_
@@ -156,10 +157,9 @@ npm install && npm run build     # served by the engine at /console
 - fix(analyst): Convert boolean values to strings in renderChart for Recharts support _(2026-07-17)_
 - feat(analyst): Add multi-dataset projects, data quality checks, custom schemas, and direct turn persistence _(2026-07-17)_
 - feat(analyst): multi-dataset projects — combine & join many sheets in the browser _(2026-07-17)_
-- build(readme): auto-changelog via post-commit hook so it includes the current commit _(2026-07-17)_
 <!-- /AUTO:changelog -->
 
 ---
 
-_Last updated: 2026-07-21 · this README's inventory and changelog are auto-maintained by
+_Last updated: 2026-07-23 · this README's inventory and changelog are auto-maintained by
 `scripts/gen_readme.py` on every commit._

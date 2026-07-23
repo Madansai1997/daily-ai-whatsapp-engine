@@ -123,11 +123,12 @@ def init_trend_lab_tables():
         created_at TEXT,
         updated_at TEXT
     )''')
-    # On-demand MVP build brief (JSON), generated per idea — added via migration for old DBs.
     try:
         cols = [r[1] for r in cur.execute("PRAGMA table_info(trend_ideas)").fetchall()]
         if "build_brief" not in cols:
             cur.execute("ALTER TABLE trend_ideas ADD COLUMN build_brief TEXT")
+        if "market_validation" not in cols:
+            cur.execute("ALTER TABLE trend_ideas ADD COLUMN market_validation TEXT")
     except Exception:
         pass
     conn.commit()

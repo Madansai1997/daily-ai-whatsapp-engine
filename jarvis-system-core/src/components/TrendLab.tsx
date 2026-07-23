@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import {
   FlaskConical, RefreshCw, TrendingUp, Star, Hammer, X, ChevronDown, ChevronUp,
-  MessageSquare, ExternalLink, FileText, Activity, Lightbulb, Radio,
+  MessageSquare, ExternalLink, FileText, Activity, Lightbulb, Radio, Globe,
 } from "lucide-react";
 
 interface PulseItem { type: string; title: string; summary: string; url: string; source: string; domain: string; score: number; when: string; }
@@ -71,6 +71,36 @@ export default function TrendLab() {
   const [brief, setBrief] = useState<Brief | null>(null);
   const [briefLoading, setBriefLoading] = useState(false);
   const [briefError, setBriefError] = useState("");
+
+  // Live Google Search Grounding for Market Validation
+  const [activeBriefTab, setActiveBriefTab] = useState<"brief" | "market">("brief");
+  const [validationData, setValidationData] = useState<any | null>(null);
+  const [validationLoading, setValidationLoading] = useState(false);
+  const [validationError, setValidationError] = useState("");
+
+  const openMarketValidation = async (idea: Idea, force = false) => {
+    setActiveBriefTab("market");
+    setValidationData(null);
+    setValidationError("");
+    setValidationLoading(true);
+    try {
+      if (!force) {
+        const check = await fetch(`/api/trends/${idea.id}/market-validation`);
+        if (check.ok) {
+          setValidationData(await check.json());
+          return;
+        }
+      }
+      const res = await fetch(`/api/trends/${idea.id}/market-validation`, { method: "POST" });
+      const d = await res.json();
+      if (!res.ok || d.error) throw new Error(d.error || "Failed to generate market validation");
+      setValidationData(d);
+    } catch (err: any) {
+      setValidationError(err.message || String(err));
+    } finally {
+      setValidationLoading(false);
+    }
+  };
   // Unified cross-source pulse (Trend Lab ideas + influencer feed)
   const [pulse, setPulse] = useState<PulseItem[]>([]);
   const [pulseOpen, setPulseOpen] = useState(false);
@@ -123,6 +153,7 @@ export default function TrendLab() {
   };
 
   const openBrief = async (idea: Idea, forceNew = false) => {
+    setActiveBriefTab("brief");
     setBriefFor(idea);
     setBrief(null);
     setBriefError("");
@@ -360,66 +391,137 @@ export default function TrendLab() {
       {briefFor && (
         <div className="fixed inset-0 bg-[#0a0e1a]/80 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={() => setBriefFor(null)}>
           <div className="w-full max-w-2xl glass-panel rounded-2xl border border-[#22d3ee]/30 shadow-2xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
-            <div className="p-5 border-b border-white/5 bg-[#161e2e]/80 flex items-start justify-between gap-3">
-              <div className="flex items-center gap-2.5">
-                <FileText className="w-5 h-5 text-[#22d3ee]" />
-                <div>
-                  <h2 className="text-sm font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">Build Brief</h2>
-                  <p className="text-[11px] text-[#859397]">{briefFor.title}</p>
-                </div>
-              </div>
-              <button onClick={() => setBriefFor(null)} className="p-1.5 rounded-full hover:bg-white/5 text-[#bbc9cd] cursor-pointer"><X className="w-4.5 h-4.5" /></button>
+            {/* Tabs Header */}
+            <div className="flex border-b border-white/5 font-mono text-xs px-5 bg-black/20">
+              <button
+                onClick={() => setActiveBriefTab("brief")}
+                className={`px-5 py-3 border-b-2 font-bold tracking-wider transition-all cursor-pointer ${
+                  activeBriefTab === "brief"
+                    ? "border-[#22d3ee] text-[#22d3ee] bg-[#22d3ee]/5"
+                    : "border-transparent text-[#859397] hover:text-[#dfe2f3]"
+                }`}
+              >
+                BUILD BRIEF
+              </button>
+              <button
+                onClick={() => openMarketValidation(briefFor)}
+                className={`px-5 py-3 border-b-2 font-bold tracking-wider transition-all cursor-pointer flex items-center gap-1.5 ${
+                  activeBriefTab === "market"
+                    ? "border-[#c084fc] text-[#c084fc] bg-[#c084fc]/5"
+                    : "border-transparent text-[#859397] hover:text-[#dfe2f3]"
+                }`}
+              >
+                <Globe className="w-3.5 h-3.5" /> LIVE MARKET SCAN
+              </button>
             </div>
-            <div className="p-5 overflow-y-auto space-y-4 font-mono text-xs">
-              {briefLoading && (
-                <div className="flex items-center gap-2 text-[#22d3ee] py-8 justify-center"><RefreshCw className="w-4 h-4 animate-spin" /> Drafting your MVP plan…</div>
-              )}
-              {!briefLoading && briefError && (
-                <div className="p-4 rounded-lg bg-[#ffb4ab]/10 border border-[#ffb4ab]/30 text-[#ffb4ab]">{briefError}
-                  <button onClick={() => openBrief(briefFor, true)} className="ml-3 underline cursor-pointer">Retry</button>
-                </div>
-              )}
-              {!briefLoading && brief && (
+
+            <div className="p-5 overflow-y-auto space-y-4 font-mono text-xs flex-1">
+              {activeBriefTab === "brief" ? (
                 <>
-                  <div>
-                    <span className="text-[10px] uppercase tracking-wider text-[#22d3ee]">MVP features (v1)</span>
-                    <ul className="mt-1.5 space-y-1">
-                      {brief.mvp_features?.map((f, i) => (
-                        <li key={i} className="flex items-start gap-2 text-[#dfe2f3]"><span className="text-[#22d3ee]">▹</span>{f}</li>
-                      ))}
-                    </ul>
-                  </div>
-                  <div>
-                    <span className="text-[10px] uppercase tracking-wider text-[#859397]">Stack (free-tier)</span>
-                    <div className="mt-1.5 flex flex-wrap gap-1.5">
-                      {brief.stack?.map((s, i) => (
-                        <span key={i} className="px-2 py-0.5 rounded border border-white/10 bg-white/5 text-[#bbc9cd]">{s}</span>
-                      ))}
-                    </div>
-                  </div>
-                  {brief.differentiator && (
-                    <div><span className="text-[10px] uppercase tracking-wider text-[#859397]">Differentiator</span><p className="mt-1 text-[#dfe2f3] leading-relaxed">{brief.differentiator}</p></div>
+                  {briefLoading && (
+                    <div className="flex items-center gap-2 text-[#22d3ee] py-8 justify-center"><RefreshCw className="w-4 h-4 animate-spin" /> Drafting your MVP plan…</div>
                   )}
-                  {brief.monetization && (
-                    <div><span className="text-[10px] uppercase tracking-wider text-[#a3e635]">Monetisation</span><p className="mt-1 text-[#dfe2f3] leading-relaxed">{brief.monetization}</p></div>
-                  )}
-                  {brief.v1_scope && (
-                    <div className="p-3 rounded-lg bg-[#22d3ee]/5 border border-[#22d3ee]/15"><span className="text-[10px] uppercase tracking-wider text-[#22d3ee]">Ship first (v1 scope)</span><p className="mt-1 text-[#dfe2f3] leading-relaxed">{brief.v1_scope}</p></div>
-                  )}
-                  {brief.first_steps?.length > 0 && (
-                    <div>
-                      <span className="text-[10px] uppercase tracking-wider text-[#859397]">First 3 steps</span>
-                      <ol className="mt-1.5 space-y-1">
-                        {brief.first_steps.map((s, i) => (
-                          <li key={i} className="flex items-start gap-2 text-[#dfe2f3]"><span className="flex-shrink-0 w-4 h-4 rounded-full bg-[#22d3ee]/15 text-[#22d3ee] text-[9px] font-bold flex items-center justify-center mt-0.5">{i + 1}</span>{s}</li>
-                        ))}
-                      </ol>
+                  {!briefLoading && briefError && (
+                    <div className="p-4 rounded-lg bg-[#ffb4ab]/10 border border-[#ffb4ab]/30 text-[#ffb4ab]">{briefError}
+                      <button onClick={() => openBrief(briefFor, true)} className="ml-3 underline cursor-pointer">Retry</button>
                     </div>
                   )}
-                  <div className="pt-1">
-                    <button onClick={() => openBrief(briefFor, true)} className="text-[11px] text-[#8aebff] hover:underline flex items-center gap-1 cursor-pointer"><RefreshCw className="w-3 h-3" /> Regenerate</button>
-                  </div>
+                  {!briefLoading && brief && (
+                    <>
+                      <div>
+                        <span className="text-[10px] uppercase tracking-wider text-[#22d3ee]">MVP features (v1)</span>
+                        <ul className="mt-1.5 space-y-1">
+                          {brief.mvp_features?.map((f, i) => (
+                            <li key={i} className="flex items-start gap-2 text-[#dfe2f3]"><span className="text-[#22d3ee]">▹</span>{f}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div>
+                        <span className="text-[10px] uppercase tracking-wider text-[#859397]">Stack (free-tier)</span>
+                        <div className="mt-1.5 flex flex-wrap gap-1.5">
+                          {brief.stack?.map((s, i) => (
+                            <span key={i} className="px-2 py-0.5 rounded border border-white/10 bg-white/5 text-[#bbc9cd]">{s}</span>
+                          ))}
+                        </div>
+                      </div>
+                      {brief.differentiator && (
+                        <div><span className="text-[10px] uppercase tracking-wider text-[#859397]">Differentiator</span><p className="mt-1 text-[#dfe2f3] leading-relaxed">{brief.differentiator}</p></div>
+                      )}
+                      {brief.monetization && (
+                        <div><span className="text-[10px] uppercase tracking-wider text-[#a3e635]">Monetisation</span><p className="mt-1 text-[#dfe2f3] leading-relaxed">{brief.monetization}</p></div>
+                      )}
+                      {brief.v1_scope && (
+                        <div className="p-3 rounded-lg bg-[#22d3ee]/5 border border-[#22d3ee]/15"><span className="text-[10px] uppercase tracking-wider text-[#22d3ee]">Ship first (v1 scope)</span><p className="mt-1 text-[#dfe2f3] leading-relaxed">{brief.v1_scope}</p></div>
+                      )}
+                      {brief.first_steps?.length > 0 && (
+                        <div>
+                          <span className="text-[10px] uppercase tracking-wider text-[#859397]">First 3 steps</span>
+                          <ol className="mt-1.5 space-y-1">
+                            {brief.first_steps.map((s, i) => (
+                              <li key={i} className="flex items-start gap-2 text-[#dfe2f3]"><span className="flex-shrink-0 w-4 h-4 rounded-full bg-[#22d3ee]/15 text-[#22d3ee] text-[9px] font-bold flex items-center justify-center mt-0.5">{i + 1}</span>{s}</li>
+                            ))}
+                          </ol>
+                        </div>
+                      )}
+                      <div className="pt-1">
+                        <button onClick={() => openBrief(briefFor, true)} className="text-[11px] text-[#8aebff] hover:underline flex items-center gap-1 cursor-pointer"><RefreshCw className="w-3 h-3" /> Regenerate</button>
+                      </div>
+                    </>
+                  )}
                 </>
+              ) : (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                    <span className="text-[10px] uppercase tracking-wider text-[#c084fc]">Market Analysis & Competitor Intel</span>
+                    <button
+                      onClick={() => openMarketValidation(briefFor, true)}
+                      disabled={validationLoading}
+                      className="px-2.5 py-1 rounded text-[10px] font-bold bg-[#c084fc]/20 border border-[#c084fc]/40 text-[#c084fc] hover:bg-[#c084fc]/30 cursor-pointer disabled:opacity-50"
+                    >
+                      RE-SCAN MARKET
+                    </button>
+                  </div>
+
+                  {validationLoading ? (
+                    <div className="py-12 text-center text-xs text-[#859397] space-y-2">
+                      <RefreshCw className="w-6 h-6 animate-spin text-[#c084fc] mx-auto" />
+                      <p>Searching Google Search, GitHub, and competitor listings...</p>
+                    </div>
+                  ) : validationError ? (
+                    <div className="p-3 rounded bg-red-950/20 border border-red-500/20 text-red-200 text-xs">
+                      {validationError}
+                    </div>
+                  ) : validationData ? (
+                    <div className="space-y-4">
+                      <div className="p-4 rounded-xl bg-white/[0.02] border border-white/5 text-xs text-[#dfe2f3] leading-relaxed whitespace-pre-wrap">
+                        {validationData.validation}
+                      </div>
+
+                      {validationData.citations && validationData.citations.length > 0 && (
+                        <div className="space-y-2 border-t border-white/5 pt-3">
+                          <h4 className="text-[10px] uppercase font-bold text-[#c084fc]">Grounded Sources found:</h4>
+                          <div className="flex flex-wrap gap-2">
+                            {validationData.citations.map((c: any, idx: number) => (
+                              <a
+                                key={idx}
+                                href={c.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="px-2.5 py-1 rounded bg-[#c084fc]/10 border border-[#c084fc]/20 text-[10px] text-[#c084fc] hover:bg-[#c084fc]/20 flex items-center gap-1"
+                              >
+                                {c.title}
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="py-8 text-center text-xs text-[#859397]">
+                      Click "RE-SCAN MARKET" to search Google Grounding for competitor analysis.
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           </div>
