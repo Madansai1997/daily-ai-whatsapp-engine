@@ -7061,6 +7061,60 @@ async def api_search_now(request: Request):
     return JSONResponse({"ok": True, **res})
 
 
+@app.post("/api/job-scout/ats-search")
+async def api_job_scout_ats_search(request: Request):
+    """Perform real-time Google Search Grounding to find direct applicant tracking system (ATS) job postings."""
+    body = await request.json()
+    role = (body.get("role") or "Data Analyst").strip()
+    experience = (body.get("experience") or "2+ years").strip()
+    location = (body.get("location") or "India").strip()
+
+    prompt = (
+        f"You are JARVIS. Find direct company website job postings for a '{role}' role "
+        f"with '{experience}' experience in '{location}'.\n"
+        f"Search across major applicant tracking systems (Greenhouse, Lever, Workday, Ashby, SmartRecruiters) "
+        f"for direct company career pages. Focus on active roles matching the experience requirement.\n\n"
+        f"Return a strict JSON list of 10 job listings with the following schema (no markdown, no formatting prose):\n"
+        f"[\n"
+        f"  {{\n"
+        f'    "title": "Exact Job Title",\n'
+        f'    "company": "Exact Company Name",\n'
+        f'    "location": "Location Name",\n'
+        f'    "url": "Direct Greenhouse/Lever/Workday/Ashby/SmartRecruiters URL",\n'
+        f'    "experience": "Brief required experience summary, e.g. 2-5 years",\n'
+        f'    "ats": "Greenhouse|Lever|Workday|Ashby|SmartRecruiters|Other"\n'
+        f"  }}\n"
+        f"]"
+    )
+
+    if not GEMINI_API_KEY:
+        return JSONResponse({"error": "GEMINI_API_KEY not configured"}, status_code=503)
+
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    body_data = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "tools": [{"googleSearch": {}}]
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            res = await client.post(endpoint, json=body_data)
+        if res.status_code != 200:
+            return JSONResponse({"error": f"Gemini Grounding API returned {res.status_code}: {res.text[:200]}"}, status_code=500)
+
+        data = res.json()
+        candidate = data["candidates"][0]
+        text = candidate["content"]["parts"][0]["text"]
+        
+        jobs = _parse_json_object(text)
+        if not isinstance(jobs, list):
+            jobs = jobs.get("jobs") if isinstance(jobs, dict) else []
+
+        return JSONResponse({"jobs": jobs})
+    except Exception as e:
+        return JSONResponse({"error": f"ATS Search failed: {str(e)}"}, status_code=500)
+
+
 @app.get("/api/skill-gap")
 async def api_skill_gap():
     """Market demand vs résumé coverage, aggregated from every analysed job's keyword matrix.

@@ -323,6 +323,71 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
     }
   };
 
+  // ATS Deep Scout state & handlers
+  const [atsSearchOpen, setAtsSearchOpen] = useState(false);
+  const [atsRole, setAtsRole] = useState("Data Analyst");
+  const [atsExperience, setAtsExperience] = useState("2+ years");
+  const [atsLocation, setAtsLocation] = useState("India");
+  const [atsResults, setAtsResults] = useState<any[]>([]);
+  const [atsSearching, setAtsSearching] = useState(false);
+  const [atsError, setAtsError] = useState("");
+
+  const searchAtsJobs = async () => {
+    setAtsSearching(true);
+    setAtsError("");
+    setAtsResults([]);
+    try {
+      const tok = getToken();
+      const res = await fetch("/api/job-scout/ats-search", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
+        },
+        body: JSON.stringify({ role: atsRole, experience: atsExperience, location: atsLocation }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || "Failed to search ATS jobs");
+      setAtsResults(data.jobs || []);
+    } catch (e: any) {
+      setAtsError(e.message || String(e));
+    } finally {
+      setAtsSearching(false);
+    }
+  };
+
+  const importAtsJob = async (job: any) => {
+    try {
+      const payload = {
+        title: job.title,
+        company: job.company,
+        location: job.location,
+        url: job.url,
+        source: "ATS Deep Scout",
+        status: "interested",
+        description: `Source ATS: ${job.ats}\nRequired Experience: ${job.experience}`,
+        notes: `Imported via direct careers page search.`,
+      };
+      const tok = getToken();
+      const res = await fetch("/applications/add-manual", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
+        },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.error || "Import failed");
+      }
+      alert(`Imported ${job.title} @ ${job.company} successfully!`);
+      await loadApplications();
+    } catch (e: any) {
+      alert(`Failed to import: ${e.message}`);
+    }
+  };
+
   // Résumé modal
   const [resumeOpen, setResumeOpen] = useState(false);
   const [resumeContent, setResumeContent] = useState("");
@@ -1744,6 +1809,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                     {([
                       { label: "Discover", items: [
                         { fn: searchNow, icon: Search, label: searchingJobs ? "Searching…" : "Find jobs now", tint: "#8aebff", spin: searchingJobs },
+                        { fn: () => { setAtsSearchOpen(true); setToolsOpen(false); }, icon: Globe, label: "ATS Deep Scout", tint: "#c084fc" },
                       ] },
                       { label: "Prepare", items: [
                         { fn: openResume, icon: FileText, label: "Résumé", tint: "#8aebff" },
@@ -3272,6 +3338,143 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                 </button>
               </div>
 
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ATS Deep Scout direct careers scanner */}
+      <AnimatePresence>
+        {atsSearchOpen && (
+          <div className="fixed inset-0 z-[120] flex items-start justify-center pt-[8vh] px-4 bg-[#0a0e1a]/80 backdrop-blur-md overflow-y-auto">
+            <div className="absolute inset-0" onClick={() => setAtsSearchOpen(false)} />
+            <motion.div
+              initial={{ opacity: 0, y: 24, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 12, scale: 0.98 }}
+              className="relative w-full max-w-2xl mb-16 bg-[#0f131f] border border-[#3c494c] rounded-2xl shadow-2xl flex flex-col max-h-[84vh]"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="p-6 border-b border-white/10 flex justify-between items-start">
+                <div>
+                  <h3 className="text-lg font-bold font-mono tracking-wide text-[#c084fc] flex items-center gap-2">
+                    <Globe className="w-5 h-5 animate-pulse" /> ATS DEEP SCOUT
+                  </h3>
+                  <p className="text-[11px] font-mono text-[#859397] mt-1">
+                    Crawl company career portals directly (Greenhouse, Lever, Workday, Ashby) for exact role & experience.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setAtsSearchOpen(false)}
+                  className="w-9 h-9 rounded-full border border-white/10 flex items-center justify-center text-[#859397] hover:text-white hover:border-white/30 transition-all cursor-pointer"
+                >
+                  <X className="w-4.5 h-4.5" />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-4 overflow-y-auto flex-1 font-mono text-xs">
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <label className="text-[10px] uppercase text-[#859397] block mb-1">Target Role</label>
+                    <input
+                      value={atsRole}
+                      onChange={(e) => setAtsRole(e.target.value)}
+                      placeholder="e.g. Data Analyst"
+                      className="w-full bg-[#0a0e1a]/60 border border-white/10 rounded-lg p-2.5 text-xs text-[#dfe2f3]"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase text-[#859397] block mb-1">Experience Level</label>
+                    <input
+                      value={atsExperience}
+                      onChange={(e) => setAtsExperience(e.target.value)}
+                      placeholder="e.g. 2+ years"
+                      className="w-full bg-[#0a0e1a]/60 border border-white/10 rounded-lg p-2.5 text-xs text-[#dfe2f3]"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase text-[#859397] block mb-1">Target Location</label>
+                    <input
+                      value={atsLocation}
+                      onChange={(e) => setAtsLocation(e.target.value)}
+                      placeholder="e.g. India"
+                      className="w-full bg-[#0a0e1a]/60 border border-white/10 rounded-lg p-2.5 text-xs text-[#dfe2f3]"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end pt-1">
+                  <button
+                    onClick={searchAtsJobs}
+                    disabled={atsSearching || !atsRole.trim()}
+                    className="px-5 py-2.5 rounded-lg text-xs font-bold bg-[#c084fc] text-[#0a0e1a] hover:bg-[#a855f7] cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+                  >
+                    {atsSearching ? (
+                      <><RefreshCw className="w-4 h-4 animate-spin" /> SEARCHING PORTALS…</>
+                    ) : (
+                      <><Search className="w-4 h-4" /> RUN ATS DEEP SCOUT</>
+                    )}
+                  </button>
+                </div>
+
+                {atsError && (
+                  <div className="p-3 rounded bg-red-950/20 border border-red-500/20 text-red-200">
+                    {atsError}
+                  </div>
+                )}
+
+                <div className="space-y-3 pt-2">
+                  {atsResults.length > 0 && (
+                    <div className="text-[10px] uppercase tracking-wider text-[#c084fc] font-bold">
+                      Direct Application Listings Found:
+                    </div>
+                  )}
+
+                  {atsResults.map((job, idx) => (
+                    <div key={idx} className="p-4 rounded-xl bg-white/[0.02] border border-white/5 hover:border-white/10 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-bold text-[#dfe2f3]">{job.title}</span>
+                          <span className="px-2 py-0.5 rounded text-[10px] bg-[#c084fc]/15 border border-[#c084fc]/30 text-[#c084fc]">
+                            {job.ats}
+                          </span>
+                        </div>
+                        <p className="text-xs text-[#859397]">
+                          {job.company} • {job.location}
+                        </p>
+                        <p className="text-[10px] text-[#a3e635]">
+                          Experience: {job.experience}
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-2 self-end sm:self-center">
+                        <a
+                          href={job.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-3 py-1.5 rounded bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-[#dfe2f3] flex items-center gap-1"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" /> Apply
+                        </a>
+                        <button
+                          onClick={() => importAtsJob(job)}
+                          className="px-3 py-1.5 rounded bg-[#a3e635]/15 hover:bg-[#a3e635] hover:text-[#0a0e1a] border border-[#a3e635]/30 text-[#a3e635] text-xs font-bold cursor-pointer transition-all"
+                        >
+                          + Track
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+
+                  {atsResults.length === 0 && !atsSearching && !atsError && (
+                    <div className="py-12 text-center text-xs text-[#859397] space-y-1">
+                      <Globe className="w-8 h-8 text-white/10 mx-auto mb-2" />
+                      <p>Enter the search criteria and click "RUN ATS DEEP SCOUT".</p>
+                      <p className="text-[10px] text-[#859397]/60">Gemini searches directly through hosted Workday, Lever, Ashby, and Greenhouse portals.</p>
+                    </div>
+                  )}
+                </div>
+              </div>
             </motion.div>
           </div>
         )}
