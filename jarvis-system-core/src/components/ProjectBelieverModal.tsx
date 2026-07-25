@@ -188,6 +188,30 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
     }
   };
 
+  const handleResetVault = async () => {
+    if (!window.confirm("⚠️ Reset Master Passphrase? This will wipe all stored encrypted entries and allow you to set a brand new Master Passphrase.")) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch("/api/believer/reset", { method: "POST" });
+      if (res.ok) {
+        setIsInitialized(false);
+        setPassphrase("");
+        setActiveKey(null);
+        setEntries([]);
+        setError("Vault reset successfully. Enter your new Master Passphrase below.");
+      } else {
+        setError("Failed to reset vault");
+      }
+    } catch {
+      setError("Network error while resetting vault");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const filteredEntries = entries.filter((e) =>
     e.content.toLowerCase().includes(searchQuery.toLowerCase()) ||
     e.mood_tag.toLowerCase().includes(searchQuery.toLowerCase())
@@ -267,13 +291,26 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
                   <button
                     type="submit"
                     disabled={loading || !passphrase}
-                    className="w-full py-3 bg-amber-500 hover:bg-amber-400 text-zinc-950 font-medium rounded-xl transition-all disabled:opacity-50 flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20"
+                    className="w-full py-3 bg-amber-500 hover:bg-amber-400 text-zinc-950 font-medium rounded-xl transition-all disabled:opacity-50 flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 cursor-pointer"
                   >
-                    {loading ? "Decrypting Vault..." : isInitialized ? "Unlock Vault" : "Initialize Believer"}
+                    {loading ? "Processing..." : isInitialized ? "Unlock Vault" : "Initialize Believer"}
                   </button>
+
+                  {isInitialized && (
+                    <div className="pt-2">
+                      <button
+                        type="button"
+                        onClick={handleResetVault}
+                        className="text-xs text-rose-400 hover:text-rose-300 underline cursor-pointer transition-colors"
+                      >
+                        Forgot Passphrase? Reset Vault & Create New Passphrase
+                      </button>
+                    </div>
+                  )}
                 </form>
               </div>
             ) : (
+
               /* Journal Vault Interface */
               <div className="space-y-6">
                 {/* Search & Actions Header */}
