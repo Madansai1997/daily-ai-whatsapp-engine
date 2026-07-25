@@ -983,6 +983,8 @@ def init_daily_web_tables():
     conn.close()
     print("✅ Daily web digest table ready.")
 
+from project_believer import router as believer_router, init_believer_db
+
 init_db_tables()
 init_email_tables()
 init_reminder_tables()
@@ -1005,6 +1007,14 @@ from company_watch_agent import init_company_watch_tables
 init_company_watch_tables()
 from people_watch_agent import init_people_watch_tables
 init_people_watch_tables()
+
+# Initialize Project Believer (Secret Encrypted Diary)
+try:
+    asyncio.run(init_believer_db())
+    print("✅ Project Believer (Secret Encrypted Diary) tables initialized.")
+except Exception as e:
+    print(f"⚠️ Project Believer init warning: {e}")
+
 from pdf_rag_agent import (
     init_pdf_rag_tables, ingest_pdf as pdf_rag_ingest, list_docs as pdf_rag_list_docs,
     delete_doc as pdf_rag_delete, answer_question as pdf_rag_ask, assess_document as pdf_rag_assess,
@@ -1147,6 +1157,8 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(believer_router)
+
 
 # ── PIN lock for the JARVIS console ──────────────────────────────────────────
 # Fail-open: if JARVIS_PIN isn't set, the gate is disabled (current behavior), so
@@ -7968,6 +7980,15 @@ async def chat_message(request: Request):
     user_msg = body.get("message", "").strip()
     if not user_msg:
         return JSONResponse({"reply": "Please type a message."})
+    
+    # Secret trigger check for Project Believer (Private Encrypted Diary)
+    msg_clean = user_msg.lower().strip()
+    if msg_clean in ("/believer", "/pb") or "project believer" in msg_clean or "believer protocol" in msg_clean:
+        return JSONResponse({
+            "reply": "🔒 *Project Believer Initiated.* Opening encrypted vault...",
+            "action": "open_believer_modal"
+        })
+
     t0 = time.time()
     try:
         reply = await process_message(user_msg, source="web")
@@ -7976,6 +7997,7 @@ async def chat_message(request: Request):
     except Exception as e:
         print(f"❌ chat-message error after {time.time() - t0:.2f}s: {e}")
         return JSONResponse({"reply": "Something went wrong. Try again."})
+
 
 
 PDF_SUMMARY_PROMPT = (

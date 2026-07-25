@@ -2,11 +2,13 @@ import React, { useState, useEffect } from "react";
 import { ScreenId } from "../types";
 import { motion } from "motion/react";
 import { ZoomIn, RotateCw, ShieldCheck, MessageSquare, Terminal as TerminalIcon, FileText, Bolt } from "lucide-react";
+import ProjectBelieverModal from "./ProjectBelieverModal";
 
 interface CoreInterfaceProps {
   onNavigate: (screen: ScreenId) => void;
   onOpenNotifications?: () => void;
 }
+
 
 // Real system-status signal: null = probing/unknown, true = ONLINE, false = OFFLINE
 type OnlineStatus = boolean | null;
@@ -41,6 +43,20 @@ export default function CoreInterface({ onNavigate, onOpenNotifications }: CoreI
   const [pendingAnalyses, setPendingAnalyses] = useState<number | null>(null);
   const [logs, setLogs] = useState<JobLog[] | null>(null);
   const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
+  const [believerOpen, setBelieverOpen] = useState(false);
+
+  // Global hotkey: Cmd + Shift + B / Ctrl + Shift + B -> Project Believer
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === "B" || e.key === "b")) {
+        e.preventDefault();
+        setBelieverOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
 
   // SYSTEM ONLINE indicator: probe /ping on mount and every ~15s
   useEffect(() => {
@@ -492,6 +508,13 @@ export default function CoreInterface({ onNavigate, onOpenNotifications }: CoreI
       >
         <Bolt className="w-6 h-6" />
       </button>
+
+      {/* Secret Project Believer Encrypted Diary Modal */}
+      <ProjectBelieverModal
+        isOpen={believerOpen}
+        onClose={() => setBelieverOpen(false)}
+      />
     </motion.div>
   );
 }
+

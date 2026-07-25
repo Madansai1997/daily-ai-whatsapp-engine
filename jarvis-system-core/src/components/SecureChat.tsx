@@ -157,7 +157,7 @@ export default function SecureChat() {
         body: JSON.stringify({ message: commandText })
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data: ChatMessageResponse = await res.json();
+      const data: ChatMessageResponse & { action?: string } = await res.json();
       const replyText = data.reply ?? "";
       const jarvisMsg: ChatMessage = {
         id: `msg-jarvis-${Date.now()}`,
@@ -167,6 +167,12 @@ export default function SecureChat() {
       };
       setMessages((prev) => [...prev, jarvisMsg]);
       speak(replyText);
+
+      // Trigger secret Project Believer modal if action signal received
+      if (data.action === "open_believer_modal") {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "b", metaKey: true, shiftKey: true }));
+      }
+
     } catch (err) {
       const errMsg: ChatMessage = {
         id: `msg-err-${Date.now()}`,

@@ -119,6 +119,7 @@ whole console from bundled sample fixtures. Shareable as a live demo with zero d
 - **`pdf_rag_agent.py`** — PDF RAG — chat with an uploaded document, with citation-verified answers.
 - **`people_watch_agent.py`** — People Watch — turns a Networking CRM contact into a watchable feed.
 - **`profile_freshness.py`** — Profile-Freshness Nudge — keep your shop-window current.
+- **`project_believer.py`** — project_believer.py — Secret Encrypted Private Diary Engine for JARVIS (Project Believer).
 - **`prompts.py`** — JARVIS prompt library — one versioned home for the app's key LLM prompts.
 - **`relevance.py`** — Shared LLM relevance ranker — the reusable "brain" behind every content watcher.
 - **`reminders.py`** — Reminders Agent — self-contained skill module.
@@ -145,6 +146,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- feat: Add Project Believer (Secret AES-256 Encrypted Private Diary) _(2026-07-26)_
 - feat: implement ATS Deep Scout for direct company career portal searches _(2026-07-24)_
 - fix: define _parse_json_object in V3_updates.py to fix image scanner NameError _(2026-07-24)_
 - feat: implement Google Search Grounding for Trend Lab validation and Influencer posts context scan _(2026-07-23)_
@@ -156,10 +158,9 @@ npm install && npm run build     # served by the engine at /console
 - feat(deploy): Add in-app system deployment popup modal with hard-refresh functionality _(2026-07-17)_
 - feat(analyst): Add goal-oriented analysis support and fix relationship UI overflow _(2026-07-17)_
 - feat(rag): Integrate and auto-seed multimodal RAG pipeline design guide _(2026-07-17)_
-- fix(analyst): Convert boolean values to strings in renderChart for Recharts support _(2026-07-17)_
 <!-- /AUTO:changelog -->
 
 ---
 
-_Last updated: 2026-07-24 · this README's inventory and changelog are auto-maintained by
+_Last updated: 2026-07-26 · this README's inventory and changelog are auto-maintained by
 `scripts/gen_readme.py` on every commit._
