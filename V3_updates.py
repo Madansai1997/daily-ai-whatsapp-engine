@@ -10579,9 +10579,15 @@ async def api_influencers_add(request: Request):
 @app.post("/api/influencers/{inf_id}/delete")
 async def api_influencers_delete(inf_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT handle, platform FROM watched_influencers WHERE id = ?", (inf_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                handle, platform = row[0], row[1]
+                await db.execute("DELETE FROM influencer_posts WHERE handle = ? AND platform = ?", (handle, platform))
         await db.execute("DELETE FROM watched_influencers WHERE id = ?", (inf_id,))
         await db.commit()
     return JSONResponse({"ok": True})
+
 
 
 @app.post("/api/influencers/sync")

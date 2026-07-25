@@ -486,7 +486,10 @@ async def get_feed(limit: int = 60, only_relevant: bool = True, domain: str = ""
     async with aiosqlite.connect(DB_PATH) as db:
         await _ensure_tables(db)
         db.row_factory = aiosqlite.Row
-        clauses, params = ["contact_id IS NULL"], []  # creator feed only; People-Watch posts are separate
+        clauses, params = [
+            "contact_id IS NULL",
+            "EXISTS (SELECT 1 FROM watched_influencers w WHERE w.handle = influencer_posts.handle AND w.platform = influencer_posts.platform)"
+        ], []  # creator feed only & only from currently watched creators
         if only_relevant:
             clauses.append("relevant = 1")
         if domain:
@@ -506,6 +509,7 @@ async def get_feed(limit: int = 60, only_relevant: bool = True, domain: str = ""
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
+
 
 
 def _youtube_video_id(post_id: str, url: str = "") -> str:

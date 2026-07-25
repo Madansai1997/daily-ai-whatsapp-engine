@@ -146,6 +146,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix: Purge influencer posts on deletion and filter feed to currently watched creators _(2026-07-26)_
 - feat: Add Kimi K3 via OpenRouter as fallback LLM provider in model completion chain _(2026-07-26)_
 - fix: Add reset_believer_vault route to project_believer.py _(2026-07-26)_
 - fix: Expose detailed HTTP status and message on vault reset failure _(2026-07-26)_
@@ -157,7 +158,6 @@ npm install && npm run build     # served by the engine at /console
 - feat: implement ATS Deep Scout for direct company career portal searches _(2026-07-24)_
 - fix: define _parse_json_object in V3_updates.py to fix image scanner NameError _(2026-07-24)_
 - feat: implement Google Search Grounding for Trend Lab validation and Influencer posts context scan _(2026-07-23)_
-- feat: implement 5-tool Gemini AI suite (grounded dossiers, vision OCR, voice interview coach, python sandbox, and 1M-token vault) _(2026-07-21)_
 <!-- /AUTO:changelog -->
 
 ---
