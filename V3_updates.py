@@ -508,14 +508,32 @@ if gemini_client is not None:
     print(f"✅ Gemini fallback enabled ({GEMINI_MODEL}).")
 
 
+# OpenRouter client for Kimi K3 & multi-provider fallback
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+KIMI_K3_MODEL = "moonshotai/kimi-k3"
+
+def get_openrouter_client() -> AsyncOpenAI | None:
+    """OpenRouter OpenAI-compatible client for Kimi K3 fallback."""
+    if not OPENROUTER_API_KEY:
+        return None
+    return AsyncOpenAI(base_url=OPENROUTER_BASE_URL, api_key=OPENROUTER_API_KEY)
+
+openrouter_client = get_openrouter_client()
+if openrouter_client is not None:
+    print(f"✅ OpenRouter fallback enabled ({KIMI_K3_MODEL}).")
+
+
 def _model_chain() -> list:
-    """(client, model) pairs to try in order: all Groq free models first, then Gemini as a
-    last resort (only if a key is set). Keeps Groq as the fast primary and Gemini as the
-    rate-limit safety net."""
+    """(client, model) pairs to try in order: all Groq free models first, then Kimi K3 via OpenRouter,
+    and Gemini as a last resort. Keeps Groq fast & free, Kimi K3 as intelligent fallback, and Gemini as safety net."""
     chain = [(anthropic_client, m) for m in FREE_MODELS]
+    if openrouter_client is not None:
+        chain.append((openrouter_client, KIMI_K3_MODEL))
     if gemini_client is not None:
         chain.append((gemini_client, GEMINI_MODEL))
     return chain
+
 
 
 _llm_log_tasks: set = set()
@@ -590,7 +608,12 @@ async def _complete_with_fallback(messages: list, max_tokens: int, temperature: 
     hard-error on it, so it's only added when the model name matches (see _try_one_model).
     """
     def _provider_of(model: str) -> str:
-        return "gemini" if model == GEMINI_MODEL else "groq"
+        if model == GEMINI_MODEL:
+            return "gemini"
+        if model == KIMI_K3_MODEL or "moonshot" in model or "openrouter" in model:
+            return "openrouter"
+        return "groq"
+
 
     last_err = None
     attempted_any = False
