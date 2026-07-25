@@ -139,15 +139,15 @@ async def verify_passphrase(req: VerifyPassphraseRequest):
                 if decrypted == VERIFY_MAGIC:
                     return {"status": "ok", "verified": True}
                 else:
-                    raise HTTPException(status_code=401, detail="Invalid Master Passphrase")
+                    raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
             except ValueError:
-                raise HTTPException(status_code=401, detail="Invalid Master Passphrase")
+                raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
 
 @router.get("/entries")
 async def list_entries(x_passphrase: Optional[str] = Header(None)):
     """Fetch and decrypt all entries for Project Believer."""
     if not x_passphrase:
-        raise HTTPException(status_code=401, detail="X-Passphrase header missing")
+        raise HTTPException(status_code=400, detail="X-Passphrase header missing")
     
     async with aiosqlite.connect(DB_PATH) as db:
         # First verify auth
@@ -157,9 +157,9 @@ async def list_entries(x_passphrase: Optional[str] = Header(None)):
                 raise HTTPException(status_code=404, detail="Not initialized")
             try:
                 if decrypt_text(row[0], x_passphrase) != VERIFY_MAGIC:
-                    raise HTTPException(status_code=401, detail="Invalid Master Passphrase")
+                    raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
             except Exception:
-                raise HTTPException(status_code=401, detail="Invalid Master Passphrase")
+                raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
 
         async with db.execute("SELECT id, encrypted_payload, mood_tag, created_at FROM believer_entries ORDER BY created_at DESC") as cursor:
             rows = await cursor.fetchall()
@@ -192,9 +192,9 @@ async def create_entry(req: EntryCreateRequest):
                 raise HTTPException(status_code=404, detail="Not initialized")
             try:
                 if decrypt_text(row[0], req.passphrase) != VERIFY_MAGIC:
-                    raise HTTPException(status_code=401, detail="Invalid Master Passphrase")
+                    raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
             except Exception:
-                raise HTTPException(status_code=401, detail="Invalid Master Passphrase")
+                raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
         
         enc_payload = encrypt_text(req.content.strip(), req.passphrase)
         cursor = await db.execute(
@@ -208,15 +208,16 @@ async def create_entry(req: EntryCreateRequest):
 async def delete_entry(entry_id: int, x_passphrase: Optional[str] = Header(None)):
     """Delete an entry by ID."""
     if not x_passphrase:
-        raise HTTPException(status_code=401, detail="X-Passphrase header missing")
+        raise HTTPException(status_code=400, detail="X-Passphrase header missing")
     
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT encrypted_verifier FROM believer_auth_meta WHERE key_name = 'auth_verifier'") as cursor:
             row = await cursor.fetchone()
             if not row or decrypt_text(row[0], x_passphrase) != VERIFY_MAGIC:
-                raise HTTPException(status_code=401, detail="Invalid Master Passphrase")
+                raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
         
         await db.execute("DELETE FROM believer_entries WHERE id = ?", (entry_id,))
         await db.commit()
         return {"status": "ok", "message": "Entry deleted"}
+
 

@@ -146,6 +146,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix: Use HTTP 403 instead of 401 on diary passphrase failure so JARVIS app session remains unlocked _(2026-07-26)_
 - fix: Mount Project Believer modal at root App level so it opens on all screens (including Chat) _(2026-07-26)_
 - fix: Trigger Project Believer encrypted modal when invoked via Voice Agent _(2026-07-26)_
 - feat: Add Project Believer (Secret AES-256 Encrypted Private Diary) _(2026-07-26)_
@@ -157,7 +158,6 @@ npm install && npm run build     # served by the engine at /console
 - fix(demo): Align influencer feed array format and mock trends pulse endpoint _(2026-07-17)_
 - fix(demo): Prevent Discover tab crashes by adding missing mock fixtures for study, trends, and influencers _(2026-07-17)_
 - fix(header): Resolve demo-mode banner overlap by dynamically shifting header and main containers _(2026-07-17)_
-- feat(deploy): Add in-app system deployment popup modal with hard-refresh functionality _(2026-07-17)_
 <!-- /AUTO:changelog -->
 
 ---
