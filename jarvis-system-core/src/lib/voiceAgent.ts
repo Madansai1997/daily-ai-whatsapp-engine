@@ -227,8 +227,12 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
       });
       const d = await res.json();
       const reply = (d?.reply || d?.response || d?.message || "").toString().trim();
+      if (d?.action === "open_believer_modal") {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "b", metaKey: true, shiftKey: true }));
+      }
       if (reply) { setCaption(reply); await speak(reply); }
       else { setCaption("No reply came back."); afterSpeech(); }
+
     } catch {
       setCaption("Couldn't reach JARVIS just now.");
       afterSpeech();

@@ -146,6 +146,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix: Trigger Project Believer encrypted modal when invoked via Voice Agent _(2026-07-26)_
 - feat: Add Project Believer (Secret AES-256 Encrypted Private Diary) _(2026-07-26)_
 - feat: implement ATS Deep Scout for direct company career portal searches _(2026-07-24)_
 - fix: define _parse_json_object in V3_updates.py to fix image scanner NameError _(2026-07-24)_
@@ -157,7 +158,6 @@ npm install && npm run build     # served by the engine at /console
 - fix(header): Resolve demo-mode banner overlap by dynamically shifting header and main containers _(2026-07-17)_
 - feat(deploy): Add in-app system deployment popup modal with hard-refresh functionality _(2026-07-17)_
 - feat(analyst): Add goal-oriented analysis support and fix relationship UI overflow _(2026-07-17)_
-- feat(rag): Integrate and auto-seed multimodal RAG pipeline design guide _(2026-07-17)_
 <!-- /AUTO:changelog -->
 
 ---
