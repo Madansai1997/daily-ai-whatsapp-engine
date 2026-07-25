@@ -196,6 +196,7 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
     setError("");
     try {
       const res = await fetch("/api/believer/reset", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
       if (res.ok) {
         setIsInitialized(false);
         setPassphrase("");
@@ -203,8 +204,9 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
         setEntries([]);
         setError("Vault reset successfully. Enter your new Master Passphrase below.");
       } else {
-        setError("Failed to reset vault");
+        setError(data.detail || data.error || `Failed to reset vault (HTTP ${res.status})`);
       }
+
     } catch {
       setError("Network error while resetting vault");
     } finally {

@@ -146,6 +146,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix: Expose detailed HTTP status and message on vault reset failure _(2026-07-26)_
 - feat: Add Reset Master Passphrase endpoint and UI action to wipe vault and re-set passphrase _(2026-07-26)_
 - fix: Use HTTP 403 instead of 401 on diary passphrase failure so JARVIS app session remains unlocked _(2026-07-26)_
 - fix: Mount Project Believer modal at root App level so it opens on all screens (including Chat) _(2026-07-26)_
@@ -157,7 +158,6 @@ npm install && npm run build     # served by the engine at /console
 - feat: implement 5-tool Gemini AI suite (grounded dossiers, vision OCR, voice interview coach, python sandbox, and 1M-token vault) _(2026-07-21)_
 - feat: implement Career-Ops Feature Suite (A-F fit grading, ghost job warnings, LinkedIn/email outreach, and STAR interview prep) _(2026-07-18)_
 - fix(demo): Align influencer feed array format and mock trends pulse endpoint _(2026-07-17)_
-- fix(demo): Prevent Discover tab crashes by adding missing mock fixtures for study, trends, and influencers _(2026-07-17)_
 <!-- /AUTO:changelog -->
 
 ---
