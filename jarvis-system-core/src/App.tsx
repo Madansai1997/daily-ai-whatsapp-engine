@@ -19,6 +19,7 @@ import LockScreen from "./components/LockScreen";
 import VoiceDock from "./components/VoiceDock";
 import { useVoiceAgent } from "./lib/voiceAgent";
 import { authStatus, setUnauthHandler, isDemo } from "./lib/auth";
+import ProjectBelieverModal from "./components/ProjectBelieverModal";
 import { AnimatePresence, motion } from "motion/react";
 import { LayoutGrid, Bot, Lock, Briefcase, BarChart3, Wallet, Compass, FileText, Table2 } from "lucide-react";
 
@@ -32,6 +33,20 @@ export default function App() {
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
+  const [isBelieverOpen, setIsBelieverOpen] = useState(false);
+
+  // Global hotkey: Cmd + Shift + B / Ctrl + Shift + B -> Project Believer
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === "B" || e.key === "b")) {
+        e.preventDefault();
+        setIsBelieverOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
 
   // Auth gate: "checking" until we know if a PIN is required; then locked/unlocked.
   const [authState, setAuthState] = useState<"checking" | "locked" | "open">("checking");
@@ -242,6 +257,13 @@ export default function App() {
           />
         )}
       </AnimatePresence>
+
+      {/* Secret Project Believer Encrypted Diary Modal */}
+      <ProjectBelieverModal
+        isOpen={isBelieverOpen}
+        onClose={() => setIsBelieverOpen(false)}
+      />
     </div>
   );
 }
+

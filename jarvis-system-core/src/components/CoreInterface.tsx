@@ -508,13 +508,8 @@ export default function CoreInterface({ onNavigate, onOpenNotifications }: CoreI
       >
         <Bolt className="w-6 h-6" />
       </button>
-
-      {/* Secret Project Believer Encrypted Diary Modal */}
-      <ProjectBelieverModal
-        isOpen={believerOpen}
-        onClose={() => setBelieverOpen(false)}
-      />
     </motion.div>
   );
 }
+
 
