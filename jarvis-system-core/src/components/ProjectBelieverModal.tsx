@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { Lock, KeyRound, ShieldAlert, Plus, Trash2, Search, X, Sparkles, Heart, Zap, Target, BookOpen, Clock } from "lucide-react";
+import { Lock, KeyRound, ShieldAlert, Plus, Trash2, Search, X, Sparkles, Heart, Zap, Target, BookOpen, Clock, Bot, Mic, MicOff, MessageSquare, Compass, RefreshCw } from "lucide-react";
 
 interface ProjectBelieverModalProps {
   isOpen: boolean;
@@ -10,6 +10,7 @@ interface ProjectBelieverModalProps {
 interface Entry {
   id: number;
   content: string;
+  reflection?: string;
   mood_tag: string;
   created_at: string;
 }
@@ -32,8 +33,13 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
+  const [prompts, setPrompts] = useState<string[]>([]);
+  const [activePrompt, setActivePrompt] = useState<string | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const [reflectingId, setReflectingId] = useState<number | null>(null);
 
   const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const recognitionRef = useRef<any>(null);
 
   const resetIdleTimer = useCallback(() => {
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
@@ -58,6 +64,18 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
     };
   }, [resetIdleTimer]);
 
+  // Fetch guided prompts
+  const loadPrompts = useCallback(() => {
+    fetch("/api/believer/prompts")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.prompts && data.prompts.length > 0) {
+          setPrompts(data.prompts);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   // Check initialization status when modal opens
   useEffect(() => {
     if (isOpen) {
@@ -70,14 +88,19 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
         })
         .catch(() => setError("Failed to connect to backend vault"))
         .finally(() => setLoading(false));
+
+      loadPrompts();
     } else {
-      // Clear key on close for zero-knowledge safety
       setActiveKey(null);
       setEntries([]);
       setPassphrase("");
       setShowAddForm(false);
+      setIsListening(false);
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch {}
+      }
     }
-  }, [isOpen]);
+  }, [isOpen, loadPrompts]);
 
   const loadEntries = async (key: string) => {
     setLoading(true);
@@ -108,7 +131,6 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
 
     try {
       if (!isInitialized) {
-        // Setup passphrase
         const res = await fetch("/api/believer/setup", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -122,7 +144,6 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
           setError(data.detail || "Setup failed");
         }
       } else {
-        // Verify passphrase
         const res = await fetch("/api/believer/verify", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -159,10 +180,14 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
         }),
       });
       const data = await res.json();
-      if (res.ok) {
+      if (res.ok && data.id) {
+        const createdId = data.id;
         setNewContent("");
         setShowAddForm(false);
+        setActivePrompt(null);
         await loadEntries(activeKey);
+        // Automatically request JARVIS Reflection for the new entry
+        handleRequestReflection(createdId);
       } else {
         setError(data.detail || "Failed to save encrypted entry");
       }
@@ -170,6 +195,33 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
       setError("Error saving entry to vault");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleRequestReflection = async (entryId: number) => {
+    if (!activeKey) return;
+    setReflectingId(entryId);
+    try {
+      const res = await fetch("/api/believer/reflect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          passphrase: activeKey,
+          entry_id: entryId,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.reflection) {
+        setEntries((prev) =>
+          prev.map((item) =>
+            item.id === entryId ? { ...item, reflection: data.reflection } : item
+          )
+        );
+      }
+    } catch {
+      /* ignore soft error */
+    } finally {
+      setReflectingId(null);
     }
   };
 
@@ -206,7 +258,6 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
       } else {
         setError(data.detail || data.error || `Failed to reset vault (HTTP ${res.status})`);
       }
-
     } catch {
       setError("Network error while resetting vault");
     } finally {
@@ -214,8 +265,47 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
     }
   };
 
+  const toggleVoiceInput = () => {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) {
+      alert("Speech recognition is not supported in this browser.");
+      return;
+    }
+
+    if (isListening) {
+      try { recognitionRef.current?.stop(); } catch {}
+      setIsListening(false);
+      return;
+    }
+
+    const recog = new SR();
+    recog.lang = "en-US";
+    recog.continuous = true;
+    recog.interimResults = true;
+
+    recog.onresult = (e: any) => {
+      let transcript = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        transcript += e.results[i][0].transcript;
+      }
+      setNewContent((prev) => (prev ? `${prev} ${transcript}` : transcript));
+    };
+
+    recog.onerror = () => setIsListening(false);
+    recog.onend = () => setIsListening(false);
+
+    recognitionRef.current = recog;
+    try {
+      recog.start();
+      setIsListening(true);
+    } catch {
+      setIsListening(false);
+    }
+  };
+
   const filteredEntries = entries.filter((e) =>
     e.content.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (e.reflection && e.reflection.toLowerCase().includes(searchQuery.toLowerCase())) ||
     e.mood_tag.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
@@ -228,7 +318,7 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
           exit={{ opacity: 0, scale: 0.95 }}
-          className="relative w-full max-w-2xl bg-zinc-950 border border-amber-500/30 rounded-2xl shadow-2xl shadow-amber-950/20 overflow-hidden flex flex-col max-h-[85vh]"
+          className="relative w-full max-w-3xl bg-zinc-950 border border-amber-500/30 rounded-2xl shadow-2xl shadow-amber-950/20 overflow-hidden flex flex-col max-h-[85vh]"
         >
           {/* Top Bar */}
           <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800 bg-zinc-900/50">
@@ -239,11 +329,11 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
               <div>
                 <h2 className="text-lg font-semibold text-zinc-100 flex items-center gap-2">
                   Project Believer
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                    AES-256 Encrypted
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center gap-1">
+                    <Bot className="w-3 h-3 text-amber-400" /> AI Confidant Active
                   </span>
                 </h2>
-                <p className="text-xs text-zinc-400">Private Reflection & Personal Vault</p>
+                <p className="text-xs text-zinc-400">Private Reflection, Guided Introspection & AI Sounding Board</p>
               </div>
             </div>
             <button
@@ -274,7 +364,7 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
                 </h3>
                 <p className="text-sm text-zinc-400 max-w-sm mb-6">
                   {isInitialized
-                    ? "Your entries are encrypted locally. Enter your passphrase to unlock your journal."
+                    ? "Your entries and JARVIS reflections are encrypted locally. Enter your passphrase to unlock your journal."
                     : "Create a Master Passphrase to initialize your zero-knowledge private vault."}
                 </p>
 
@@ -312,9 +402,44 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
                 </form>
               </div>
             ) : (
-
               /* Journal Vault Interface */
               <div className="space-y-6">
+                {/* Guided Introspective Prompts Banner */}
+                {prompts.length > 0 && (
+                  <div className="p-4 bg-amber-500/5 border border-amber-500/20 rounded-xl space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold uppercase tracking-wider text-amber-400 flex items-center gap-1.5 font-mono">
+                        <Compass className="w-3.5 h-3.5" /> Today's Inquiries from JARVIS
+                      </span>
+                      <button
+                        onClick={loadPrompts}
+                        className="text-zinc-500 hover:text-amber-400 transition-colors p-1"
+                        title="Refresh Prompts"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
+                      {prompts.map((p, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => {
+                            setActivePrompt(p);
+                            setShowAddForm(true);
+                            setNewContent((prev) => (prev ? `${prev}\n\n[Inquiry: ${p}]\n` : `[Inquiry: ${p}]\n`));
+                          }}
+                          className="p-2.5 text-left bg-zinc-900/60 hover:bg-zinc-800/80 border border-zinc-800/80 hover:border-amber-500/30 rounded-lg transition-all text-xs text-zinc-300 hover:text-zinc-100 flex flex-col justify-between gap-2 group cursor-pointer"
+                        >
+                          <p className="line-clamp-2 italic font-serif text-zinc-300 group-hover:text-amber-300">"{p}"</p>
+                          <span className="text-[10px] text-amber-400/80 font-mono flex items-center gap-1">
+                            Reflect on this →
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* Search & Actions Header */}
                 <div className="flex flex-col sm:flex-row items-center gap-3">
                   <div className="relative flex-1 w-full">
@@ -323,16 +448,16 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
                       type="text"
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="Search secret entries..."
+                      placeholder="Search entries or JARVIS advice..."
                       className="w-full pl-9 pr-4 py-2 bg-zinc-900 border border-zinc-800 rounded-xl text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-amber-500/50"
                     />
                   </div>
                   <button
                     onClick={() => setShowAddForm(!showAddForm)}
-                    className="w-full sm:w-auto px-4 py-2 bg-amber-500 hover:bg-amber-400 text-zinc-950 font-medium text-sm rounded-xl flex items-center justify-center gap-2 transition-all shrink-0"
+                    className="w-full sm:w-auto px-4 py-2 bg-amber-500 hover:bg-amber-400 text-zinc-950 font-medium text-sm rounded-xl flex items-center justify-center gap-2 transition-all shrink-0 cursor-pointer"
                   >
                     <Plus className="w-4 h-4" />
-                    New Entry
+                    New Reflection
                   </button>
                 </div>
 
@@ -342,19 +467,39 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
                     initial={{ opacity: 0, height: 0 }}
                     animate={{ opacity: 1, height: "auto" }}
                     onSubmit={handleCreateEntry}
-                    className="p-4 bg-zinc-900/60 border border-amber-500/30 rounded-xl space-y-4"
+                    className="p-4 bg-zinc-900/60 border border-amber-500/30 rounded-xl space-y-4 shadow-xl"
                   >
-                    <textarea
-                      value={newContent}
-                      onChange={(e) => setNewContent(e.target.value)}
-                      placeholder="What is on your mind today? Write freely..."
-                      rows={4}
-                      className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-amber-500/50 resize-none"
-                      autoFocus
-                    />
+                    {activePrompt && (
+                      <div className="text-xs text-amber-400/90 font-serif italic border-l-2 border-amber-500 pl-2">
+                        Responding to: "{activePrompt}"
+                      </div>
+                    )}
+                    <div className="relative">
+                      <textarea
+                        value={newContent}
+                        onChange={(e) => setNewContent(e.target.value)}
+                        placeholder="Speak or write freely. What's on your mind today, Sir?"
+                        rows={5}
+                        className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-amber-500/50 resize-none leading-relaxed"
+                        autoFocus
+                      />
+                      {/* Voice Dictation Button */}
+                      <button
+                        type="button"
+                        onClick={toggleVoiceInput}
+                        className={`absolute right-3 bottom-3 p-2 rounded-lg transition-all cursor-pointer ${
+                          isListening
+                            ? "bg-rose-500/20 text-rose-400 border border-rose-500/40 animate-pulse"
+                            : "bg-zinc-900 text-zinc-400 hover:text-amber-400 border border-zinc-800"
+                        }`}
+                        title={isListening ? "Listening... Click to stop" : "Dictate out loud"}
+                      >
+                        {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                      </button>
+                    </div>
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div className="flex items-center gap-2">
-                        <span className="text-xs text-zinc-400 font-medium">Tag:</span>
+                        <span className="text-xs text-zinc-400 font-medium">Mindset Tag:</span>
                         {MOODS.map((m) => {
                           const Icon = m.icon;
                           const isSel = selectedMood === m.id;
@@ -363,7 +508,7 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
                               key={m.id}
                               type="button"
                               onClick={() => setSelectedMood(m.id)}
-                              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-all ${
+                              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-all cursor-pointer ${
                                 isSel
                                   ? m.color
                                   : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200"
@@ -378,17 +523,21 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
                       <div className="flex items-center gap-2">
                         <button
                           type="button"
-                          onClick={() => setShowAddForm(false)}
-                          className="px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
+                          onClick={() => {
+                            setShowAddForm(false);
+                            setActivePrompt(null);
+                          }}
+                          className="px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
                         >
                           Cancel
                         </button>
                         <button
                           type="submit"
                           disabled={loading || !newContent.trim()}
-                          className="px-4 py-1.5 bg-amber-500 text-zinc-950 text-xs font-semibold rounded-lg hover:bg-amber-400 transition-all disabled:opacity-50"
+                          className="px-4 py-1.5 bg-amber-500 text-zinc-950 text-xs font-semibold rounded-lg hover:bg-amber-400 transition-all disabled:opacity-50 flex items-center gap-1.5 cursor-pointer shadow-lg shadow-amber-500/10"
                         >
-                          Save Encrypted
+                          <Sparkles className="w-3.5 h-3.5" />
+                          Save & Consult JARVIS
                         </button>
                       </div>
                     </div>
@@ -399,25 +548,28 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
                 <div className="space-y-4">
                   {filteredEntries.length === 0 ? (
                     <div className="py-12 text-center text-zinc-500 text-sm border border-dashed border-zinc-800 rounded-xl">
-                      {searchQuery ? "No matching entries found" : "Your vault is empty. Click 'New Entry' to write."}
+                      {searchQuery ? "No matching entries found" : "Your confidential diary is empty. Click 'New Reflection' or select a guided inquiry above."}
                     </div>
                   ) : (
                     filteredEntries.map((entry) => {
                       const moodObj = MOODS.find((m) => m.id === entry.mood_tag) || MOODS[0];
                       const Icon = moodObj.icon;
+                      const isReflecting = reflectingId === entry.id;
+
                       return (
                         <div
                           key={entry.id}
-                          className="p-4 bg-zinc-900/40 border border-zinc-800/80 hover:border-zinc-700/80 rounded-xl space-y-2 transition-all group"
+                          className="p-5 bg-zinc-900/40 border border-zinc-800/80 hover:border-zinc-700/80 rounded-xl space-y-4 transition-all group shadow-sm"
                         >
+                          {/* Header metadata */}
                           <div className="flex items-center justify-between text-xs text-zinc-500">
                             <div className="flex items-center gap-2">
-                              <span className={`flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium border ${moodObj.color}`}>
+                              <span className={`flex items-center gap-1 px-2.5 py-0.5 rounded-md text-[11px] font-medium border ${moodObj.color}`}>
                                 <Icon className="w-3 h-3" />
                                 {entry.mood_tag}
                               </span>
-                              <span className="flex items-center gap-1">
-                                <Clock className="w-3 h-3 text-zinc-600" />
+                              <span className="flex items-center gap-1 text-zinc-400">
+                                <Clock className="w-3.5 h-3.5 text-zinc-500" />
                                 {new Date(entry.created_at).toLocaleDateString(undefined, {
                                   month: "short",
                                   day: "numeric",
@@ -429,15 +581,43 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
                             </div>
                             <button
                               onClick={() => handleDelete(entry.id)}
-                              className="opacity-0 group-hover:opacity-100 p-1 text-zinc-500 hover:text-rose-400 transition-all"
+                              className="opacity-0 group-hover:opacity-100 p-1 text-zinc-500 hover:text-rose-400 transition-all cursor-pointer"
                               title="Delete Entry"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           </div>
-                          <p className="text-sm text-zinc-200 whitespace-pre-wrap leading-relaxed">
+
+                          {/* Entry Body */}
+                          <p className="text-sm text-zinc-100 whitespace-pre-wrap leading-relaxed font-sans">
                             {entry.content}
                           </p>
+
+                          {/* JARVIS AI Reflection Card */}
+                          <div className="pt-2">
+                            {entry.reflection ? (
+                              <div className="p-3.5 bg-amber-500/5 border border-amber-500/20 rounded-xl space-y-1.5">
+                                <div className="flex items-center justify-between text-xs font-medium text-amber-400 font-mono">
+                                  <span className="flex items-center gap-1.5">
+                                    <Bot className="w-4 h-4 text-amber-400" /> JARVIS Confidential Reflection
+                                  </span>
+                                  <span className="text-[10px] text-amber-400/60 uppercase">Encrypted</span>
+                                </div>
+                                <p className="text-xs text-zinc-300 italic leading-relaxed font-serif">
+                                  "{entry.reflection}"
+                                </p>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => handleRequestReflection(entry.id)}
+                                disabled={isReflecting}
+                                className="px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-amber-400 text-xs font-medium border border-amber-500/20 hover:border-amber-500/40 rounded-lg flex items-center gap-1.5 transition-all disabled:opacity-50 cursor-pointer"
+                              >
+                                <Bot className="w-3.5 h-3.5" />
+                                {isReflecting ? "JARVIS is contemplating..." : "Request JARVIS Advice"}
+                              </button>
+                            )}
+                          </div>
                         </div>
                       );
                     })

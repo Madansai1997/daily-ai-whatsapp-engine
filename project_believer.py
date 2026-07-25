@@ -72,10 +72,15 @@ async def init_believer_db():
             CREATE TABLE IF NOT EXISTS believer_entries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 encrypted_payload TEXT NOT NULL,
+                encrypted_reflection TEXT DEFAULT '',
                 mood_tag TEXT DEFAULT 'Reflective',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        try:
+            await db.execute("ALTER TABLE believer_entries ADD COLUMN encrypted_reflection TEXT DEFAULT ''")
+        except Exception:
+            pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS believer_auth_meta (
                 key_name TEXT PRIMARY KEY,
@@ -97,7 +102,22 @@ class EntryCreateRequest(BaseModel):
     content: str
     mood_tag: Optional[str] = "Reflective"
 
+class ReflectRequest(BaseModel):
+    passphrase: str
+    entry_id: int
+
+# Introspective daily prompts for guided journaling
+BELIEVER_DAILY_PROMPTS = [
+    "What is the single biggest goal or obstacle on your mind right now?",
+    "What was one small victory today that nobody else noticed?",
+    "If you could advise your past self from last month, what would you say?",
+    "What made you feel most energetic and fulfilled today?",
+    "What is one worry you can choose to let go of before you sleep tonight?",
+    "What skill or mindset shift are you currently working on to level up?",
+]
+
 # --- API Endpoints ---
+
 @router.get("/status")
 async def believer_status():
     """Check if Project Believer has a Master Passphrase set up."""
@@ -131,7 +151,6 @@ async def setup_passphrase(req: SetPassphraseRequest):
         await db.commit()
     return {"status": "ok", "message": "Master Passphrase established successfully"}
 
-
 @router.post("/verify")
 async def verify_passphrase(req: VerifyPassphraseRequest):
     """Verify Master Passphrase."""
@@ -151,9 +170,17 @@ async def verify_passphrase(req: VerifyPassphraseRequest):
             except ValueError:
                 raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
 
+@router.get("/prompts")
+async def get_daily_prompts():
+    """Return daily introspective guided prompts."""
+    import random
+    selected = random.sample(BELIEVER_DAILY_PROMPTS, 3)
+    return {"status": "ok", "prompts": selected}
+
+
 @router.get("/entries")
 async def list_entries(x_passphrase: Optional[str] = Header(None)):
-    """Fetch and decrypt all entries for Project Believer."""
+    """Fetch and decrypt all entries and JARVIS reflections for Project Believer."""
     if not x_passphrase:
         raise HTTPException(status_code=400, detail="X-Passphrase header missing")
     
@@ -169,15 +196,22 @@ async def list_entries(x_passphrase: Optional[str] = Header(None)):
             except Exception:
                 raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
 
-        async with db.execute("SELECT id, encrypted_payload, mood_tag, created_at FROM believer_entries ORDER BY created_at DESC") as cursor:
+        async with db.execute("SELECT id, encrypted_payload, COALESCE(encrypted_reflection, ''), mood_tag, created_at FROM believer_entries ORDER BY created_at DESC") as cursor:
             rows = await cursor.fetchall()
             entries = []
-            for r_id, enc_payload, mood_tag, created_at in rows:
+            for r_id, enc_payload, enc_reflection, mood_tag, created_at in rows:
                 try:
                     decrypted_content = decrypt_text(enc_payload, x_passphrase)
+                    decrypted_reflection = ""
+                    if enc_reflection:
+                        try:
+                            decrypted_reflection = decrypt_text(enc_reflection, x_passphrase)
+                        except Exception:
+                            decrypted_reflection = ""
                     entries.append({
                         "id": r_id,
                         "content": decrypted_content,
+                        "reflection": decrypted_reflection,
                         "mood_tag": mood_tag,
                         "created_at": created_at
                     })
@@ -212,6 +246,47 @@ async def create_entry(req: EntryCreateRequest):
         await db.commit()
         return {"status": "ok", "id": cursor.lastrowid}
 
+@router.post("/reflect")
+async def reflect_on_entry(req: ReflectRequest):
+    """Generate a movie-JARVIS style confidential reflection for a diary entry."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT encrypted_verifier FROM believer_auth_meta WHERE key_name = 'auth_verifier'") as cursor:
+            row = await cursor.fetchone()
+            if not row or decrypt_text(row[0], req.passphrase) != VERIFY_MAGIC:
+                raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
+        
+        async with db.execute("SELECT encrypted_payload, mood_tag FROM believer_entries WHERE id = ?", (req.entry_id,)) as cursor:
+            entry_row = await cursor.fetchone()
+            if not entry_row:
+                raise HTTPException(status_code=404, detail="Entry not found")
+            
+            entry_text = decrypt_text(entry_row[0], req.passphrase)
+            mood_tag = entry_row[1]
+
+    # Generate JARVIS reflection via LLM
+    try:
+        from V3_updates import call_llm
+        prompt = (
+            "You are JARVIS, Madan's loyal, sharp, composed personal AI assistant and confidant. "
+            "Madan has written a private reflection in his confidential diary (Project Believer).\n"
+            f"Entry Mood: {mood_tag}\n"
+            f"Entry Content: \"{entry_text}\"\n\n"
+            "Provide a composed, thoughtful, 2-3 sentence personal reflection back to Madan. "
+            "Be empathetic, witty, and grounded like movie-JARVIS—acknowledge his mindset, offer genuine perspective or encouragement, "
+            "and sign off smoothly (e.g., 'At your service, Sir'). Do not use generic bullet lists."
+        )
+        reflection_text = await call_llm([{"role": "user", "content": prompt}], max_tokens=200, temperature=0.7)
+    except Exception as e:
+        reflection_text = "I am standing by, Sir. Keep striving forward; every reflection brings clarity."
+
+    # Encrypt and save reflection
+    async with aiosqlite.connect(DB_PATH) as db:
+        enc_reflection = encrypt_text(reflection_text, req.passphrase)
+        await db.execute("UPDATE believer_entries SET encrypted_reflection = ? WHERE id = ?", (enc_reflection, req.entry_id))
+        await db.commit()
+
+    return {"status": "ok", "reflection": reflection_text}
+
 @router.delete("/entries/{entry_id}")
 async def delete_entry(entry_id: int, x_passphrase: Optional[str] = Header(None)):
     """Delete an entry by ID."""
@@ -227,5 +302,6 @@ async def delete_entry(entry_id: int, x_passphrase: Optional[str] = Header(None)
         await db.execute("DELETE FROM believer_entries WHERE id = ?", (entry_id,))
         await db.commit()
         return {"status": "ok", "message": "Entry deleted"}
+
 
 
