@@ -1,4 +1,5 @@
 
+
 """
 project_believer.py — Secret Encrypted Private Diary Engine for JARVIS (Project Believer)
 
@@ -105,25 +106,31 @@ async def believer_status():
             row = await cursor.fetchone()
             return {"is_initialized": row is not None}
 
+@router.post("/reset")
+async def reset_believer_vault():
+    """Wipe all encrypted believer entries and reset Master Passphrase configuration."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM believer_entries")
+        await db.execute("DELETE FROM believer_auth_meta")
+        await db.commit()
+    return {"status": "ok", "message": "Project Believer vault completely wiped and reset."}
+
 @router.post("/setup")
 async def setup_passphrase(req: SetPassphraseRequest):
-    """Initial setup of Master Passphrase."""
+    """Initial setup or update of Master Passphrase."""
     if not req.passphrase or len(req.passphrase) < 4:
         raise HTTPException(status_code=400, detail="Passphrase must be at least 4 characters long")
     
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT encrypted_verifier FROM believer_auth_meta WHERE key_name = 'auth_verifier'") as cursor:
-            row = await cursor.fetchone()
-            if row is not None:
-                raise HTTPException(status_code=400, detail="Passphrase already configured")
-        
         verifier = encrypt_text(VERIFY_MAGIC, req.passphrase)
+        await db.execute("DELETE FROM believer_auth_meta WHERE key_name = 'auth_verifier'")
         await db.execute(
             "INSERT INTO believer_auth_meta (key_name, encrypted_verifier) VALUES ('auth_verifier', ?)",
             (verifier,)
         )
         await db.commit()
     return {"status": "ok", "message": "Master Passphrase established successfully"}
+
 
 @router.post("/verify")
 async def verify_passphrase(req: VerifyPassphraseRequest):
