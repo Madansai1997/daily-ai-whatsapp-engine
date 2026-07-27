@@ -3,6 +3,7 @@ FastAPI Router for Jobs, Applications, Resume ATS, Networking CRM & Mock Intervi
 """
 import os
 import json
+import httpx
 import db_compat as aiosqlite
 from fastapi import APIRouter, Request, Response, UploadFile, File
 from fastapi.responses import JSONResponse, FileResponse
@@ -21,6 +22,7 @@ from application_tracker import (
     list_application_events,
     response_analytics,
     format_applications,
+    VALID_STATUSES as APPLICATION_STATUSES,
 )
 from job_scout_agent import (
     run_on_demand_search,
@@ -33,6 +35,7 @@ from job_apply_agent import (
     apply_now,
     confirm_apply,
     list_pending_confirm,
+    apply_method,
 )
 from resume_ats_agent import (
     analyze as run_ats_alignment,
@@ -45,6 +48,8 @@ from resume_ats_agent import (
     compile_txt as format_plain_text_download,
     get_saved_audit,
     has_master_docx,
+    get_scores_map as get_ats_scores_map,
+    get_recruiter_scores_map,
 )
 from interview_simulator import (
     start_interview_session,
@@ -125,8 +130,27 @@ async def api_interviews_list_sessions(app_id: int = None):
 @router.get("/applications")
 async def get_applications_api():
     apps = await list_applications()
-    fmt = format_applications(apps)
-    return JSONResponse(fmt)
+    keys = [(a.get("job_key") or f"app:{a.get('id')}") for a in apps]
+    scores = await get_ats_scores_map(keys)
+    rec_scores = await get_recruiter_scores_map(keys)
+    try:
+        from company_watch_agent import news_counts_by_company
+        news_counts = await news_counts_by_company()
+    except Exception:
+        news_counts = {}
+    for a in apps:
+        k = a.get("job_key") or f"app:{a.get('id')}"
+        s = scores.get(k)
+        a["ats_score"] = s["ats_score"] if s else None
+        a["ats_scored_at"] = s["created_at"] if s else None
+        a["ghost_job_risk"] = s["ghost_job_risk"] if s else None
+        a["ghost_job_reasons"] = s["ghost_job_reasons"] if s else None
+        rs = rec_scores.get(k)
+        a["recruiter_score"] = rs["recruiter_score"] if rs else None
+        a["recruiter_scored_at"] = rs["created_at"] if rs else None
+        a["apply_method"] = apply_method(a)
+        a["news_count"] = news_counts.get((a.get("company") or "").strip().lower(), 0)
+    return JSONResponse({"applications": apps, "statuses": APPLICATION_STATUSES})
 
 
 @router.post("/applications/update")
@@ -179,6 +203,89 @@ async def api_job_scout_review_queue():
 async def api_job_scout_review_queue_count():
     cnt = await count_review_queue()
     return JSONResponse({"ok": True, "count": cnt})
+
+
+def _parse_json_obj(raw: str):
+    raw = (raw or "").strip()
+    start_obj = raw.find("{")
+    start_arr = raw.find("[")
+    if start_obj == -1 and start_arr == -1:
+        raise ValueError("no JSON object or array found")
+    if start_obj == -1:
+        start = start_arr
+    elif start_arr == -1:
+        start = start_obj
+    else:
+        start = min(start_obj, start_arr)
+    obj, _ = json.JSONDecoder().raw_decode(raw[start:])
+    return obj
+
+
+@router.post("/api/job-scout/ats-search")
+async def api_job_scout_ats_search(request: Request):
+    """Perform real-time Google Search Grounding to find direct applicant tracking system (ATS) job postings."""
+    body = await request.json()
+    role = (body.get("role") or "Data Analyst").strip()
+    experience = (body.get("experience") or "2+ years").strip()
+    location = (body.get("location") or "India").strip()
+
+    prompt = (
+        f"You are JARVIS. Find direct company website job postings for a '{role}' role "
+        f"with '{experience}' experience in '{location}'.\n"
+        f"Search across major applicant tracking systems (Greenhouse, Lever, Workday, Ashby, SmartRecruiters) "
+        f"for direct company career pages. Focus on active roles matching the experience requirement.\n\n"
+        f"Return a strict JSON list of 10 job listings with the following schema (no markdown, no formatting prose):\n"
+        f"[\n"
+        f"  {{\n"
+        f'    "title": "Exact Job Title",\n'
+        f'    "company": "Exact Company Name",\n'
+        f'    "location": "Location Name",\n'
+        f'    "url": "Direct Greenhouse/Lever/Workday/Ashby/SmartRecruiters URL",\n'
+        f'    "experience": "Brief required experience summary, e.g. 2-5 years",\n'
+        f'    "ats": "Greenhouse|Lever|Workday|Ashby|SmartRecruiters|Other"\n'
+        f"  }}\n"
+        f"]"
+    )
+
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if gemini_key:
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+        body_data = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "tools": [{"googleSearch": {}}]
+        }
+        try:
+            async with httpx.AsyncClient(timeout=45) as client:
+                res = await client.post(endpoint, json=body_data)
+            if res.status_code == 200:
+                data = res.json()
+                candidates = data.get("candidates") or []
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    text = parts[0].get("text", "") if parts else ""
+                    if text:
+                        jobs = _parse_json_obj(text)
+                        if isinstance(jobs, dict):
+                            jobs = jobs.get("jobs", [])
+                        if isinstance(jobs, list):
+                            return JSONResponse({"ok": True, "jobs": jobs})
+        except Exception as ex:
+            print(f"⚠️ Note: Gemini Grounding direct API call failed: {ex}")
+
+    # Fallback to general LLM completion if Gemini Grounding direct call fails or key unconfigured
+    if call_llm_fn:
+        try:
+            raw = await call_llm_fn(prompt)
+            jobs = _parse_json_obj(raw)
+            if isinstance(jobs, dict):
+                jobs = jobs.get("jobs", [])
+            if isinstance(jobs, list):
+                return JSONResponse({"ok": True, "jobs": jobs})
+        except Exception as e:
+            err_msg = str(e) or type(e).__name__
+            return JSONResponse({"ok": False, "error": f"ATS Search failed: {err_msg}"}, status_code=500)
+
+    return JSONResponse({"ok": False, "error": "ATS Search unavailable (LLM service unconfigured)"}, status_code=503)
 
 
 @router.post("/api/job-scout/search-now")

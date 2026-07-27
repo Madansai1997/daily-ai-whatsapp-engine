@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(jobs-tracker): Restore applications list API payload for board UI and fallback LLM in ATS Deep Scout _(2026-07-27)_
 - fix(jobs-board): Make NEW queue badge interactive button and fix review-queue JSON key parsing _(2026-07-27)_
 - feat(notebooklm): Wire NotebookLM Context Studio & RAG endpoints into routers/rag_notebook_analyst.py _(2026-07-27)_
 - feat(routers): Refactor monolith V3_updates into FastAPI APIRouters & Add Interactive Mock Interviewer _(2026-07-27)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - fix: Expose detailed HTTP status and message on vault reset failure _(2026-07-26)_
 - feat: Add Reset Master Passphrase endpoint and UI action to wipe vault and re-set passphrase _(2026-07-26)_
 - fix: Use HTTP 403 instead of 401 on diary passphrase failure so JARVIS app session remains unlocked _(2026-07-26)_
-- fix: Mount Project Believer modal at root App level so it opens on all screens (including Chat) _(2026-07-26)_
 <!-- /AUTO:changelog -->
 
 ---
