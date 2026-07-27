@@ -196,6 +196,26 @@ async def applications_add_manual_api(request: Request):
 @router.get("/api/job-scout/review-queue")
 async def api_job_scout_review_queue():
     cards = await list_review_queue()
+    keys = [(c.get("job_key") or f"app:{c.get('id')}") for c in cards]
+    scores = await get_ats_scores_map(keys)
+    rec_scores = await get_recruiter_scores_map(keys)
+    try:
+        from company_watch_agent import news_counts_by_company
+        news_counts = await news_counts_by_company()
+    except Exception:
+        news_counts = {}
+    for c in cards:
+        k = c.get("job_key") or f"app:{c.get('id')}"
+        s = scores.get(k)
+        c["ats_score"] = s["ats_score"] if s else None
+        c["ats_scored_at"] = s["created_at"] if s else None
+        c["ghost_job_risk"] = c.get("ghost_job_risk") or (s["ghost_job_risk"] if s else "none")
+        c["ghost_job_reasons"] = s["ghost_job_reasons"] if s else None
+        rs = rec_scores.get(k)
+        c["recruiter_score"] = rs["recruiter_score"] if rs else None
+        c["recruiter_scored_at"] = rs["created_at"] if rs else None
+        c["apply_method"] = apply_method(c)
+        c["news_count"] = news_counts.get((c.get("company") or "").strip().lower(), 0)
     return JSONResponse({"ok": True, "cards": cards, "queue": cards})
 
 

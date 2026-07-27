@@ -152,6 +152,42 @@ interface JobPrep {
   created_at?: string;
 }
 
+function VerificationTag({ card }: { card: any }) {
+  if (!card) return null;
+  const isGhost = card.ghost_job_risk === "medium" || card.ghost_job_risk === "high";
+  const isAuthorized =
+    card.ghost_job_risk === "low" ||
+    card.ghost_job_risk === "none" ||
+    (typeof card.recruiter_score === "number" && card.recruiter_score >= 60) ||
+    card.source === "ATS Deep Scout" ||
+    card.ats ||
+    Boolean(card.url);
+
+  if (isGhost) {
+    return (
+      <span
+        title={`Ghost Job Risk: ${(card.ghost_job_risk || "HIGH").toUpperCase()}`}
+        className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold font-mono border border-red-500/30 text-[#ffb4ab] bg-red-950/20 cursor-help"
+      >
+        👻 GHOST
+      </span>
+    );
+  }
+
+  if (isAuthorized) {
+    return (
+      <span
+        title="Verified Authentic Posting — direct ATS or verified career portal"
+        className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold font-mono border border-[#a3e635]/40 text-[#a3e635] bg-[#a3e635]/10 cursor-help"
+      >
+        <ShieldCheck className="w-3 h-3 text-[#a3e635]" /> AUTHORIZED
+      </span>
+    );
+  }
+
+  return null;
+}
+
 /* ---- Visual config per status (preserves original HUD styling) ---- */
 
 const STATUS_CONFIG: Record<
@@ -2055,6 +2091,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                             <span title={`Source: ${item.source}`} className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#8aebff]/10 border border-[#8aebff]/25 text-[#8aebff] whitespace-nowrap">{item.source}</span>
                           ) : null}
                           <ApplyTag method={item.apply_method} />
+                          <VerificationTag card={item} />
                           {typeof item.ats_score === "number" ? (
                             <span title="ATS — keyword match with the JD" className="text-[10px] font-mono px-1.5 py-0.5 rounded border" style={{ color: atsColor(item.ats_score).text, borderColor: atsColor(item.ats_score).border }}>ATS {item.ats_score}</span>
                           ) : null}
@@ -2200,11 +2237,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                                       </span>
                                     );
                                   })()}
-                                  {(card.ghost_job_risk === "medium" || card.ghost_job_risk === "high") && (
-                                    <span title={`Ghost Job Risk: ${card.ghost_job_risk.toUpperCase()}`} className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold font-mono border border-red-500/30 text-[#ffb4ab] bg-red-950/20 cursor-help">
-                                      👻 GHOST
-                                    </span>
-                                  )}
+                                  <VerificationTag card={card} />
                                   {(card.news_count ?? 0) > 0 && (
                                     <span title={`${card.news_count} company news signal(s) — open ⋯`} className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold font-mono border border-[#a3e635]/40 text-[#a3e635] bg-[#a3e635]/10 cursor-help">
                                       <Newspaper className="w-3 h-3" />{card.news_count}
@@ -3453,6 +3486,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                           <span className="px-2 py-0.5 rounded text-[10px] bg-[#c084fc]/15 border border-[#c084fc]/30 text-[#c084fc]">
                             {job.ats}
                           </span>
+                          <VerificationTag card={job} />
                         </div>
                         <p className="text-xs text-[#859397]">
                           {job.company} • {job.location}
