@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(ats-scout): Normalize returned job fields and add explicit empty search results state in JobsBoard _(2026-07-27)_
 - fix(jobs-tracker): Pass both system_prompt and user_prompt in call_llm invocation for ATS Deep Scout _(2026-07-27)_
 - fix(jobs-tracker): Restore applications list API payload for board UI and fallback LLM in ATS Deep Scout _(2026-07-27)_
 - fix(jobs-board): Make NEW queue badge interactive button and fix review-queue JSON key parsing _(2026-07-27)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - feat: Add Kimi K3 via OpenRouter as fallback LLM provider in model completion chain _(2026-07-26)_
 - fix: Add reset_believer_vault route to project_believer.py _(2026-07-26)_
 - fix: Expose detailed HTTP status and message on vault reset failure _(2026-07-26)_
-- feat: Add Reset Master Passphrase endpoint and UI action to wipe vault and re-set passphrase _(2026-07-26)_
 <!-- /AUTO:changelog -->
 
 ---

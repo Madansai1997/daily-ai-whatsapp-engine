@@ -221,6 +221,21 @@ def _parse_json_obj(raw: str):
     return obj
 
 
+def _normalize_jobs_list(jobs: list, fallback_location: str = "India", fallback_experience: str = "2+ years") -> list:
+    norm = []
+    for j in (jobs if isinstance(jobs, list) else []):
+        if isinstance(j, dict):
+            norm.append({
+                "title": (j.get("title") or j.get("job_title") or j.get("role") or "Data Analyst").strip(),
+                "company": (j.get("company") or j.get("company_name") or j.get("organization") or "Target Company").strip(),
+                "location": (j.get("location") or j.get("loc") or fallback_location).strip(),
+                "url": (j.get("url") or j.get("link") or j.get("apply_url") or "#").strip(),
+                "experience": (j.get("experience") or j.get("exp") or fallback_experience).strip(),
+                "ats": (j.get("ats") or j.get("platform") or "Direct ATS").strip()
+            })
+    return norm
+
+
 @router.post("/api/job-scout/ats-search")
 async def api_job_scout_ats_search(request: Request):
     """Perform real-time Google Search Grounding to find direct applicant tracking system (ATS) job postings."""
@@ -268,19 +283,19 @@ async def api_job_scout_ats_search(request: Request):
                         if isinstance(jobs, dict):
                             jobs = jobs.get("jobs", [])
                         if isinstance(jobs, list):
-                            return JSONResponse({"ok": True, "jobs": jobs})
+                            return JSONResponse({"ok": True, "jobs": _normalize_jobs_list(jobs, location, experience)})
         except Exception as ex:
             print(f"⚠️ Note: Gemini Grounding direct API call failed: {ex}")
 
     # Fallback to general LLM completion if Gemini Grounding direct call fails or key unconfigured
     if call_llm_fn:
         try:
-            raw = await call_llm_fn("You are a senior technical recruiter and ATS job search engine. Output valid JSON only.", prompt)
+            raw = await call_llm_fn("You are a senior technical recruiter and ATS job search engine. Output valid JSON array only.", prompt)
             jobs = _parse_json_obj(raw)
             if isinstance(jobs, dict):
                 jobs = jobs.get("jobs", [])
             if isinstance(jobs, list):
-                return JSONResponse({"ok": True, "jobs": jobs})
+                return JSONResponse({"ok": True, "jobs": _normalize_jobs_list(jobs, location, experience)})
         except Exception as e:
             err_msg = str(e) or type(e).__name__
             return JSONResponse({"ok": False, "error": f"ATS Search failed: {err_msg}"}, status_code=500)

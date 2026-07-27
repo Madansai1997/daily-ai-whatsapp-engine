@@ -331,9 +331,11 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
   const [atsResults, setAtsResults] = useState<any[]>([]);
   const [atsSearching, setAtsSearching] = useState(false);
   const [atsError, setAtsError] = useState("");
+  const [atsHasSearched, setAtsHasSearched] = useState(false);
 
   const searchAtsJobs = async () => {
     setAtsSearching(true);
+    setAtsHasSearched(true);
     setAtsError("");
     setAtsResults([]);
     try {
@@ -3479,11 +3481,19 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                   ))}
 
                   {atsResults.length === 0 && !atsSearching && !atsError && (
-                    <div className="py-12 text-center text-xs text-[#859397] space-y-1">
-                      <Globe className="w-8 h-8 text-white/10 mx-auto mb-2" />
-                      <p>Enter the search criteria and click "RUN ATS DEEP SCOUT".</p>
-                      <p className="text-[10px] text-[#859397]/60">Gemini searches directly through hosted Workday, Lever, Ashby, and Greenhouse portals.</p>
-                    </div>
+                    atsHasSearched ? (
+                      <div className="py-10 text-center text-xs text-[#859397] space-y-2 bg-white/[0.01] border border-white/5 rounded-xl p-6">
+                        <Globe className="w-8 h-8 text-[#c084fc]/50 mx-auto mb-1 animate-pulse" />
+                        <p className="font-bold text-[#dfe2f3]">No direct ATS job postings found for "{atsRole}".</p>
+                        <p className="text-[11px] text-[#859397]">Try broadening your target role title, experience level, or location keywords.</p>
+                      </div>
+                    ) : (
+                      <div className="py-12 text-center text-xs text-[#859397] space-y-1">
+                        <Globe className="w-8 h-8 text-white/10 mx-auto mb-2" />
+                        <p>Enter the search criteria and click "RUN ATS DEEP SCOUT".</p>
+                        <p className="text-[10px] text-[#859397]/60">Gemini searches directly through hosted Workday, Lever, Ashby, and Greenhouse portals.</p>
+                      </div>
+                    )
                   )}
                 </div>
               </div>
