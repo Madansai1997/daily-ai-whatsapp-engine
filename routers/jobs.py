@@ -415,15 +415,15 @@ async def run_ats_for_app_api(app_id: int):
         return JSONResponse({"ok": False, "error": f"ATS Analysis failed: {err_msg}"}, status_code=500)
 
 
+@router.get("/ats/pending/count")
+async def get_ats_pending_count_api():
+    cnt = await count_pending_ats()
+    return JSONResponse({"ok": True, "count": cnt})
+
+
 @router.get("/ats/{job_ref:path}")
 async def get_ats_analysis_api(job_ref: str):
     analysis = await get_cached_ats_analysis(job_ref)
     if not analysis:
         return JSONResponse({"ok": False, "error": "No ATS analysis cached for this ref"}, status_code=404)
     return JSONResponse({"ok": True, "analysis": analysis})
-
-
-@router.get("/ats/pending/count")
-async def get_ats_pending_count_api():
-    cnt = await count_pending_ats()
-    return JSONResponse({"ok": True, "count": cnt})

@@ -1185,18 +1185,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.include_router(believer_router)
 
-from routers.auth_system import router as auth_router
-from routers.jobs_tracker import router as jobs_router, init_jobs_router_deps
+from routers.auth import router as auth_router
+from routers.jobs import router as jobs_router, init_jobs_router_deps
+from routers.bills import router as bills_router
 from routers.study_daily import router as study_router
-from routers.crons import router as crons_router
+from routers.system import router as system_router
 from routers.influencers_trends import router as influencers_router
-from routers.rag_notebook_analyst import router as rag_router, init_rag_router_deps
+from routers.rag import router as rag_router, init_rag_router_deps
 from routers.chat_voice_bills import router as chat_bills_router
 
 app.include_router(auth_router)
 app.include_router(jobs_router)
+app.include_router(bills_router)
 app.include_router(study_router)
-app.include_router(crons_router)
+app.include_router(system_router)
 app.include_router(influencers_router)
 app.include_router(rag_router)
 app.include_router(chat_bills_router)
