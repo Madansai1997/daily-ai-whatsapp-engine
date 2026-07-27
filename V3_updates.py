@@ -1146,6 +1146,7 @@ async def lifespan(app: FastAPI):
         print("⚠️ Could not confirm which Gmail account is connected.")
 
     init_jobs_router_deps(call_llm, send_whatsapp_chunked)
+    init_rag_router_deps(call_llm, _parse_json_object)
 
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
     app.state.scheduler = scheduler
@@ -1189,7 +1190,7 @@ from routers.jobs_tracker import router as jobs_router, init_jobs_router_deps
 from routers.study_daily import router as study_router
 from routers.crons import router as crons_router
 from routers.influencers_trends import router as influencers_router
-from routers.rag_notebook_analyst import router as rag_router
+from routers.rag_notebook_analyst import router as rag_router, init_rag_router_deps
 from routers.chat_voice_bills import router as chat_bills_router
 
 app.include_router(auth_router)

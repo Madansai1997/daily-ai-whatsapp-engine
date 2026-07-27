@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- feat(notebooklm): Wire NotebookLM Context Studio & RAG endpoints into routers/rag_notebook_analyst.py _(2026-07-27)_
 - feat(routers): Refactor monolith V3_updates into FastAPI APIRouters & Add Interactive Mock Interviewer _(2026-07-27)_
 - feat(deploy-watcher): Add Phase 5 deploy_watcher_agent and endpoints in V3_updates _(2026-07-27)_
 - feat: Upgrade Project Believer with JARVIS AI reflections, daily inquiries, and voice dictation _(2026-07-26)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - fix: Use HTTP 403 instead of 401 on diary passphrase failure so JARVIS app session remains unlocked _(2026-07-26)_
 - fix: Mount Project Believer modal at root App level so it opens on all screens (including Chat) _(2026-07-26)_
 - fix: Trigger Project Believer encrypted modal when invoked via Voice Agent _(2026-07-26)_
-- feat: Add Project Believer (Secret AES-256 Encrypted Private Diary) _(2026-07-26)_
 <!-- /AUTO:changelog -->
 
 ---
