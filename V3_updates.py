@@ -1252,7 +1252,9 @@ async def _auth_gate(request: Request, call_next):
     if AUTH_REQUIRED:
         path = request.url.path
         if any(path.startswith(p) for p in _PROTECTED_PREFIXES):
-            token = request.headers.get("X-Jarvis-Token") or request.query_params.get("token") or ""
+            auth_hdr = request.headers.get("Authorization", "")
+            bearer_tok = auth_hdr.replace("Bearer ", "").strip() if auth_hdr.startswith("Bearer ") else auth_hdr.strip()
+            token = request.headers.get("X-Jarvis-Token") or bearer_tok or request.query_params.get("token") or ""
             if not _verify_token(token):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
     return await call_next(request)

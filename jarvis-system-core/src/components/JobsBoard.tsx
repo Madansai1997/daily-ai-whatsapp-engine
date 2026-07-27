@@ -344,7 +344,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
+          ...(tok ? { "X-Jarvis-Token": tok, Authorization: `Bearer ${tok}` } : {}),
         },
         body: JSON.stringify({ role: atsRole, experience: atsExperience, location: atsLocation }),
       });

@@ -142,17 +142,17 @@ async def get_last_shown(n: int) -> dict:
 # PROFILE
 # =========================================================================
 async def get_profile() -> dict:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT data FROM job_profile WHERE id = 1")
-        row = await cur.fetchone()
-    if row and row["data"]:
-        try:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT data FROM job_profile WHERE id = 1")
+            row = await cur.fetchone()
+        if row and row["data"]:
             p = dict(DEFAULT_PROFILE)
             p.update(json.loads(row["data"]))
             return p
-        except Exception:
-            pass
+    except Exception as e:
+        print(f"⚠️ [job_scout] get_profile read failed: {e}")
     return dict(DEFAULT_PROFILE)
 
 
@@ -569,19 +569,23 @@ async def run_on_demand_search(call_llm_fn, override: dict = None, top_n: int = 
     return format_digest(scored, top_n=top_n, header=f"🎯 *Live job search — {src}:*", on_demand=True)
 
 
-async def search_now_to_board(call_llm_fn, override: dict = None, track_fn=None, top_n: int = 8) -> dict:
+async def search_now_to_board(call_llm_fn=None, override: dict = None, track_fn=None, top_n: int = 8, query: str = None, call_llm=None, **kwargs) -> dict:
     """Console 'Find jobs now': same live pipeline as run_on_demand_search, but PERSISTS the top
     matches into the NEW lane (reviewed=0, via track_fn) so on-demand search feeds the same funnel
     as the daily digest. add_application is idempotent on job_key, so jobs already on the board are
     skipped. Returns {found, added}."""
+    llm_fn = call_llm_fn or call_llm
     profile = dict(await get_profile())
+    if query:
+        override = dict(override or {})
+        override["keywords"] = [query]
     if override:
         profile.update({k: v for k, v in override.items() if v is not None})
     jobs = await fetch_jsearch(profile, limit=15) if RAPIDAPI_KEY else await fetch_adzuna(profile, limit=15)
     if not jobs:
         return {"found": 0, "added": 0}
     candidates = prefilter(jobs, profile) or jobs[:top_n]
-    scored = await rank_jobs(candidates, profile, call_llm_fn, batch_size=10) or candidates
+    scored = await rank_jobs(candidates, profile, llm_fn, batch_size=10) if llm_fn else candidates
     top = scored[:top_n]
     added = 0
     if track_fn:
