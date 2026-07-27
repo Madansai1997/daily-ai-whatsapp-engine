@@ -8,7 +8,7 @@
 > ```
 > List / remove: `python3 shared_memory.py list` · `python3 shared_memory.py rm <key>`
 
-_19 shared memories · last rendered 2026-07-17 17:42 UTC_
+_20 shared memories · last rendered 2026-07-27 05:40 UTC_
 
 ## Feedback — how to work
 
@@ -55,6 +55,9 @@ All user-facing JARVIS responses across this project (WhatsApp replies, web chat
 - The existing WhatsApp/general-chat system prompt in `process_message()`'s `GENERAL CONVERSATIONAL CHAT` fallback must NOT be touched per earlier standing instruction — this quality bar applies to new/other response paths, not as license to rewrite that specific prompt.
 
 ## Project — ongoing work & constraints
+
+### project_deploy_watcher_agent _(via antigravity)_
+Built Phase 5 deploy_watcher_agent.py (RSS memory, GitHub commits, health probes) and wired /api/deploy-watcher/status + /cron/deploy-watcher endpoints into V3_updates.py.
 
 ### project_whatsapp_engine_oom _(via claude-code)_
 "WhatsApp engine OOM on Render — root cause is glibc malloc-arena ratcheting, not a single spike"

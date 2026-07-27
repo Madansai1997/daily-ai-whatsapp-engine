@@ -4625,6 +4625,28 @@ async def cron_bills(token: str = ""):
     return JSONResponse({"status": "bills checked", "alerts": sent}, status_code=202)
 
 
+@app.get("/api/deploy-watcher/status")
+async def api_deploy_watcher_status():
+    """Diagnostic report for process RSS memory, GitHub commit status, and endpoint health."""
+    import deploy_watcher_agent
+    report = await deploy_watcher_agent.get_system_health_report()
+    return JSONResponse(report)
+
+
+@app.post("/cron/deploy-watcher")
+async def cron_deploy_watcher(token: str = ""):
+    """Cron endpoint: probe health, check RSS memory threshold, and alert JARVIS web inbox if degraded."""
+    if (deny := _cron_guard(token)) is not None:
+        return deny
+    import deploy_watcher_agent
+    res = await deploy_watcher_agent.check_deploys_and_notify(
+        call_llm_fn=call_llm,
+        store_notification_fn=_store_notification
+    )
+    await _log_job("deploy-watcher", "completed", f"status: {res.get('status')}")
+    return JSONResponse({"status": res.get("status"), "alert_sent": res.get("alert_sent")}, status_code=202)
+
+
 @app.post("/cron/followups")
 async def cron_followups(token: str = ""):
     """Daily: auto-draft follow-ups for stale applications (never sends — readies for review)."""
@@ -8261,6 +8283,33 @@ async def pdf_rag_assess_ep(doc_id: int, request: Request):
 async def pdf_rag_delete_ep(doc_id: int):
     await pdf_rag_delete(doc_id)
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/pdf-rag/{doc_id}/notebooklm")
+async def pdf_rag_notebooklm_pack(doc_id: int):
+    """Download full document chunks formatted as a clean Markdown source pack for Google NotebookLM."""
+    chunks = await pdf_rag_get_chunks(doc_id)
+    if not chunks:
+        return JSONResponse({"detail": "Document not found or has no chunks"}, status_code=404)
+    
+    filename = chunks[0].get("filename") or f"Document_{doc_id}"
+    lines = [
+        f"# NOTEBOOKLM SOURCE PACK: {filename}\n",
+        f"*Extracted and indexed by JARVIS Multi-Source Intelligence System*\n",
+        "---\n"
+    ]
+    for c in chunks:
+        lines.append(f"## Page {c.get('page_num', '?')} / Chunk #{c.get('chunk_idx', '?')}\n")
+        lines.append(c.get("content", "").strip())
+        lines.append("\n\n---\n")
+        
+    full_md = "\n".join(lines)
+    return Response(
+        content=full_md,
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="NotebookLM_Source_{doc_id}.md"'}
+    )
+
 
 
 # ── JARVIS Notebooks (Built-in NotebookLM) Multi-Source Context Assembly ───────

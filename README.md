@@ -102,6 +102,7 @@ whole console from bundled sample fixtures. Shareable as a live demo with zero d
 - **`company_watch_agent.py`** — Company Watch — turns the companies on your Kanban into a live news feed.
 - **`daily_standup.py`** — Voice Daily Standup — a single spoken briefing that pulls the whole job search together.
 - **`db_compat.py`** — aiosqlite/sqlite3-compatible shim, so the ~91 existing DB call sites across this app.
+- **`deploy_watcher_agent.py`** — Deploy Watcher Agent (Phase 5) — Monitors local system RSS memory, GitHub repo commits,.
 - **`email_triage.py`** — Email Triage Agent — self-contained skill module.
 - **`followup_agent.py`** — Follow-up Agent — nudges stale 'applied' cards with a drafted recruiter follow-up.
 - **`gemini_tts.py`** — Gemini text-to-speech — an optional natural voice for JARVIS.
@@ -146,6 +147,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- feat(deploy-watcher): Add Phase 5 deploy_watcher_agent and endpoints in V3_updates _(2026-07-27)_
 - feat: Upgrade Project Believer with JARVIS AI reflections, daily inquiries, and voice dictation _(2026-07-26)_
 - fix: Purge influencer posts on deletion and filter feed to currently watched creators _(2026-07-26)_
 - feat: Add Kimi K3 via OpenRouter as fallback LLM provider in model completion chain _(2026-07-26)_
@@ -157,10 +159,9 @@ npm install && npm run build     # served by the engine at /console
 - fix: Trigger Project Believer encrypted modal when invoked via Voice Agent _(2026-07-26)_
 - feat: Add Project Believer (Secret AES-256 Encrypted Private Diary) _(2026-07-26)_
 - feat: implement ATS Deep Scout for direct company career portal searches _(2026-07-24)_
-- fix: define _parse_json_object in V3_updates.py to fix image scanner NameError _(2026-07-24)_
 <!-- /AUTO:changelog -->
 
 ---
 
-_Last updated: 2026-07-26 · this README's inventory and changelog are auto-maintained by
+_Last updated: 2026-07-27 · this README's inventory and changelog are auto-maintained by
 `scripts/gen_readme.py` on every commit._
