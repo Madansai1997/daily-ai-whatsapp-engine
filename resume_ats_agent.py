@@ -308,10 +308,18 @@ def _score_from_matrix(analysis: dict) -> dict:
     return analysis
 
 
-async def analyze(job: dict, call_llm_fn, domain: str = DEFAULT_DOMAIN) -> dict:
+async def analyze(job: dict = None, call_llm_fn = None, domain: str = DEFAULT_DOMAIN, **kwargs) -> dict:
     """Run the ATS analysis for one job against the master resume, cache it, and return the
-    cache row (dict). `job` needs: job_key/id, title, company, location, description.
+    cache row (dict). Accepts job dict or keyword parameters (job_ref, job_title, job_company, job_description).
     Returns {"error": ...} if there's no resume or the JD is empty."""
+    call_llm_fn = call_llm_fn or kwargs.get("call_llm")
+    if not job:
+        job = {
+            "key": kwargs.get("job_ref"),
+            "title": kwargs.get("job_title") or "Position",
+            "company": kwargs.get("job_company") or "Company",
+            "description": kwargs.get("job_description") or ""
+        }
     resume = await get_resume_template(domain)
     if not resume:
         return {"error": "No master resume saved yet. Upload your resume first."}

@@ -387,17 +387,32 @@ async def run_ats_for_app_api(app_id: int):
     if not job_desc.strip():
         return JSONResponse({
             "ok": False,
-            "error": "No Job Description found on this card. Paste the JD into the card description first!"
+            "error": "No Job Description found on this card. Paste the JD into the card description first!",
+            "needs_jd": True,
+            "title": app_row.get("title") or "Position",
+            "company": app_row.get("company") or ""
         }, status_code=400)
 
-    res = await run_ats_alignment(
-        job_ref=job_ref,
-        job_title=app_row.get("title") or "Position",
-        job_company=app_row.get("company") or "Company",
-        job_description=job_desc,
-        call_llm=call_llm_fn
-    )
-    return JSONResponse(res)
+    job_dict = {
+        "key": job_ref,
+        "id": app_id,
+        "title": app_row.get("title") or "Position",
+        "company": app_row.get("company") or "Company",
+        "location": app_row.get("location") or "",
+        "description": job_desc
+    }
+
+    try:
+        res = await run_ats_alignment(
+            job=job_dict,
+            call_llm_fn=call_llm_fn
+        )
+        if isinstance(res, dict) and res.get("error"):
+            return JSONResponse({"ok": False, "error": res["error"]}, status_code=400)
+        return JSONResponse({"ok": True, "analysis": res, **(res if isinstance(res, dict) else {})})
+    except Exception as e:
+        err_msg = str(e) or type(e).__name__
+        return JSONResponse({"ok": False, "error": f"ATS Analysis failed: {err_msg}"}, status_code=500)
 
 
 @router.get("/ats/{job_ref:path}")

@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(ats-alignment): Resolve parameter mismatch in analyze function and return clean JSON response for missing JD _(2026-07-27)_
 - feat(jobs-board): Display Ghost and Authorized verification tags on new scout jobs and board cards _(2026-07-27)_
 - fix(console): Fix missing icon imports and invalid function reference causing blank screen render crash _(2026-07-27)_
 - fix(job-scout): Comprehensive fix for board cards payload, ATS Deep Scout auth gate, on-demand search parameters, and DB loop safety _(2026-07-27)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - feat(notebooklm): Wire NotebookLM Context Studio & RAG endpoints into routers/rag_notebook_analyst.py _(2026-07-27)_
 - feat(routers): Refactor monolith V3_updates into FastAPI APIRouters & Add Interactive Mock Interviewer _(2026-07-27)_
 - feat(deploy-watcher): Add Phase 5 deploy_watcher_agent and endpoints in V3_updates _(2026-07-27)_
-- feat: Upgrade Project Believer with JARVIS AI reflections, daily inquiries, and voice dictation _(2026-07-26)_
 <!-- /AUTO:changelog -->
 
 ---
