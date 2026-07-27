@@ -389,8 +389,11 @@ async def fetch_all(profile: dict) -> list:
             print(f"⚠️ [job_scout] source {src.__name__} failed: {e}")
     # de-dup within this batch by key
     unique = {j["key"]: j for j in jobs}
-    seen = await _already_seen(list(unique.keys()))
-    fresh = [j for k, j in unique.items() if k not in seen]
+    try:
+        seen = await _already_seen(list(unique.keys()))
+        fresh = [j for k, j in unique.items() if k not in seen]
+    except Exception:
+        fresh = list(unique.values())
     print(f"ℹ️ [job_scout] fetched {len(jobs)} raw, {len(unique)} unique, {len(fresh)} new (unseen).")
     return fresh
 

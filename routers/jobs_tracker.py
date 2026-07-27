@@ -262,15 +262,16 @@ async def api_job_scout_ats_search(request: Request):
         f"]"
     )
 
+    # 1. Try Gemini 2.0 Flash REST endpoint with Google Search Grounding
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if gemini_key:
-        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_key}"
         body_data = {
             "contents": [{"parts": [{"text": prompt}]}],
             "tools": [{"googleSearch": {}}]
         }
         try:
-            async with httpx.AsyncClient(timeout=45) as client:
+            async with httpx.AsyncClient(timeout=35) as client:
                 res = await client.post(endpoint, json=body_data)
             if res.status_code == 200:
                 data = res.json()
@@ -282,20 +283,35 @@ async def api_job_scout_ats_search(request: Request):
                         jobs = _parse_json_obj(text)
                         if isinstance(jobs, dict):
                             jobs = jobs.get("jobs", [])
-                        if isinstance(jobs, list):
-                            return JSONResponse({"ok": True, "jobs": _normalize_jobs_list(jobs, location, experience)})
+                        norm = _normalize_jobs_list(jobs, location, experience)
+                        if norm:
+                            return JSONResponse({"ok": True, "jobs": norm})
         except Exception as ex:
             print(f"⚠️ Note: Gemini Grounding direct API call failed: {ex}")
 
-    # Fallback to general LLM completion if Gemini Grounding direct call fails or key unconfigured
+    # 2. Fallback to Job Scout live search (fetch_all) from Adzuna / JSearch
+    try:
+        from job_scout_agent import fetch_all, DEFAULT_PROFILE
+        prof = dict(DEFAULT_PROFILE)
+        prof["role"] = role
+        prof["locations"] = [location]
+        raw_live = await fetch_all(prof)
+        if raw_live:
+            norm = _normalize_jobs_list(raw_live[:12], location, experience)
+            if norm:
+                return JSONResponse({"ok": True, "jobs": norm})
+    except Exception as ex:
+        print(f"⚠️ Note: Job Scout live fetch fallback failed: {ex}")
+
+    # 3. Fallback to general LLM completion if prior methods yielded no results
     if call_llm_fn:
         try:
             raw = await call_llm_fn("You are a senior technical recruiter and ATS job search engine. Output valid JSON array only.", prompt)
             jobs = _parse_json_obj(raw)
             if isinstance(jobs, dict):
                 jobs = jobs.get("jobs", [])
-            if isinstance(jobs, list):
-                return JSONResponse({"ok": True, "jobs": _normalize_jobs_list(jobs, location, experience)})
+            norm = _normalize_jobs_list(jobs, location, experience)
+            return JSONResponse({"ok": True, "jobs": norm})
         except Exception as e:
             err_msg = str(e) or type(e).__name__
             return JSONResponse({"ok": False, "error": f"ATS Search failed: {err_msg}"}, status_code=500)
