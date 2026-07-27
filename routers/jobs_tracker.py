@@ -172,7 +172,7 @@ async def applications_add_manual_api(request: Request):
 @router.get("/api/job-scout/review-queue")
 async def api_job_scout_review_queue():
     cards = await list_review_queue()
-    return JSONResponse({"ok": True, "cards": cards})
+    return JSONResponse({"ok": True, "cards": cards, "queue": cards})
 
 
 @router.get("/api/job-scout/review-queue/count")

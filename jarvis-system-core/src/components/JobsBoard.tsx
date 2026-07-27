@@ -594,7 +594,11 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
     try {
       const res = await fetch("/api/job-scout/review-queue");
       const data = await res.json();
-      const q = Array.isArray(data?.queue) ? data.queue : [];
+      const q = Array.isArray(data?.cards)
+        ? data.cards
+        : Array.isArray(data?.queue)
+        ? data.queue
+        : [];
       setReviewQueue(q);
       setStatuses(Array.isArray(data?.statuses) ? data.statuses : statuses);
       const stageMap: Record<number, string> = {};
@@ -1746,13 +1750,21 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
 
           <div className="flex items-center gap-3 font-mono">
             {reviewCount > 0 && (
-              <span
-                className="flex items-center gap-2 px-4 py-2 bg-[#a3e635]/10 border border-[#a3e635]/40 rounded-lg text-xs font-semibold text-[#a3e635]"
-                title="Fresh Job Scout matches waiting in the NEW column — save, apply, or skip"
+              <button
+                onClick={() => {
+                  loadReviewQueue();
+                  loadReviewCount();
+                  const col = document.getElementById("new-triage-column");
+                  if (col) {
+                    col.scrollIntoView({ behavior: "smooth", inline: "center" });
+                  }
+                }}
+                className="flex items-center gap-2 px-4 py-2 bg-[#a3e635]/15 border border-[#a3e635]/50 rounded-lg text-xs font-semibold text-[#a3e635] hover:bg-[#a3e635]/25 hover:border-[#a3e635]/80 transition-all cursor-pointer shadow-[0_0_12px_rgba(163,230,53,0.2)] hover:shadow-[0_0_20px_rgba(163,230,53,0.4)]"
+                title="Click to view & triage fresh Job Scout matches"
               >
-                <Sparkles className="w-4 h-4" />
+                <Sparkles className="w-4 h-4 animate-pulse" />
                 {reviewCount} NEW
-              </span>
+              </button>
             )}
             <button
               onClick={openAdd}
@@ -2004,7 +2016,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
           <div className="flex gap-6 min-w-[1200px] px-2">
             {/* NEW — triage lane: fresh scout matches land here (daily + on-demand). Save / Apply / Skip. */}
             {(reviewQueue.length > 0 || reviewMsg) && (
-              <div className="flex-shrink-0 w-80 glass-column flex flex-col rounded-xl min-h-[500px] border border-[#a3e635]/25">
+              <div id="new-triage-column" className="flex-shrink-0 w-80 glass-column flex flex-col rounded-xl min-h-[500px] border border-[#a3e635]/25">
                 <div className="p-4 border-b border-white/5 flex justify-between items-center bg-[#a3e635]/5">
                   <span className="text-xs font-bold font-mono text-[#a3e635] tracking-widest flex items-center gap-1.5">
                     <Sparkles className="w-3.5 h-3.5" /> NEW · TRIAGE
