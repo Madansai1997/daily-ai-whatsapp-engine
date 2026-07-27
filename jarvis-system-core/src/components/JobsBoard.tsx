@@ -38,6 +38,7 @@ import {
   Wrench,
   BookOpen,
   Globe,
+  ExternalLink,
 } from "lucide-react";
 import { getToken } from "../lib/auth";
 
@@ -311,7 +312,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       const data = await res.json();
       if (data.ok) {
         alert(`Successfully scanned job: ${data.title} @ ${data.company}`);
-        fetchCards();
+        loadApplications();
       } else {
         alert(`Image scan failed: ${data.error || "Unknown error"}`);
       }

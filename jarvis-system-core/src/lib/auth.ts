@@ -86,7 +86,10 @@ export function installFetchInterceptor() {
       if (canned) return canned;
     }
     const headers = new Headers(init.headers || {});
-    if (token) headers.set("X-Jarvis-Token", token);
+    if (token) {
+      headers.set("X-Jarvis-Token", token);
+      headers.set("Authorization", `Bearer ${token}`);
+    }
     const res = await orig(input, { ...init, headers });
     if (res.status === 401) {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;

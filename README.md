@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(console): Fix missing icon imports and invalid function reference causing blank screen render crash _(2026-07-27)_
 - fix(job-scout): Comprehensive fix for board cards payload, ATS Deep Scout auth gate, on-demand search parameters, and DB loop safety _(2026-07-27)_
 - fix(ats-scout): Update REST model to gemini-2.0-flash and add live Job Scout multi-layer fallback _(2026-07-27)_
 - fix(ats-scout): Normalize returned job fields and add explicit empty search results state in JobsBoard _(2026-07-27)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - feat(deploy-watcher): Add Phase 5 deploy_watcher_agent and endpoints in V3_updates _(2026-07-27)_
 - feat: Upgrade Project Believer with JARVIS AI reflections, daily inquiries, and voice dictation _(2026-07-26)_
 - fix: Purge influencer posts on deletion and filter feed to currently watched creators _(2026-07-26)_
-- feat: Add Kimi K3 via OpenRouter as fallback LLM provider in model completion chain _(2026-07-26)_
 <!-- /AUTO:changelog -->
 
 ---

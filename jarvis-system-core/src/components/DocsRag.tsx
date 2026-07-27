@@ -4,7 +4,7 @@ import {
   FileText, Upload, Trash2, Send, MessageSquare, ClipboardCheck,
   ShieldCheck, Loader2, Quote, X, AlertTriangle, Sparkles, BookOpen,
   Volume2, Play, CheckCircle2, Award, HelpCircle, RefreshCw, Layers,
-  Mic, Terminal, Database
+  Mic, Terminal, Database, Square
 } from "lucide-react";
 import { getToken } from "../lib/auth";
 
