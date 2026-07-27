@@ -275,7 +275,7 @@ async def api_job_scout_ats_search(request: Request):
     # Fallback to general LLM completion if Gemini Grounding direct call fails or key unconfigured
     if call_llm_fn:
         try:
-            raw = await call_llm_fn(prompt)
+            raw = await call_llm_fn("You are a senior technical recruiter and ATS job search engine. Output valid JSON only.", prompt)
             jobs = _parse_json_obj(raw)
             if isinstance(jobs, dict):
                 jobs = jobs.get("jobs", [])
