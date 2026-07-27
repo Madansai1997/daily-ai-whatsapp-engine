@@ -1739,8 +1739,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
     // Analysed cards rise to the top, highest ATS score first; un-analysed keep their
     // existing (most-recently-updated) order at the bottom.
     const cards = applications
-      // reviewed=0 are fresh scout matches — they live in the NEW column, not the normal lanes.
-      .filter((a) => a.status === status && a.reviewed !== 0 && matchesFilters(a))
+      .filter((a) => a.status === status && matchesFilters(a))
       .map((a, i) => ({ a, i }))
       .sort((x, y) => {
         const sx = typeof x.a.ats_score === "number" ? x.a.ats_score : -1;
