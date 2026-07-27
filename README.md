@@ -109,6 +109,7 @@ whole console from bundled sample fixtures. Shareable as a live demo with zero d
 - **`get_gmail_token.py`** — One-time local script to mint a combined Gmail + Calendar OAuth refresh token.
 - **`google_docs_agent.py`** — Google Docs Agent — turns an ATS analysis into a tailored-résumé Google Doc.
 - **`interview_prep.py`** — Interview Prep Dock — surfaces upcoming interviews from Calendar and, on demand, drafts a.
+- **`interview_simulator.py`** — Interactive AI Mock Interviewer & Voice Coach (interview_simulator.py).
 - **`job_apply_agent.py`** — Job Apply Agent — apply-prep + (approval-gated) auto-apply for the Job Scout pipeline.
 - **`job_scout_agent.py`** — Job Scout Agent — self-contained skill module (Phase 4).
 - **`llm_gateway.py`** — In-process reliability layer around the multi-provider LLM chain.
@@ -129,6 +130,8 @@ whole console from bundled sample fixtures. Shareable as a live demo with zero d
 - **`run_evals.py`** — Golden-eval harness for JARVIS — 100% free-tier, CI-safe.
 - **`shared_memory.py`** — Shared memory bridge for Claude Code ⇄ Antigravity.
 - **`study_tracks.py`** — Study tracks — ordered curricula for the Daily AI Update.
+- **`test_interview_simulator.py`** — Local test suite for interview_simulator.py (SAFE_MODE=1).
+- **`test_modular_routes.py`** — Comprehensive API Route & Mock Interview Test (SAFE_MODE=1).
 - **`trend_lab_agent.py`** — Trend Lab Agent — weekly app-idea discovery from Reddit + YouTube (free-tier only).
 - **`weather_agent.py`** — Weather Agent — self-contained skill module.
 - **`workspace_notes.py`** — Workspace Notes — a small DB-backed markdown scratchpad for the console.
@@ -147,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- feat(routers): Refactor monolith V3_updates into FastAPI APIRouters & Add Interactive Mock Interviewer _(2026-07-27)_
 - feat(deploy-watcher): Add Phase 5 deploy_watcher_agent and endpoints in V3_updates _(2026-07-27)_
 - feat: Upgrade Project Believer with JARVIS AI reflections, daily inquiries, and voice dictation _(2026-07-26)_
 - fix: Purge influencer posts on deletion and filter feed to currently watched creators _(2026-07-26)_
@@ -158,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - fix: Mount Project Believer modal at root App level so it opens on all screens (including Chat) _(2026-07-26)_
 - fix: Trigger Project Believer encrypted modal when invoked via Voice Agent _(2026-07-26)_
 - feat: Add Project Believer (Secret AES-256 Encrypted Private Diary) _(2026-07-26)_
-- feat: implement ATS Deep Scout for direct company career portal searches _(2026-07-24)_
 <!-- /AUTO:changelog -->
 
 ---

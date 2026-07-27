@@ -8,7 +8,7 @@
 > ```
 > List / remove: `python3 shared_memory.py list` · `python3 shared_memory.py rm <key>`
 
-_20 shared memories · last rendered 2026-07-27 05:40 UTC_
+_22 shared memories · last rendered 2026-07-27 05:54 UTC_
 
 ## Feedback — how to work
 
@@ -55,6 +55,9 @@ All user-facing JARVIS responses across this project (WhatsApp replies, web chat
 - The existing WhatsApp/general-chat system prompt in `process_message()`'s `GENERAL CONVERSATIONAL CHAT` fallback must NOT be touched per earlier standing instruction — this quality bar applies to new/other response paths, not as license to rewrite that specific prompt.
 
 ## Project — ongoing work & constraints
+
+### project_upgrade_priorities_roadmap _(via antigravity)_
+JARVIS Upgrade Roadmap & Priority Consensus: (P0) Monolith V3_updates.py APIRouter split; (P1) Interactive AI Mock Interviewer (interview_simulator.py); (P2) Code & Deploy Watcher (deploy_watcher_agent.py - completed & pushed); (P3) Safe AI Form Pre-Fill Assistant (Human-in-the-Loop DOM Pre-Fill).
 
 ### project_deploy_watcher_agent _(via antigravity)_
 Built Phase 5 deploy_watcher_agent.py (RSS memory, GitHub commits, health probes) and wired /api/deploy-watcher/status + /cron/deploy-watcher endpoints into V3_updates.py.
@@ -222,6 +225,9 @@ PLAN — reorganize the whole JARVIS console into a proper guided, ordered flow 
 Claude Code ⇄ Antigravity shared memory. Canonical store: shared_memory table in LOCAL agent_memory.db, managed by shared_memory.py. Both IDEs read the generated AGENTS.md (Antigravity natively; Claude via CLAUDE.md @import). NOTE: the two SQLite MCP servers are NOT a shared channel — Claude's mcp_sqlite_server.py loads .env and hits prod Turso, while Antigravity's server-sqlite reads the local file; AGENTS.md is the real bridge. To add: python3 shared_memory.py add --key <slug> --category <cat> --source <who> "fact" (regenerates AGENTS.md). A Claude SessionStart hook re-renders AGENTS.md each session.
 
 ## Decisions — settled choices
+
+### decision_safe_form_prefill_over_autoapply _(via antigravity)_
+Auto-Apply Form Automation must be Human-in-the-Loop DOM Pre-Fill (AI Form Pre-Fill Assistant), NOT fully autonomous background headless submission bots. Reason: Fully automated headless bots violate platform Terms of Service (e.g. LinkedIn, Workday) and risk account bans/CAPTCHA IP blocks. The safe architecture pre-fills fields in active browser tabs and relies on manual human review/submission.
 
 ### analyst_pyodide_same_origin_proxy _(via claude-code)_
 The Data Analyst's Pyodide runtime MUST load from the same-origin engine proxy (GET /pyodide/{path} in V3_updates.py -> streams from jsdelivr server-side, disk-cached, immutable cache headers), NOT directly from jsdelivr. Root cause (2026-07-17): loading Pyodide straight from cdn.jsdelivr.net hung forever on the user's Hyderabad ISP because several Indian ISPs throttle/block jsdelivr; it worked from other networks, making it look like slowness. Multi-CDN fallbacks (fastly/gcore.jsdelivr) DON'T help - all jsdelivr edges. Frontend DataAnalyst.tsx sets indexURL='/pyodide/'. Excel wheels (openpyxl+et_xmlfile) are self-hosted under jarvis-system-core/public/wheels and micropip-installed from /console/wheels with deps=False, so Excel doesn't need PyPI either. In Pyodide 0.26.4 loadPackage lacks openpyxl/pyarrow/python-calamine (use micropip wheels for openpyxl; fastparquet+cramjam for parquet; xlrd for .xls). DO NOT revert to direct-CDN loading.
