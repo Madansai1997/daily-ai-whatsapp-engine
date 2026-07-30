@@ -1,1073 +1,531 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState } from "react";
 import {
-  Newspaper, RefreshCw, ExternalLink, BookOpen, Code2, Send,
-  CheckCircle2, Smile, Meh, Frown, History, GraduationCap, Brain, XCircle, AlertCircle,
-  Flame, Layers, Target, Repeat, MessageCircleQuestion, Download, StickyNote, CalendarRange,
-  Play, Sparkles, Search, User, Bot, Lightbulb, ArrowDown,
+  BookOpen, Sparkles, Code2, HelpCircle, CheckCircle2, XCircle,
+  Flame, Settings, Sliders, ChevronRight, ChevronLeft, Volume2,
+  VolumeX, RefreshCw, Trophy, Lightbulb, Play, RotateCcw
 } from "lucide-react";
 import { getToken } from "../lib/auth";
 
-// Pyodide (Python-in-WASM) loaded lazily from CDN only when the learner first runs code.
-declare global { interface Window { loadPyodide?: (opts: { indexURL: string }) => Promise<PyodideAPI>; } }
-interface PyodideAPI {
-  runPythonAsync: (code: string) => Promise<unknown>;
-  setStdout: (opts: { batched: (s: string) => void }) => void;
-  setStderr: (opts: { batched: (s: string) => void }) => void;
-}
-// Reject if a promise doesn't settle in time — so a stalled runtime load never hangs the UI forever.
-function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
-  return Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error(msg)), ms))]);
-}
-// Third-party libs the in-browser Python can't provide (no pip, no network). Bare imports of these
-// would fail — we catch them up front with a clear message instead of a confusing runtime error.
-const BLOCKED_IMPORTS = ["tiktoken", "openai", "anthropic", "cohere", "requests", "httpx", "urllib",
-  "torch", "tensorflow", "keras", "transformers", "sklearn", "scikit", "langchain", "llama_index",
-  "faiss", "chromadb", "pinecone", "boto3", "numpy", "pandas", "scipy"];
-const PYODIDE_VER = "0.26.4";
-let _pyodidePromise: Promise<PyodideAPI> | null = null;
-function loadPyodideOnce(): Promise<PyodideAPI> {
-  if (_pyodidePromise) return _pyodidePromise;
-  _pyodidePromise = new Promise((resolve, reject) => {
-    const url = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VER}/full/`;
-    const s = document.createElement("script");
-    s.src = `${url}pyodide.js`;
-    s.onload = async () => {
-      try { resolve(await window.loadPyodide!({ indexURL: url })); }
-      catch (e) { _pyodidePromise = null; reject(e); }
-    };
-    s.onerror = () => { _pyodidePromise = null; reject(new Error("Couldn't load the Python runtime (offline?).")); };
-    document.head.appendChild(s);
-  });
-  return _pyodidePromise;
+interface LessonData {
+  ok: boolean;
+  track_key: string;
+  topic: string;
+  streak: number;
+  slide1_story: {
+    title: string;
+    analogy: string;
+  };
+  slide2_visual: {
+    title: string;
+    mermaid_diagram: string;
+    handwritten_code_title: string;
+    code_snippet: string;
+  };
+  slide3_quiz: {
+    question: string;
+    options: string[];
+    correct_index: number;
+    explanation: string;
+  };
 }
 
-interface NewsItem { title: string; url: string; snippet: string; }
-interface WatchItem { name?: string; platform?: string; title?: string; url?: string; note?: string; }
-interface Digest {
-  empty?: boolean;
-  date?: string;
-  concept?: string;
-  pedagogical_focus?: string;
-  news?: NewsItem[];
-  watch?: WatchItem[];
-  digest_text?: string;
-  reference_code?: string;
-  difficulty?: string | null;
-  sent_whatsapp?: boolean;
-}
-interface HistRow { date: string; concept: string; difficulty: string | null; sent_whatsapp: boolean; }
-interface Track { key: string; name: string; description: string; total: number; }
-interface Progress { key: string; name: string; total: number; completed: number; next: string | null; }
-interface GradeItem { verdict: string; explanation: string; }
-interface Grade { overall: number; items: GradeItem[]; }
-interface Feynman { rating: string; correct: string; missing: string[]; feedback: string; }
-interface Mastery { concept: string; score: number; }
-interface Stats { streak: number; concepts_learned: number; quizzed: number; avg_recall: number | null; reviews_due: number; mastery: Mastery[]; }
-interface ReviewItem { concept: string; rep: number; next_due: string; }
-interface FollowTurn { role: string; content: string; }
-interface NoteHit { id: number; title: string; snippet: string; }
-interface Explain {
-  tldr: string;
-  analogy?: string;
-  flow?: { title?: string; steps?: { label: string; detail?: string }[] };
-  sections?: { heading: string; points?: string[]; body?: string }[];
-  comparison?: { title?: string; col_a?: string; col_b?: string; rows?: { a: string; b: string }[] } | null;
-  example?: { caption?: string; code?: string };
-  key_points?: string[];
-  pitfalls?: string[];
-  quick_check?: { q: string; a: string };
-}
-
-// digest_text is the full WhatsApp-format payload (news list + learning notes + any legacy
-// mini-project / weekly-project / QA-assert scaffolding). On the web the news is shown as linked
-// cards + the Home newspaper strip, so here we keep ONLY the learning prose: strip the news list,
-// the project sections, and any assert/QA lines. Returns "" when nothing meaningful is left.
-function cleanLesson(raw: string): string {
-  // Drop any leaked reference-implementation code block + stray xml-ish tags before line parsing.
-  raw = raw
-    .replace(/<reference_implementation>[\s\S]*?<\/reference_implementation>/gi, "")
-    .replace(/<\/?(reference_implementation|whatsapp_payload)>/gi, "");
-  const out: string[] = [];
-  let section: "pre" | "news" | "learn" | "project" = "pre";
-  let skipAssertRules = false;
-  let inCode = false;
-  for (const rawLine of raw.split("\n")) {
-    const line = rawLine.replace(/\*/g, "").replace(/\r/g, "");
-    const t = line.trim();
-    const low = t.toLowerCase();
-    if (t.startsWith("```")) { inCode = !inCode; continue; }  // drop code blocks (shown in the editor)
-    if (inCode) continue;
-    if (low.includes("regular daily ai updates")) { section = "news"; continue; }
-    if (low.includes("what i need to learn")) { section = "learn"; skipAssertRules = false; continue; }
-    if (low.includes("this week") && low.includes("project")) { section = "project"; continue; }
-    if (section === "news" || section === "project") continue;
-    if (low.startsWith("practical mini-project") || low.startsWith("- practical mini-project")) continue;
-    if (low.includes("qa validation lines")) continue;
-    if (low.startsWith("critical assertion")) { skipAssertRules = true; continue; }
-    if (skipAssertRules) { if (/^\d+\./.test(t)) continue; skipAssertRules = false; }
-    if (t.startsWith("assert ")) continue;
-    if (low.startsWith("core concept to master") || low.startsWith("- core concept to master")) continue;
-    out.push(line);
-  }
-  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-}
-
-// Parse a response as JSON, but never throw on a plain-text error page (e.g. a 500
-// "Internal Server Error") — return a clean {error} instead so the UI shows a friendly message.
-async function safeJson(res: Response): Promise<Record<string, unknown>> {
-  const text = await res.text();
-  try { return JSON.parse(text); }
-  catch { return { error: res.ok ? "Unexpected response from the server." : `Server error (${res.status}). Please try again.` }; }
-}
-
-// Smooth-scroll to a section (used by the "study in 4 steps" hint card).
-function scrollToId(id: string) {
-  document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
-// Tiny markdown-lite renderer: **bold** + "- " bullets + paragraphs. Keeps tutor replies readable
-// instead of a single wall of text, without pulling in a markdown library.
-function RichText({ text }: { text: string }) {
-  const lines = text.split("\n").filter((l) => l.trim() !== "");
-  const fmt = (s: string) =>
-    s.split(/(\*\*[^*]+\*\*)/g).map((p, j) =>
-      p.startsWith("**") && p.endsWith("**")
-        ? <strong key={j} className="text-[#dfe2f3] font-semibold">{p.slice(2, -2)}</strong>
-        : <span key={j}>{p}</span>);
-  return (
-    <div className="space-y-1">
-      {lines.map((ln, i) => {
-        const isBullet = /^\s*[-*•]\s+/.test(ln);
-        if (isBullet) {
-          return <div key={i} className="flex gap-1.5"><span className="text-[#8aebff] mt-0.5">•</span><p className="leading-relaxed flex-1">{fmt(ln.replace(/^\s*[-*•]\s+/, ""))}</p></div>;
-        }
-        return <p key={i} className="leading-relaxed">{fmt(ln)}</p>;
-      })}
-    </div>
-  );
-}
-
-const FOLLOWUP_CHIPS = ["Explain more simply", "Give a real-world example", "Show me the code", "Quiz me on this"];
-
-interface ReplyData { answer?: string; points?: string[]; flow?: string[]; code?: string; suggestions?: string[]; }
-// Assistant turns are stored as a JSON reply object; parse it (falls back to null for old plain-text turns).
-function parseReply(content: string): ReplyData | null {
-  try {
-    const o = JSON.parse(content);
-    if (o && typeof o === "object" && ("answer" in o || "points" in o || "flow" in o)) return o as ReplyData;
-  } catch { /* plain text */ }
-  return null;
-}
-
-// Renders a tutor reply VISUALLY — a one-line answer, an optional flow (A → B → C), scannable
-// bullets, and runnable code you can push into the editor. Falls back to markdown-lite for old turns.
-function AssistantReply({ content, onRunCode }: { content: string; onRunCode: (code: string) => void }) {
-  const data = parseReply(content);
-  if (!data) return <RichText text={content} />;
-  return (
-    <div className="space-y-2">
-      {data.answer && <p className="leading-relaxed font-medium text-[#dfe2f3]">{data.answer}</p>}
-      {(data.flow?.length ?? 0) > 0 && (
-        <div className="flex flex-wrap items-center gap-1">
-          {data.flow!.map((s, i) => (
-            <span key={i} className="flex items-center gap-1">
-              <span className="px-2 py-0.5 rounded bg-[#8aebff]/10 border border-[#8aebff]/25 text-[#8aebff] text-[11px] font-mono">{s}</span>
-              {i < data.flow!.length - 1 && <span className="text-[#859397]">→</span>}
-            </span>
-          ))}
-        </div>
-      )}
-      {(data.points?.length ?? 0) > 0 && (
-        <ul className="space-y-1">{data.points!.map((p, i) => (
-          <li key={i} className="flex items-start gap-1.5"><span className="text-[#8aebff] mt-0.5">▸</span><span>{p}</span></li>
-        ))}</ul>
-      )}
-      {data.code && (
-        <div className="rounded-lg border border-white/10 overflow-hidden">
-          <pre className="p-2.5 overflow-x-auto text-[11px] font-mono text-[#a3e635] bg-[#0a0e1a]/60 whitespace-pre-wrap">{data.code}</pre>
-          <button onClick={() => onRunCode(data.code!)} className="w-full px-2 py-1.5 text-[10px] font-mono text-[#0a0e1a] bg-[#a3e635] hover:bg-[#b6f24d] cursor-pointer flex items-center justify-center gap-1"><Play className="w-3 h-3" /> Load into editor & run</button>
-        </div>
-      )}
-    </div>
-  );
+interface TrackInfo {
+  key: string;
+  name: string;
+  description: string;
+  total: number;
 }
 
 export default function DailyUpdate() {
-  const [digest, setDigest] = useState<Digest | null>(null);
-  const [history, setHistory] = useState<HistRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [generating, setGenerating] = useState(false);
-  const [sending, setSending] = useState(false);
-  const [msg, setMsg] = useState("");
-  const [tracks, setTracks] = useState<Track[]>([]);
-  const [track, setTrack] = useState<{ active: string; progress: Progress | null }>({ active: "", progress: null });
-  // Active recall
-  const [quiz, setQuiz] = useState<{ q: string }[] | null>(null);
-  const [answers, setAnswers] = useState<string[]>([]);
-  const [grade, setGrade] = useState<Grade | null>(null);
-  const [quizBusy, setQuizBusy] = useState(false);
-  const [feynText, setFeynText] = useState("");
-  const [feyn, setFeyn] = useState<Feynman | null>(null);
-  const [feynBusy, setFeynBusy] = useState(false);
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [reviews, setReviews] = useState<{ due: ReviewItem[]; upcoming: ReviewItem[]; due_count: number } | null>(null);
-  // Deep-dive explainer
-  const [explain, setExplain] = useState<Explain | null>(null);
-  const [explainBusy, setExplainBusy] = useState(false);
-  const [checkOpen, setCheckOpen] = useState(false);
-  // Go-deeper extras — follow-up chat thread
-  const [followQ, setFollowQ] = useState("");
-  const [followThread, setFollowThread] = useState<FollowTurn[]>([]);
-  const [followSuggestions, setFollowSuggestions] = useState<string[]>([]);
-  const [followBusy, setFollowBusy] = useState(false);
-  const threadRef = useRef<HTMLDivElement>(null);
-  // Try-it code — LLM review + real in-browser execution
-  const [codeText, setCodeText] = useState("");
-  const [codeResult, setCodeResult] = useState<{ passed: boolean; feedback: string } | null>(null);
-  const [codeBusy, setCodeBusy] = useState(false);
-  const [runOut, setRunOut] = useState<{ out: string; err: boolean; blocked?: boolean } | null>(null);
-  const [runBusy, setRunBusy] = useState(false);
-  const [rewriteBusy, setRewriteBusy] = useState(false);
-  // Notes: highlight-to-save + search-back
-  const [highlight, setHighlight] = useState("");
-  const [noteQ, setNoteQ] = useState("");
-  const [noteHits, setNoteHits] = useState<NoteHit[] | null>(null);
-  const [noteSearchBusy, setNoteSearchBusy] = useState(false);
-  const [recap, setRecap] = useState<{ recap: string; quiz: string[] } | null>(null);
-  const [recapBusy, setRecapBusy] = useState(false);
-  // "Study in 4 steps" hint card — dismissible, remembered across sessions.
-  const [showHint, setShowHint] = useState(() => {
-    try { return localStorage.getItem("daily_hint_dismissed") !== "1"; } catch { return true; }
-  });
-  const dismissHint = () => {
-    setShowHint(false);
-    try { localStorage.setItem("daily_hint_dismissed", "1"); } catch { /* ignore */ }
-  };
+  const [activeSlide, setActiveSlide] = useState<number>(1);
+  const [lesson, setLesson] = useState<LessonData | null>(null);
+  const [tracks, setTracks] = useState<TrackInfo[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
 
-  const loadDay = useCallback(async (d?: string) => {
-    const r = await fetch(d ? `/api/daily/${d}` : "/api/daily/today");
-    let day: Digest | null = null;
-    if (r.ok) { day = await r.json(); setDigest(day); }
-    setQuiz(null); setAnswers([]); setGrade(null); setFeyn(null); setFeynText("");
-    setFollowThread([]); setFollowSuggestions([]); setCodeResult(null); setRunOut(null); setExplain(null); setCheckOpen(false);
-    // Pre-fill the code editor with the day's runnable example so "Run" works out of the box.
-    setCodeText(day?.reference_code || "");
-    // Load the persistent follow-up thread + any cached deep-dive explainer for this concept.
-    if (day?.date) {
-      const [tr, er] = await Promise.all([
-        fetch(`/api/daily/${day.date}/followups`),
-        fetch(`/api/daily/${day.date}/explain`),
-      ]);
-      if (tr.ok) {
-        const turns: FollowTurn[] = (await tr.json()).turns || [];
-        setFollowThread(turns);
-        const lastA = [...turns].reverse().find((t) => t.role === "assistant");
-        const sug = lastA ? parseReply(lastA.content)?.suggestions : undefined;
-        if (sug?.length) setFollowSuggestions(sug);
-      }
-      if (er.ok) { const ed = await er.json(); if (ed.explanation) setExplain(ed.explanation); }
-    }
-  }, []);
+  // Settings State
+  const [showSettings, setShowSettings] = useState<boolean>(false);
+  const [topicsPerDay, setTopicsPerDay] = useState<number>(1);
+  const [selectedTrack, setSelectedTrack] = useState<string>("ai_engineering");
+  const [theme, setTheme] = useState<string>("chalkboard");
+  const [audioEnabled, setAudioEnabled] = useState<boolean>(true);
+  const [isPlayingAudio, setIsPlayingAudio] = useState<boolean>(false);
 
-  const loadTrack = useCallback(async () => {
-    const [tRes, cRes, sRes, rRes] = await Promise.all([
-      fetch("/api/study/tracks"), fetch("/api/study/current"),
-      fetch("/api/study/stats"), fetch("/api/study/reviews"),
-    ]);
-    if (tRes.ok) setTracks((await tRes.json()).tracks || []);
-    if (cRes.ok) setTrack(await cRes.json());
-    if (sRes.ok) setStats(await sRes.json());
-    if (rRes.ok) setReviews(await rRes.json());
-  }, []);
+  // Quiz State
+  const [selectedOption, setSelectedOption] = useState<number | null>(null);
+  const [quizSubmitted, setQuizSubmitted] = useState<boolean>(false);
+  const [isCorrect, setIsCorrect] = useState<boolean | null>(null);
+  const [streak, setStreak] = useState<number>(5);
 
-  const loadAll = useCallback(async () => {
+  useEffect(() => {
+    fetchLessonAndSettings();
+  }, [selectedTrack]);
+
+  const fetchLessonAndSettings = async () => {
+    setLoading(true);
     try {
-      const [, hRes] = await Promise.all([loadDay(), fetch("/api/daily/history"), loadTrack()]);
-      if (hRes.ok) setHistory((await hRes.json()).history || []);
-    } finally { setLoading(false); }
-  }, [loadDay, loadTrack]);
+      const headers = { Authorization: `Bearer ${getToken()}` };
+      
+      // Fetch Tracks
+      const tracksRes = await fetch("/api/study/tracks", { headers });
+      const tracksData = await tracksRes.json();
+      if (tracksData.ok && tracksData.tracks) {
+        setTracks(tracksData.tracks);
+      }
 
-  const selectTrack = async (key: string) => {
-    const res = await fetch("/api/study/select", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ track_key: key }),
-    });
-    if (res.ok) {
-      await loadTrack();
-      setMsg(key ? "Study track set — your next update will follow this syllabus." : "Study track cleared — free-choice topics.");
+      // Fetch Settings
+      const settingsRes = await fetch("/api/study/settings", { headers });
+      const settingsData = await settingsRes.json();
+      if (settingsData.ok && settingsData.settings) {
+        setTopicsPerDay(settingsData.settings.topics_per_day);
+        setSelectedTrack(settingsData.settings.active_track);
+        setTheme(settingsData.settings.theme);
+        setAudioEnabled(settingsData.settings.audio_enabled);
+      }
+
+      // Fetch Interactive Lesson
+      const lessonRes = await fetch(`/api/study/interactive-lesson?track_key=${selectedTrack}`, { headers });
+      const lessonData = await lessonRes.json();
+      if (lessonData.ok) {
+        setLesson(lessonData);
+        setStreak(lessonData.streak || 5);
+      }
+    } catch (err) {
+      console.error("Failed to load study data:", err);
+    } finally {
+      setLoading(false);
     }
   };
 
-  useEffect(() => { loadAll(); }, [loadAll]);
-  // Keep the follow-up chat scrolled to the latest turn.
-  useEffect(() => { threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: "smooth" }); }, [followThread]);
-
-  // Capture text the learner highlights inside the lesson → offer to save it.
-  const captureSelection = () => {
-    const sel = window.getSelection?.()?.toString().trim() || "";
-    if (sel.length >= 8) setHighlight(sel);
-  };
-
-  const generate = async () => {
-    setGenerating(true); setMsg("");
+  const handleSaveSettings = async () => {
     try {
-      const res = await fetch("/api/daily/generate", { method: "POST" });
-      const d = await res.json();
-      if (!res.ok || d?.ok === false) throw new Error(d?.error || `HTTP ${res.status}`);
-      setMsg(`Generated: ${d.concept}${d.qa_passed ? "" : " (QA flagged — you can regenerate)"}`);
-      await loadAll();
-    } catch (e) { setMsg(`Generation failed: ${e instanceof Error ? e.message : e}`); }
-    finally { setGenerating(false); }
-  };
-
-  const sendWhatsApp = async () => {
-    if (!digest?.date) return;
-    setSending(true);
-    try {
-      const res = await fetch(`/api/daily/${digest.date}/whatsapp`, { method: "POST" });
-      const d = await res.json();
-      if (!res.ok || d?.ok === false) throw new Error(d?.error || `HTTP ${res.status}`);
-      setDigest((p) => (p ? { ...p, sent_whatsapp: true } : p));
-      setMsg("Sent to WhatsApp.");
-    } catch (e) { setMsg(`WhatsApp send failed: ${e instanceof Error ? e.message : e}`); }
-    finally { setSending(false); }
-  };
-
-  const rate = async (rating: "E" | "J" | "H") => {
-    if (!digest?.date) return;
-    setDigest((p) => (p ? { ...p, difficulty: rating } : p));
-    const res = await fetch(`/api/daily/${digest.date}/difficulty`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rating }),
-    });
-    const d = await res.json().catch(() => ({}));
-    if (d?.skill_level) setMsg(`Noted — skill level now ${d.skill_level}.`);
-  };
-
-  const startQuiz = async () => {
-    if (!digest?.date) return;
-    setQuizBusy(true); setMsg("");
-    try {
-      const res = await fetch(`/api/daily/${digest.date}/quiz`, { method: "POST" });
-      const dd = await res.json();
-      if (dd.error) throw new Error(dd.error);
-      setQuiz(dd.questions); setAnswers(new Array(dd.questions.length).fill(""));
-      if (dd.graded) setGrade(dd.graded);
-    } catch (e) { setMsg(`Quiz: ${e instanceof Error ? e.message : e}`); }
-    finally { setQuizBusy(false); }
-  };
-  const submitQuiz = async () => {
-    if (!digest?.date) return;
-    setQuizBusy(true);
-    try {
-      const res = await fetch(`/api/daily/${digest.date}/quiz/grade`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answers }),
+      await fetch("/api/study/settings", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${getToken()}`
+        },
+        body: JSON.stringify({
+          topics_per_day: topicsPerDay,
+          active_track: selectedTrack,
+          theme,
+          audio_enabled: audioEnabled
+        })
       });
-      const dd = await res.json();
-      if (dd.error) throw new Error(dd.error);
-      setGrade(dd);
-    } catch (e) { setMsg(`Grade: ${e instanceof Error ? e.message : e}`); }
-    finally { setQuizBusy(false); }
-  };
-  const checkFeynman = async () => {
-    if (!digest?.date || feynText.trim().length < 10) return;
-    setFeynBusy(true);
-    try {
-      const res = await fetch(`/api/daily/${digest.date}/feynman`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ explanation: feynText }),
-      });
-      const dd = await res.json();
-      if (dd.error) throw new Error(dd.error);
-      setFeyn(dd);
-    } catch (e) { setMsg(`Feynman: ${e instanceof Error ? e.message : e}`); }
-    finally { setFeynBusy(false); }
-  };
-
-  const getExplain = async (force = false) => {
-    if (!digest?.date || explainBusy) return;
-    setExplainBusy(true); if (force) setCheckOpen(false);
-    try {
-      const res = await fetch(`/api/daily/${digest.date}/explain${force ? "?force=1" : ""}`, { method: "POST" });
-      const dd = await safeJson(res);
-      if (dd.error) setMsg(`Explainer: ${dd.error}`);
-      else setExplain(dd.explanation as Explain);
-    } catch (e) { setMsg(`Explainer: ${e instanceof Error ? e.message : e}`); }
-    finally { setExplainBusy(false); }
-  };
-
-  const askFollowup = async (preset?: string) => {
-    const q = (preset ?? followQ).trim();
-    if (!digest?.date || q.length < 3 || followBusy) return;
-    setFollowBusy(true); if (!preset) setFollowQ("");
-    // Optimistically show the learner's turn.
-    setFollowThread((t) => [...t, { role: "user", content: q }]);
-    try {
-      const res = await fetch(`/api/daily/${digest.date}/followup`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q }),
-      });
-      const dd = await safeJson(res);
-      if (dd.error) {
-        setFollowThread((t) => [...t, { role: "assistant", content: String(dd.error) }]);
-      } else {
-        setFollowThread((t) => [...t, { role: "assistant", content: JSON.stringify(dd) }]);
-        setFollowSuggestions(Array.isArray(dd.suggestions) ? (dd.suggestions as string[]) : []);
-      }
-    } catch (e) {
-      setFollowThread((t) => [...t, { role: "assistant", content: `Error: ${e instanceof Error ? e.message : e}` }]);
-    } finally { setFollowBusy(false); }
-  };
-  const checkCode = async () => {
-    if (!digest?.date || codeText.trim().length < 5) return;
-    setCodeBusy(true); setCodeResult(null);
-    try {
-      const res = await fetch(`/api/daily/${digest.date}/check-code`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: codeText }),
-      });
-      const dd = await res.json();
-      if (!dd.error) setCodeResult(dd);
-      else setMsg(`Code check: ${dd.error}`);
-    } finally { setCodeBusy(false); }
-  };
-  const runCode = async (override?: string) => {
-    const src = override ?? codeText;
-    if (src.trim().length < 3 || runBusy) return;
-    // Fail fast on libraries the browser runtime can't install (no pip / no network) — no more hangs.
-    const blocked = BLOCKED_IMPORTS.find((m) => new RegExp(`(^|\\n)\\s*(import|from)\\s+${m}\\b`).test(src));
-    if (blocked) {
-      setRunOut({ out: `This example uses "${blocked}", which the in-browser Python can't install (no pip, no network).`, err: true, blocked: true });
-      return;
+      setShowSettings(false);
+      fetchLessonAndSettings();
+    } catch (err) {
+      console.error("Failed to update settings:", err);
     }
-    setRunBusy(true); setRunOut({ out: "Booting Python runtime… (first run downloads ~6 MB)", err: false });
-    try {
-      const py = await withTimeout(loadPyodideOnce(), 45000, "The Python runtime took too long to load — check your connection and try again.");
-      const buf: string[] = [];
-      py.setStdout({ batched: (s) => buf.push(s) });
-      py.setStderr({ batched: (s) => buf.push(s) });
-      try {
-        await withTimeout(py.runPythonAsync(src), 20000, "Execution timed out (possible infinite loop or a blocking call).");
-        setRunOut({ out: buf.join("\n").trimEnd() || "(ran with no output)", err: false });
-      } catch (execErr) {
-        const trace = execErr instanceof Error ? execErr.message : String(execErr);
-        setRunOut({ out: (buf.join("\n") + "\n" + trace).trim() || trace, err: true });
-      }
-    } catch (e) {
-      setRunOut({ out: e instanceof Error ? e.message : String(e), err: true });
-    } finally { setRunBusy(false); }
-  };
-  // From a tutor reply's "Load into editor & run" button: drop the code into the editor, scroll to it, run.
-  const loadAndRun = (code: string) => {
-    setCodeText(code);
-    scrollToId("daily-run");
-    runCode(code);
-  };
-  // Turn a snippet that needs unavailable libs into a standard-library-only version, then run it.
-  const rewriteToRun = async () => {
-    if (!digest?.date || rewriteBusy) return;
-    setRewriteBusy(true); setRunOut({ out: "Rewriting to run offline…", err: false });
-    try {
-      const res = await fetch(`/api/daily/${digest.date}/rewrite-code`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: codeText }),
-      });
-      const dd = await safeJson(res);
-      if (dd.error) { setRunOut({ out: `Rewrite failed: ${dd.error}`, err: true }); return; }
-      if (dd.code) { setCodeText(dd.code as string); await runCode(dd.code as string); }
-    } catch (e) {
-      setRunOut({ out: e instanceof Error ? e.message : String(e), err: true });
-    } finally { setRewriteBusy(false); }
-  };
-  const saveNote = async (text?: string) => {
-    if (!digest?.date) return;
-    const res = await fetch(`/api/daily/${digest.date}/save-note`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: text || "" }),
-    });
-    const dd = await res.json().catch(() => ({}));
-    setMsg(res.ok ? (dd.kind === "highlight" ? "Highlight saved to your knowledge base." : "Full lesson saved to notes.") : "Couldn't save note.");
-    if (text) setHighlight("");
-  };
-  const searchNotes = async () => {
-    if (noteQ.trim().length < 2) return;
-    setNoteSearchBusy(true);
-    try {
-      const res = await fetch(`/api/study/notes/search?q=${encodeURIComponent(noteQ.trim())}`);
-      const dd = await res.json();
-      setNoteHits(dd.results || []);
-    } finally { setNoteSearchBusy(false); }
-  };
-  const exportFlashcards = () => {
-    const tok = getToken();
-    window.open(`/api/study/flashcards/export${tok ? `?token=${encodeURIComponent(tok)}` : ""}`, "_blank");
-  };
-  const weeklyRecap = async () => {
-    setRecapBusy(true); setRecap(null);
-    try {
-      const res = await fetch("/api/study/weekly-recap", { method: "POST" });
-      const dd = await res.json();
-      if (!dd.error) setRecap(dd); else setMsg(`Recap: ${dd.error}`);
-    } finally { setRecapBusy(false); }
   };
 
-  const d = digest;
-  const hasDigest = d && !d.empty;
-  const lesson = hasDigest && d!.digest_text ? cleanLesson(d!.digest_text) : "";
-  const verdictColor = (v: string) => v === "correct" ? "#a3e635" : v === "partial" ? "#ffd6a3" : "#ffb4ab";
+  const handleQuizSubmit = async (optionIdx: number) => {
+    if (quizSubmitted || !lesson) return;
+    setSelectedOption(optionIdx);
+    setQuizSubmitted(true);
+
+    const correct = optionIdx === lesson.slide3_quiz.correct_index;
+    setIsCorrect(correct);
+
+    if (correct) {
+      setStreak((prev) => prev + 1);
+    }
+
+    try {
+      await fetch("/api/study/quiz/submit", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${getToken()}`
+        },
+        body: JSON.stringify({
+          topic: lesson.topic,
+          selected_option: lesson.slide3_quiz.options[optionIdx],
+          correct_index: lesson.slide3_quiz.correct_index,
+          chosen_index: optionIdx
+        })
+      });
+    } catch (err) {
+      console.error("Failed to record quiz score:", err);
+    }
+  };
+
+  const handleAudioToggle = () => {
+    setIsPlayingAudio(!isPlayingAudio);
+    if (!isPlayingAudio) {
+      const utterance = new SpeechSynthesisUtterance(
+        `Today's topic is ${lesson?.topic}. ${lesson?.slide1_story.title}. ${lesson?.slide1_story.analogy}`
+      );
+      utterance.onend = () => setIsPlayingAudio(false);
+      window.speechSynthesis.speak(utterance);
+    } else {
+      window.speechSynthesis.cancel();
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center h-96 text-cyan-400">
+        <RefreshCw className="w-10 h-10 animate-spin mb-4" />
+        <p className="text-lg font-medium">Preparing JARVIS Interactive Academy...</p>
+      </div>
+    );
+  }
+
+  // Theme styling configurations
+  const themeStyles = {
+    chalkboard: "bg-[#121820] text-emerald-100 border-emerald-900/40 font-sans",
+    notebook: "bg-[#fdfcf7] text-slate-800 border-amber-200 font-sans shadow-xl",
+    dark_cyber: "bg-[#0b0f19] text-cyan-100 border-cyan-900/40 font-mono shadow-2xl"
+  }[theme] || "bg-[#121820] text-emerald-100 border-emerald-900/40";
 
   return (
-    <div className="w-full max-w-4xl mx-auto space-y-6">
-      {/* Header */}
-      <div className="glass-panel rounded-2xl border border-[#8aebff]/20 p-6 sm:p-8">
-        <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-xl bg-[#8aebff]/10 border border-[#8aebff]/30 flex items-center justify-center">
-              <Newspaper className="w-5.5 h-5.5 text-[#8aebff]" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-extrabold text-[#dfe2f3] tracking-wide uppercase font-mono glow-cyan">Daily AI Update</h1>
-              <p className="text-xs text-[#859397] mt-1 leading-relaxed max-w-xl">
-                Fresh AI news + today's concept, mini-project and a self-test — in the console.
-                WhatsApp only when you tap send.
-              </p>
-            </div>
+    <div className="max-w-5xl mx-auto p-4 space-y-6">
+      {/* Import Handwritten Fonts */}
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Architects+Daughter&family=Caveat:wght@600&family=Inter:wght@400;600;700&display=swap');
+        .font-handwritten { font-family: 'Caveat', cursive; }
+        .font-chalk { font-family: 'Architects Daughter', cursive; }
+      `}</style>
+
+      {/* Top Header & Control Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-md">
+        <div className="flex items-center space-x-3">
+          <div className="p-2.5 rounded-xl bg-gradient-to-tr from-cyan-500 to-emerald-500 text-slate-950 font-bold shadow-lg">
+            <Sparkles className="w-6 h-6" />
           </div>
-          <button onClick={generate} disabled={generating}
-            className="bg-[#8aebff]/10 border border-[#8aebff]/40 text-[#8aebff] hover:bg-[#8aebff] hover:text-[#00363e] px-4 py-2.5 rounded-lg text-sm font-bold flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50">
-            <RefreshCw className={`w-4.5 h-4.5 ${generating ? "animate-spin" : ""}`} />
-            {generating ? "GENERATING…" : hasDigest ? "REGENERATE" : "GENERATE TODAY"}
+          <div>
+            <h1 className="text-xl font-bold text-slate-100 flex items-center gap-2">
+              JARVIS Academy <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-950 text-cyan-400 border border-cyan-800">ELI15 Mode</span>
+            </h1>
+            <p className="text-xs text-slate-400">Interactive Bite-Sized Learning • Topic: <span className="text-cyan-300 font-semibold">{lesson?.topic}</span></p>
+          </div>
+        </div>
+
+        <div className="flex items-center space-x-3">
+          {/* Streak Counter */}
+          <div className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-orange-950/40 border border-orange-800/50 text-orange-400 text-sm font-semibold">
+            <Flame className="w-4 h-4 fill-orange-500 text-orange-500 animate-pulse" />
+            <span>{streak} Day Streak!</span>
+          </div>
+
+          {/* Audio Digest Button */}
+          <button
+            onClick={handleAudioToggle}
+            className={`p-2.5 rounded-xl border transition-all ${
+              isPlayingAudio
+                ? "bg-cyan-500 text-slate-950 border-cyan-400 animate-pulse"
+                : "bg-slate-800 text-slate-300 border-slate-700 hover:border-cyan-500"
+            }`}
+            title="Listen to Audio Summary"
+          >
+            {isPlayingAudio ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}
+          </button>
+
+          {/* Settings Toggle */}
+          <button
+            onClick={() => setShowSettings(!showSettings)}
+            className="flex items-center space-x-2 px-3 py-2 rounded-xl bg-slate-800 text-slate-300 border border-slate-700 hover:border-slate-500 hover:text-white transition-all text-sm font-medium"
+          >
+            <Settings className="w-4 h-4" />
+            <span>Settings</span>
           </button>
         </div>
-        {msg && <div className="mt-3 text-[11px] font-mono text-[#8aebff] bg-[#8aebff]/5 border border-[#8aebff]/15 rounded-lg px-3 py-2">{msg}</div>}
       </div>
 
-      {/* Study track */}
-      <div className="glass-panel rounded-2xl border border-[#a3e635]/15 p-5 sm:p-6">
-        <div className="flex items-center justify-between gap-4 flex-wrap">
-          <div className="flex items-center gap-2.5">
-            <GraduationCap className="w-5 h-5 text-[#a3e635]" />
-            <div>
-              <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono block">Study track</span>
-              <span className="text-sm font-bold text-[#dfe2f3]">{track.progress ? track.progress.name : "Free choice (any topic)"}</span>
-            </div>
-          </div>
-          <select
-            value={track.active}
-            onChange={(e) => selectTrack(e.target.value)}
-            className="bg-[#0a0e1a]/60 border border-white/10 rounded-lg px-3 py-2 text-xs font-mono text-[#dfe2f3] outline-none focus:border-[#a3e635]/50 cursor-pointer"
-          >
-            <option value="">Free choice (any topic)</option>
-            {tracks.map((t) => (
-              <option key={t.key} value={t.key}>{t.name} ({t.total})</option>
-            ))}
-          </select>
-        </div>
-        {track.progress && (
-          <div className="mt-3 space-y-1.5">
-            <div className="flex items-center justify-between text-[11px] font-mono">
-              <span className="text-[#859397]">{track.progress.completed} / {track.progress.total} concepts</span>
-              {track.progress.next && <span className="text-[#a3e635] truncate ml-3">Next: {track.progress.next}</span>}
-            </div>
-            <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
-              <div className="h-full rounded-full bg-[#a3e635]/70" style={{ width: `${Math.round((track.progress.completed / Math.max(1, track.progress.total)) * 100)}%` }} />
-            </div>
-          </div>
-        )}
-
-        {/* Progress stats */}
-        {stats && (
-          <div className="mt-4 pt-4 border-t border-white/5 grid grid-cols-2 sm:grid-cols-4 gap-3">
-            {([
-              [Flame, stats.streak, "day streak", "#ffb4ab"],
-              [Layers, stats.concepts_learned, "concepts", "#8aebff"],
-              [Target, stats.avg_recall ?? "—", "avg recall", "#a3e635"],
-              [Repeat, stats.reviews_due, "due to review", "#ffd6a3"],
-            ] as [typeof Flame, number | string, string, string][]).map(([Icon, val, label], i) => (
-              <div key={i} className="flex items-center gap-2">
-                <Icon className="w-4 h-4 flex-shrink-0" style={{ color: label === "avg recall" && stats.avg_recall === null ? "#859397" : (label as string) === "day streak" ? "#ffb4ab" : undefined }} />
-                <div className="leading-tight">
-                  <span className="block text-lg font-extrabold font-mono text-[#dfe2f3]">{val}</span>
-                  <span className="block text-[9px] uppercase tracking-wider text-[#859397] font-mono -mt-0.5">{label}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Reviews due + weakest concepts */}
-      {(reviews && (reviews.due_count > 0 || reviews.upcoming.length > 0)) || (stats && stats.mastery.length > 0) ? (
-        <div className="glass-panel rounded-2xl border border-[#ffd6a3]/15 p-5 sm:p-6 space-y-3">
-          <div className="flex items-center gap-2"><Repeat className="w-4.5 h-4.5 text-[#ffd6a3]" /><span className="text-xs font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">Spaced review</span></div>
-          {reviews && reviews.due_count > 0 && (
-            <div className="text-[12px] text-[#ffd6a3] bg-[#ffd6a3]/5 border border-[#ffd6a3]/15 rounded-lg px-3 py-2">
-              <span className="font-bold">{reviews.due_count} concept{reviews.due_count > 1 ? "s" : ""} due for review.</span> Your next update will resurface {reviews.due_count > 1 ? "them" : "it"} before new material.
-            </div>
-          )}
-          {reviews && reviews.upcoming.length > 0 && (
-            <div className="space-y-1">
-              <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">Upcoming reviews</span>
-              {reviews.upcoming.slice(0, 5).map((r) => (
-                <div key={r.concept} className="flex items-center justify-between text-[11px] font-mono">
-                  <span className="text-[#bbc9cd] truncate mr-3">{r.concept}</span>
-                  <span className="text-[#859397] flex-shrink-0">{r.next_due}</span>
-                </div>
-              ))}
-            </div>
-          )}
-          {stats && stats.mastery.length > 0 && (
-            <div className="space-y-1 pt-1">
-              <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">Weakest recall — worth revisiting</span>
-              {stats.mastery.slice(0, 5).map((m) => (
-                <div key={m.concept} className="flex items-center justify-between text-[11px] font-mono">
-                  <span className="text-[#bbc9cd] truncate mr-3">{m.concept}</span>
-                  <span className="flex-shrink-0 font-bold" style={{ color: m.score >= 70 ? "#a3e635" : m.score >= 40 ? "#ffd6a3" : "#ffb4ab" }}>{m.score}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      ) : null}
-
-      {loading ? (
-        <div className="glass-panel rounded-2xl border border-white/10 p-8 text-center text-[#859397] font-mono text-sm">Loading…</div>
-      ) : !hasDigest ? (
-        <div className="glass-panel rounded-2xl border border-white/10 p-8 text-center text-[#859397] font-mono text-sm space-y-2">
-          <p>No update yet today.</p>
-          <p className="text-[11px]">Tap <span className="text-[#8aebff]">GENERATE TODAY</span> — it pulls fresh AI news and builds your lesson (~20-40s).</p>
-        </div>
-      ) : (
-        <>
-          {/* How to study today — dismissible, clickable 4-step flow */}
-          {showHint && (
-            <div className="glass-panel rounded-2xl border border-[#8aebff]/20 p-4 sm:p-5">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-[10px] uppercase tracking-widest text-[#8aebff] font-mono font-bold">How to study today</span>
-                <button onClick={dismissHint} title="Got it — hide this" className="text-[#859397] hover:text-[#dfe2f3] cursor-pointer"><XCircle className="w-4 h-4" /></button>
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                {([
-                  [BookOpen, "Read", "the concept + lesson", "daily-read"],
-                  [MessageCircleQuestion, "Ask", "“Go deeper” until it clicks", "daily-ask"],
-                  [Play, "Run", "the code / check your own", "daily-run"],
-                  [Brain, "Recall", "quiz + explain it back", "daily-recall"],
-                ] as [typeof BookOpen, string, string, string][]).map(([Icon, title, sub, id], i) => (
-                  <button key={id} onClick={() => scrollToId(id)}
-                    className="text-left rounded-xl border border-white/5 bg-white/[0.02] hover:bg-white/[0.06] hover:border-[#8aebff]/25 p-3 transition-all cursor-pointer group">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-[10px] font-mono font-bold text-[#8aebff]">{i + 1}</span>
-                      <Icon className="w-3.5 h-3.5 text-[#8aebff]" />
-                      <span className="text-[12px] font-bold text-[#dfe2f3]">{title}</span>
-                    </div>
-                    <p className="text-[10px] text-[#859397] mt-1 leading-snug group-hover:text-[#bbc9cd]">{sub}</p>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Concept */}
-          <div id="daily-read" className="glass-panel rounded-2xl border border-[#8aebff]/15 p-5 sm:p-6 scroll-mt-24">
-            <div className="flex items-center gap-2 mb-1"><BookOpen className="w-4 h-4 text-[#8aebff]" /><span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">Today's concept</span></div>
-            <h2 className="text-lg font-bold text-[#dfe2f3]">{d!.concept}</h2>
-            {d!.pedagogical_focus && <p className="text-[13px] text-[#bbc9cd] leading-relaxed mt-1">{d!.pedagogical_focus}</p>}
+      {/* Practical Settings Drawer */}
+      {showSettings && (
+        <div className="p-6 rounded-2xl bg-slate-900 border border-cyan-900/50 space-y-6 shadow-2xl animate-in fade-in duration-200">
+          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+            <h3 className="text-lg font-semibold text-cyan-300 flex items-center gap-2">
+              <Sliders className="w-5 h-5" /> Practical Study Settings
+            </h3>
+            <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-white text-sm">Close</button>
           </div>
 
-          {/* Deep dive — visual, at-a-glance explainer of the concept */}
-          <div className="glass-panel rounded-2xl border border-[#8aebff]/15 p-5 sm:p-6 space-y-4">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2"><GraduationCap className="w-4.5 h-4.5 text-[#8aebff]" /><span className="text-xs font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">Understand this topic</span><span className="text-[10px] text-[#859397] hidden sm:inline">— see it, don't read it</span></div>
-              {explain && (
-                <button onClick={() => getExplain(true)} disabled={explainBusy} title="Rebuild this explainer"
-                  className="text-[#859397] hover:text-[#8aebff] cursor-pointer disabled:opacity-50 flex items-center gap-1 text-[10px] font-mono">
-                  <RefreshCw className={`w-3.5 h-3.5 ${explainBusy ? "animate-spin" : ""}`} /> {explainBusy ? "" : "rebuild"}
-                </button>
-              )}
-            </div>
-            {!explain ? (
-              <div className="space-y-2.5">
-                <p className="text-[12px] text-[#859397] leading-relaxed">
-                  Get a <span className="text-[#dfe2f3] font-semibold">visual, at-a-glance</span> breakdown of <span className="text-[#dfe2f3] font-semibold">{d!.concept}</span> — a step-by-step flow, bullet cards, a comparison table and a worked example. Made to be scanned, not read. Then ask JARVIS anything below.
-                </p>
-                <button onClick={getExplain} disabled={explainBusy}
-                  className="px-4 py-2 rounded-lg text-xs font-bold font-mono text-[#0a0e1a] bg-[#8aebff] hover:bg-[#a5f0ff] transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2">
-                  {explainBusy ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Writing your explainer…</> : <><BookOpen className="w-3.5 h-3.5" /> Explain this topic in detail</>}
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-4" onMouseUp={captureSelection} onTouchEnd={captureSelection}>
-                <p className="text-[13px] text-[#dfe2f3] leading-relaxed selection:bg-[#8aebff]/30">{explain.tldr}</p>
-                {explain.analogy && (
-                  <div className="flex items-start gap-2 p-3 rounded-lg bg-[#ffd6a3]/5 border border-[#ffd6a3]/15">
-                    <Lightbulb className="w-4 h-4 text-[#ffd6a3] mt-0.5 flex-shrink-0" />
-                    <p className="text-[12px] text-[#bbc9cd] leading-relaxed selection:bg-[#8aebff]/30"><span className="text-[#ffd6a3] font-semibold">Think of it like: </span>{explain.analogy.replace(/^\s*think of (it )?(like|as)?[:,]?\s*/i, "")}</p>
-                  </div>
-                )}
-                {/* Flow pipeline — the "see it" centerpiece */}
-                {(explain.flow?.steps?.length ?? 0) > 0 && (
-                  <div>
-                    {explain.flow!.title && <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">{explain.flow!.title}</span>}
-                    <div className="mt-2 flex flex-col items-center">
-                      {explain.flow!.steps!.map((st, i) => (
-                        <div key={i} className="flex flex-col items-center w-full">
-                          <div className="w-full sm:w-80 text-center rounded-lg border border-[#8aebff]/25 bg-[#8aebff]/[0.06] px-3 py-2">
-                            <div className="text-[12px] font-bold text-[#dfe2f3]">{st.label}</div>
-                            {st.detail && <div className="text-[10px] text-[#859397] font-mono mt-0.5">{st.detail}</div>}
-                          </div>
-                          {i < explain.flow!.steps!.length - 1 && <ArrowDown className="w-4 h-4 text-[#8aebff]/70 my-1" />}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {/* Sections — bullet cards, never paragraphs */}
-                {explain.sections?.map((s, i) => (
-                  <div key={i} className="rounded-lg border border-white/5 bg-white/[0.02] p-3">
-                    <h3 className="text-[13px] font-bold text-[#8aebff] mb-1.5">{s.heading}</h3>
-                    {(s.points?.length ?? 0) > 0 ? (
-                      <ul className="space-y-1">{s.points!.map((p, j) => (
-                        <li key={j} className="flex items-start gap-1.5 text-[12px] text-[#bbc9cd] leading-relaxed selection:bg-[#8aebff]/30"><span className="text-[#8aebff] mt-0.5">▸</span><span>{p}</span></li>
-                      ))}</ul>
-                    ) : s.body ? (
-                      <p className="text-[12px] text-[#bbc9cd] leading-relaxed selection:bg-[#8aebff]/30">{s.body}</p>
-                    ) : null}
-                  </div>
-                ))}
-                {/* Comparison table — when there's a natural A-vs-B */}
-                {explain.comparison && (explain.comparison.rows?.length ?? 0) > 0 && (
-                  <div>
-                    {explain.comparison.title && <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">{explain.comparison.title}</span>}
-                    <div className="mt-1 rounded-lg border border-white/10 overflow-hidden">
-                      <table className="w-full text-[11.5px] border-collapse">
-                        <thead><tr className="bg-white/5 text-left">
-                          <th className="px-3 py-1.5 font-bold text-[#8aebff] w-1/2">{explain.comparison.col_a || "A"}</th>
-                          <th className="px-3 py-1.5 font-bold text-[#a3e635] w-1/2 border-l border-white/10">{explain.comparison.col_b || "B"}</th>
-                        </tr></thead>
-                        <tbody>{explain.comparison.rows!.map((r, i) => (
-                          <tr key={i} className="border-t border-white/5">
-                            <td className="px-3 py-1.5 text-[#bbc9cd] align-top">{r.a}</td>
-                            <td className="px-3 py-1.5 text-[#bbc9cd] align-top border-l border-white/10">{r.b}</td>
-                          </tr>
-                        ))}</tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
-                {explain.example && (explain.example.caption || explain.example.code) && (
-                  <div className="rounded-lg border border-white/10 overflow-hidden">
-                    <div className="px-3 py-2 bg-white/5 text-[10px] uppercase tracking-wider font-mono text-[#a3e635] flex items-center gap-1.5"><Code2 className="w-3.5 h-3.5" /> Worked example</div>
-                    {explain.example.caption && <p className="px-3 py-2 text-[12px] text-[#bbc9cd] leading-relaxed">{explain.example.caption}</p>}
-                    {explain.example.code && <pre className="px-3 pb-3 overflow-x-auto text-[11px] font-mono text-[#a3e635] leading-relaxed whitespace-pre-wrap">{explain.example.code}</pre>}
-                  </div>
-                )}
-                {(explain.key_points?.length ?? 0) > 0 && (
-                  <div>
-                    <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">Key points</span>
-                    <ul className="mt-1 space-y-1">{explain.key_points!.map((k, i) => (<li key={i} className="flex items-start gap-1.5 text-[12px] text-[#dfe2f3] leading-relaxed"><CheckCircle2 className="w-3.5 h-3.5 text-[#a3e635] mt-0.5 flex-shrink-0" />{k}</li>))}</ul>
-                  </div>
-                )}
-                {(explain.pitfalls?.length ?? 0) > 0 && (
-                  <div>
-                    <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">Common pitfalls</span>
-                    <ul className="mt-1 space-y-1">{explain.pitfalls!.map((p, i) => (<li key={i} className="flex items-start gap-1.5 text-[12px] text-[#bbc9cd] leading-relaxed"><AlertCircle className="w-3.5 h-3.5 text-[#ffb4ab] mt-0.5 flex-shrink-0" />{p}</li>))}</ul>
-                  </div>
-                )}
-                {explain.quick_check?.q && (
-                  <div className="p-3 rounded-lg bg-[#a3e635]/5 border border-[#a3e635]/20 space-y-2">
-                    <div className="flex items-center gap-1.5"><Brain className="w-3.5 h-3.5 text-[#a3e635]" /><span className="text-[10px] uppercase tracking-wider text-[#a3e635] font-mono font-bold">Quick check — can you answer this?</span></div>
-                    <p className="text-[12px] text-[#dfe2f3] leading-relaxed">{explain.quick_check.q}</p>
-                    {checkOpen ? (
-                      <p className="text-[12px] text-[#bbc9cd] leading-relaxed border-l-2 border-[#a3e635]/40 pl-2">{explain.quick_check.a}</p>
-                    ) : (
-                      <button onClick={() => setCheckOpen(true)} className="px-2.5 py-1 rounded-lg text-[10px] font-mono text-[#a3e635] bg-[#a3e635]/10 border border-[#a3e635]/30 hover:bg-[#a3e635]/20 cursor-pointer">Reveal answer</button>
-                    )}
-                  </div>
-                )}
-                <p className="text-[10px] text-[#859397]/70 font-mono pt-1">Still unclear on anything? Use “Go deeper” below to ask JARVIS.</p>
-              </div>
-            )}
-          </div>
-
-          {/* News */}
-          {d!.news && d!.news.length > 0 && (
-            <div className="glass-panel rounded-2xl border border-white/10 overflow-hidden">
-              <div className="px-6 py-3 border-b border-white/5 bg-white/5 flex items-center gap-2"><Newspaper className="w-4 h-4 text-[#8aebff]" /><span className="text-xs font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">AI news today</span></div>
-              <div className="divide-y divide-white/5">
-                {d!.news.map((n, i) => (
-                  <a key={i} href={n.url} target="_blank" rel="noreferrer" className="block p-4 sm:px-6 hover:bg-white/5 transition-colors group">
-                    <div className="flex items-start gap-2">
-                      <span className="text-[#8aebff] font-mono text-xs mt-0.5">{i + 1}.</span>
-                      <div className="min-w-0">
-                        <p className="text-[13px] text-[#dfe2f3] font-semibold group-hover:text-[#8aebff] flex items-center gap-1">{n.title || n.url}<ExternalLink className="w-3 h-3 opacity-50 flex-shrink-0" /></p>
-                        {n.snippet && <p className="text-[11px] text-[#859397] leading-relaxed mt-0.5 line-clamp-2">{n.snippet}</p>}
-                      </div>
-                    </div>
-                  </a>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Watch these — creator posts tied to today's concept (folds in the Influencer Watcher) */}
-          {d!.watch && d!.watch.length > 0 && (
-            <div className="glass-panel rounded-2xl border border-white/10 overflow-hidden">
-              <div className="px-6 py-3 border-b border-white/5 bg-white/5 flex items-center gap-2"><Play className="w-4 h-4 text-[#a3e635]" /><span className="text-xs font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">Watch these</span><span className="text-[10px] text-[#5c6a6d] font-mono">from your feeds</span></div>
-              <div className="divide-y divide-white/5">
-                {d!.watch.map((w, i) => (
-                  <a key={i} href={w.url || "#"} target={w.url ? "_blank" : undefined} rel="noreferrer" className="block p-4 sm:px-6 hover:bg-white/5 transition-colors group">
-                    <div className="flex items-start gap-2">
-                      <span className="text-[10px] font-mono text-[#5c6a6d] uppercase w-14 shrink-0 mt-0.5 truncate">{w.name}</span>
-                      <div className="min-w-0">
-                        <p className="text-[13px] text-[#dfe2f3] font-semibold group-hover:text-[#a3e635] flex items-center gap-1">{w.title || w.url}<ExternalLink className="w-3 h-3 opacity-50 flex-shrink-0" /></p>
-                        {w.note && <p className="text-[11px] text-[#a3e635]/70 leading-relaxed mt-0.5 line-clamp-1">{w.note}</p>}
-                      </div>
-                    </div>
-                  </a>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Today's lesson — learning prose only (news lives in the cards above + Home strip) */}
-          {lesson && (
-            <div className="glass-panel rounded-2xl border border-white/10 p-5 sm:p-6">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">Today's lesson</span>
-                <span className="text-[9px] text-[#859397]/70 font-mono flex items-center gap-1"><Sparkles className="w-3 h-3" /> select any text to save it</span>
-              </div>
-              <pre onMouseUp={captureSelection} onTouchEnd={captureSelection} className="mt-2 text-[12px] text-[#dfe2f3] leading-relaxed whitespace-pre-wrap font-sans selection:bg-[#8aebff]/30">{lesson}</pre>
-            </div>
-          )}
-
-          {/* Active recall — quiz + Feynman */}
-          <div id="daily-recall" className="glass-panel rounded-2xl border border-[#8aebff]/15 p-5 sm:p-6 space-y-4 scroll-mt-24">
-            <div className="flex items-center gap-2"><Brain className="w-4.5 h-4.5 text-[#8aebff]" /><span className="text-xs font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">Test your recall</span><span className="text-[10px] text-[#859397]">— reading is passive; recall is what sticks</span></div>
-
-            {/* Quiz */}
-            {!quiz ? (
-              <button onClick={startQuiz} disabled={quizBusy}
-                className="px-4 py-2 rounded-lg text-xs font-bold font-mono text-[#8aebff] bg-[#8aebff]/10 border border-[#8aebff]/30 hover:bg-[#8aebff]/20 transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2">
-                {quizBusy ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Building quiz…</> : <><Brain className="w-3.5 h-3.5" /> Start recall quiz</>}
-              </button>
-            ) : (
-              <div className="space-y-3">
-                {quiz.map((q, i) => (
-                  <div key={i} className="space-y-1.5">
-                    <p className="text-[13px] text-[#dfe2f3] font-semibold flex gap-2"><span className="text-[#8aebff] font-mono">{i + 1}.</span>{q.q}</p>
-                    <textarea
-                      value={answers[i] || ""}
-                      onChange={(e) => setAnswers((a) => { const n = [...a]; n[i] = e.target.value; return n; })}
-                      disabled={!!grade}
-                      placeholder="Your answer…"
-                      className="w-full bg-[#0a0e1a]/50 border border-white/10 rounded-lg px-3 py-2 text-[12px] text-[#dfe2f3] font-sans outline-none focus:border-[#8aebff]/40 resize-y min-h-[52px] disabled:opacity-70"
-                    />
-                    {grade?.items?.[i] && (
-                      <div className="flex items-start gap-1.5 text-[11px] leading-relaxed" style={{ color: verdictColor(grade.items[i].verdict) }}>
-                        {grade.items[i].verdict === "correct" ? <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" /> : grade.items[i].verdict === "partial" ? <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" /> : <XCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />}
-                        <span><span className="uppercase font-bold mr-1">{grade.items[i].verdict}</span><span className="text-[#bbc9cd]">{grade.items[i].explanation}</span></span>
-                      </div>
-                    )}
-                  </div>
-                ))}
-                {!grade ? (
-                  <button onClick={submitQuiz} disabled={quizBusy}
-                    className="px-4 py-2 rounded-lg text-xs font-bold font-mono text-[#0a0e1a] bg-[#8aebff] hover:bg-[#a5f0ff] transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2">
-                    {quizBusy ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Grading…</> : <>Submit answers</>}
-                  </button>
-                ) : (
-                  <div className="flex items-center gap-3 pt-1">
-                    <span className="text-2xl font-extrabold font-mono" style={{ color: grade.overall >= 70 ? "#a3e635" : grade.overall >= 40 ? "#ffd6a3" : "#ffb4ab" }}>{grade.overall}</span>
-                    <span className="text-[10px] text-[#859397] uppercase tracking-widest">recall score</span>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Feynman */}
-            <div className="pt-3 border-t border-white/5 space-y-2">
-              <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">Explain it back (Feynman)</span>
-              <textarea
-                value={feynText}
-                onChange={(e) => setFeynText(e.target.value)}
-                placeholder="In 2-3 sentences, explain today's concept in your own words…"
-                className="w-full bg-[#0a0e1a]/50 border border-white/10 rounded-lg px-3 py-2 text-[12px] text-[#dfe2f3] font-sans outline-none focus:border-[#8aebff]/40 resize-y min-h-[60px]"
-              />
-              <button onClick={checkFeynman} disabled={feynBusy || feynText.trim().length < 10}
-                className="px-4 py-2 rounded-lg text-xs font-bold font-mono text-[#8aebff] bg-[#8aebff]/10 border border-[#8aebff]/30 hover:bg-[#8aebff]/20 transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2">
-                {feynBusy ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Checking…</> : <>Check my understanding</>}
-              </button>
-              {feyn && (
-                <div className="p-3 rounded-lg bg-white/5 border border-white/5 space-y-2 text-[12px]">
-                  <span className="text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded border" style={{ color: feyn.rating === "solid" ? "#a3e635" : feyn.rating === "partial" ? "#ffd6a3" : "#ffb4ab", borderColor: "currentColor" }}>{feyn.rating}</span>
-                  {feyn.feedback && <p className="text-[#dfe2f3] leading-relaxed">{feyn.feedback}</p>}
-                  {feyn.missing?.length > 0 && (
-                    <div><span className="text-[10px] uppercase tracking-wider text-[#ffd6a3]">You missed</span>
-                      <ul className="mt-1 space-y-1">{feyn.missing.map((m, i) => (<li key={i} className="flex items-start gap-1.5 text-[#bbc9cd] leading-relaxed"><span className="text-[#ffd6a3]">·</span>{m}</li>))}</ul>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Go deeper — threaded follow-up chat + try-it code (run in-browser or LLM review) */}
-          <div id="daily-ask" className="glass-panel rounded-2xl border border-white/10 p-5 sm:p-6 space-y-4 scroll-mt-24">
-            <div className="flex items-center gap-2"><MessageCircleQuestion className="w-4.5 h-4.5 text-[#8aebff]" /><span className="text-xs font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">Go deeper</span><span className="text-[10px] text-[#859397]">— a running conversation about this concept</span></div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {/* Learning Track Selector */}
             <div className="space-y-2">
-              {followThread.length > 0 && (
-                <div ref={threadRef} className="max-h-72 overflow-y-auto space-y-2.5 pr-1">
-                  {followThread.map((t, i) => (
-                    <div key={i} className={`flex gap-2 ${t.role === "user" ? "flex-row-reverse" : ""}`}>
-                      <div className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 ${t.role === "user" ? "bg-[#8aebff]/15 border border-[#8aebff]/30" : "bg-white/5 border border-white/10"}`}>
-                        {t.role === "user" ? <User className="w-3 h-3 text-[#8aebff]" /> : <Bot className="w-3 h-3 text-[#a3e635]" />}
-                      </div>
-                      <div className={`text-[12px] leading-relaxed rounded-lg px-3 py-2 max-w-[85%] ${t.role === "user" ? "bg-[#8aebff]/10 border border-[#8aebff]/15 text-[#dfe2f3]" : "bg-white/5 border border-white/5 text-[#bbc9cd]"}`}>{t.role === "assistant" ? <AssistantReply content={t.content} onRunCode={loadAndRun} /> : t.content}</div>
-                    </div>
-                  ))}
-                  {followBusy && <div className="flex gap-2"><div className="w-6 h-6 rounded-full bg-white/5 border border-white/10 flex items-center justify-center mt-0.5"><Bot className="w-3 h-3 text-[#a3e635]" /></div><p className="text-[12px] text-[#859397] italic px-3 py-2">thinking…</p></div>}
-                </div>
-              )}
-              <div className="flex gap-2">
-                <input value={followQ} onChange={(e) => setFollowQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && askFollowup()}
-                  placeholder={followThread.length ? "Ask another — it remembers the thread…" : "Ask a follow-up about today's concept…"}
-                  className="flex-1 bg-[#0a0e1a]/50 border border-white/10 rounded-lg px-3 py-2 text-[12px] text-[#dfe2f3] font-sans outline-none focus:border-[#8aebff]/40" />
-                <button onClick={() => askFollowup()} disabled={followBusy || followQ.trim().length < 3}
-                  className="px-3 py-2 rounded-lg text-xs font-bold font-mono text-[#8aebff] bg-[#8aebff]/10 border border-[#8aebff]/30 hover:bg-[#8aebff]/20 cursor-pointer disabled:opacity-50">{followBusy ? "…" : "Ask"}</button>
-              </div>
-              {/* Tappable prompts — dynamic follow-ups from the last answer, else default starters */}
-              <div className="flex flex-wrap gap-1.5">
-                {(followSuggestions.length ? followSuggestions : FOLLOWUP_CHIPS).map((c) => (
-                  <button key={c} onClick={() => askFollowup(c)} disabled={followBusy}
-                    className="px-2.5 py-1 rounded-full text-[10px] font-mono text-[#8aebff] bg-[#8aebff]/5 border border-[#8aebff]/20 hover:bg-[#8aebff]/15 cursor-pointer disabled:opacity-50 transition-colors">{c}</button>
+              <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Learning Track</label>
+              <select
+                value={selectedTrack}
+                onChange={(e) => setSelectedTrack(e.target.value)}
+                className="w-full p-2.5 rounded-xl bg-slate-800 text-slate-200 border border-slate-700 focus:border-cyan-500 focus:outline-none text-sm"
+              >
+                {tracks.map((t) => (
+                  <option key={t.key} value={t.key}>{t.name}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Topics Per Day */}
+            <div className="space-y-2">
+              <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Topics Per Day</label>
+              <div className="flex space-x-2">
+                {[1, 2].map((num) => (
+                  <button
+                    key={num}
+                    onClick={() => setTopicsPerDay(num)}
+                    className={`flex-1 py-2 rounded-xl text-sm font-semibold border transition-all ${
+                      topicsPerDay === num
+                        ? "bg-cyan-500 text-slate-950 border-cyan-400"
+                        : "bg-slate-800 text-slate-400 border-slate-700 hover:border-slate-600"
+                    }`}
+                  >
+                    {num} {num === 1 ? "Topic / Day" : "Topics / Day"}
+                  </button>
                 ))}
               </div>
             </div>
-            <div id="daily-run" className="space-y-2 pt-2 border-t border-white/5 scroll-mt-24">
-              <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono flex items-center gap-1.5"><Code2 className="w-3.5 h-3.5" /> Try it — today's example is loaded; run it, tweak it, or write your own</span>
-              <textarea value={codeText} onChange={(e) => setCodeText(e.target.value)} placeholder="# today's runnable example loads here — press Run, or edit it"
-                spellCheck={false}
-                className="w-full bg-[#0a0e1a]/50 border border-white/10 rounded-lg px-3 py-2 text-[11.5px] text-[#a3e635] font-mono outline-none focus:border-[#8aebff]/40 resize-y min-h-[90px]" />
-              <div className="flex items-center gap-2 flex-wrap">
-                <button onClick={() => runCode()} disabled={runBusy || codeText.trim().length < 3}
-                  className="px-3 py-1.5 rounded-lg text-xs font-bold font-mono text-[#0a0e1a] bg-[#a3e635] hover:bg-[#b6f24d] cursor-pointer disabled:opacity-50 flex items-center gap-1.5">
-                  {runBusy ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Running…</> : <><Play className="w-3.5 h-3.5" /> Run (Python)</>}
-                </button>
-                <button onClick={checkCode} disabled={codeBusy || codeText.trim().length < 5}
-                  className="px-3 py-1.5 rounded-lg text-xs font-bold font-mono text-[#8aebff] bg-[#8aebff]/10 border border-[#8aebff]/30 hover:bg-[#8aebff]/20 cursor-pointer disabled:opacity-50">{codeBusy ? "Checking…" : "Check my code (AI)"}</button>
-              </div>
-              {runOut && (
-                <div className="rounded-lg overflow-hidden border border-white/10">
-                  <div className="px-3 py-1.5 bg-white/5 text-[9px] uppercase tracking-wider font-mono flex items-center gap-1.5" style={{ color: runOut.err ? "#ffb4ab" : "#a3e635" }}>{runOut.err ? <XCircle className="w-3 h-3" /> : <CheckCircle2 className="w-3 h-3" />} output</div>
-                  <pre className="p-3 overflow-x-auto text-[11px] leading-relaxed font-mono bg-[#0a0e1a]/70 whitespace-pre-wrap" style={{ color: runOut.err ? "#ffb4ab" : "#dfe2f3" }}>{runOut.out}</pre>
-                  {runOut.blocked && (
-                    <div className="p-3 pt-0 flex items-center gap-2 flex-wrap">
-                      <button onClick={rewriteToRun} disabled={rewriteBusy}
-                        className="px-3 py-1.5 rounded-lg text-xs font-bold font-mono text-[#0a0e1a] bg-[#a3e635] hover:bg-[#b6f24d] cursor-pointer disabled:opacity-50 flex items-center gap-1.5">
-                        {rewriteBusy ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Rewriting…</> : <><RefreshCw className="w-3.5 h-3.5" /> Rewrite to run offline</>}
-                      </button>
-                      <span className="text-[10px] text-[#859397]">turns it into a standard-library version and runs it</span>
-                    </div>
-                  )}
-                </div>
-              )}
-              {codeResult && (
-                <div className="flex items-start gap-1.5 text-[12px] leading-relaxed p-3 rounded-lg bg-white/5 border border-white/5" style={{ color: codeResult.passed ? "#a3e635" : "#ffb4ab" }}>
-                  {codeResult.passed ? <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />}
-                  <span><span className="font-bold uppercase mr-1">{codeResult.passed ? "Looks right" : "Not quite"}</span><span className="text-[#bbc9cd]">{codeResult.feedback}</span></span>
-                </div>
-              )}
+
+            {/* Visual Theme Selector */}
+            <div className="space-y-2">
+              <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Visual Aesthetic Theme</label>
+              <select
+                value={theme}
+                onChange={(e) => setTheme(e.target.value)}
+                className="w-full p-2.5 rounded-xl bg-slate-800 text-slate-200 border border-slate-700 focus:border-cyan-500 focus:outline-none text-sm"
+              >
+                <option value="chalkboard">🎨 Chalkboard Dark</option>
+                <option value="notebook">📝 Handwritten Notebook</option>
+                <option value="dark_cyber">🌙 Dark Cyber</option>
+              </select>
             </div>
           </div>
 
-          {/* Knowledge base — save the full lesson + search everything you've saved */}
-          <div className="glass-panel rounded-2xl border border-white/10 p-5 sm:p-6 space-y-3">
-            <div className="flex items-center gap-2"><StickyNote className="w-4.5 h-4.5 text-[#8aebff]" /><span className="text-xs font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">Your knowledge base</span><span className="text-[10px] text-[#859397]">— saved lessons + highlights, searchable</span></div>
-            <div className="flex gap-2">
-              <div className="relative flex-1">
-                <Search className="w-3.5 h-3.5 text-[#859397] absolute left-2.5 top-1/2 -translate-y-1/2" />
-                <input value={noteQ} onChange={(e) => setNoteQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && searchNotes()}
-                  placeholder="Search everything you've saved…"
-                  className="w-full bg-[#0a0e1a]/50 border border-white/10 rounded-lg pl-8 pr-3 py-2 text-[12px] text-[#dfe2f3] font-sans outline-none focus:border-[#8aebff]/40" />
-              </div>
-              <button onClick={searchNotes} disabled={noteSearchBusy || noteQ.trim().length < 2}
-                className="px-3 py-2 rounded-lg text-xs font-bold font-mono text-[#8aebff] bg-[#8aebff]/10 border border-[#8aebff]/30 hover:bg-[#8aebff]/20 cursor-pointer disabled:opacity-50">{noteSearchBusy ? "…" : "Search"}</button>
-            </div>
-            {noteHits !== null && (
-              noteHits.length === 0
-                ? <p className="text-[11px] text-[#859397] font-mono">No matches — highlight lesson text or hit “Save full lesson” to build your base.</p>
-                : <div className="space-y-1.5">
-                    {noteHits.map((h) => (
-                      <div key={h.id} className="p-2.5 rounded-lg bg-white/5 border border-white/5">
-                        <p className="text-[12px] text-[#dfe2f3] font-semibold">{h.title}</p>
-                        <p className="text-[11px] text-[#859397] leading-relaxed mt-0.5">{h.snippet}</p>
-                      </div>
-                    ))}
-                  </div>
-            )}
-          </div>
-
-          {/* Extras toolbar */}
-          <div className="flex items-center gap-2 flex-wrap">
-            <button onClick={() => saveNote()} className="px-3 py-1.5 rounded-lg text-[11px] font-bold font-mono text-[#bbc9cd] bg-white/5 border border-white/10 hover:bg-white/10 cursor-pointer flex items-center gap-1.5"><StickyNote className="w-3.5 h-3.5" /> Save full lesson</button>
-            <button onClick={exportFlashcards} className="px-3 py-1.5 rounded-lg text-[11px] font-bold font-mono text-[#bbc9cd] bg-white/5 border border-white/10 hover:bg-white/10 cursor-pointer flex items-center gap-1.5"><Download className="w-3.5 h-3.5" /> Export flashcards (Anki)</button>
-            <button onClick={weeklyRecap} disabled={recapBusy} className="px-3 py-1.5 rounded-lg text-[11px] font-bold font-mono text-[#bbc9cd] bg-white/5 border border-white/10 hover:bg-white/10 cursor-pointer disabled:opacity-50 flex items-center gap-1.5"><CalendarRange className="w-3.5 h-3.5" /> {recapBusy ? "Building…" : "Weekly recap"}</button>
-          </div>
-          {recap && (
-            <div className="glass-panel rounded-2xl border border-[#a3e635]/15 p-5 sm:p-6 space-y-3">
-              <div className="flex items-center gap-2"><CalendarRange className="w-4.5 h-4.5 text-[#a3e635]" /><span className="text-xs font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">Weekly recap</span></div>
-              <p className="text-[13px] text-[#dfe2f3] leading-relaxed">{recap.recap}</p>
-              {recap.quiz?.length > 0 && (
-                <div><span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono">Mixed recall</span>
-                  <ol className="mt-1 space-y-1">{recap.quiz.map((q, i) => (<li key={i} className="flex items-start gap-2 text-[12px] text-[#bbc9cd]"><span className="text-[#a3e635] font-mono">{i + 1}.</span>{q}</li>))}</ol>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Difficulty + actions */}
-          <div className="glass-panel rounded-2xl border border-white/10 p-5 sm:p-6 flex items-center justify-between gap-4 flex-wrap">
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] uppercase tracking-wider text-[#859397] font-mono mr-1">Was this</span>
-              {([["E", "Too easy", Smile], ["J", "Just right", Meh], ["H", "Too hard", Frown]] as [string, string, typeof Smile][]).map(([r, label, Icon]) => (
-                <button key={r} onClick={() => rate(r as "E" | "J" | "H")}
-                  className={`px-3 py-1.5 rounded-lg text-[11px] font-mono border transition-all cursor-pointer flex items-center gap-1.5 ${d!.difficulty === r ? "border-[#8aebff] text-[#8aebff] bg-[#8aebff]/10" : "border-white/10 text-[#859397] hover:text-[#dfe2f3]"}`}>
-                  <Icon className="w-3.5 h-3.5" />{label}
-                </button>
-              ))}
-            </div>
-            <button onClick={sendWhatsApp} disabled={sending || d!.sent_whatsapp}
-              className={`px-4 py-2 rounded-lg text-xs font-bold font-mono flex items-center gap-2 transition-all cursor-pointer disabled:opacity-60 ${d!.sent_whatsapp ? "text-[#a3e635] bg-[#a3e635]/10 border border-[#a3e635]/30" : "text-[#25D366] bg-[#25D366]/10 border border-[#25D366]/40 hover:bg-[#25D366]/20"}`}>
-              {d!.sent_whatsapp ? <><CheckCircle2 className="w-4 h-4" /> Sent to WhatsApp</> : sending ? <><RefreshCw className="w-4 h-4 animate-spin" /> Sending…</> : <><Send className="w-4 h-4" /> Send to WhatsApp</>}
+          <div className="flex justify-end pt-2">
+            <button
+              onClick={handleSaveSettings}
+              className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-emerald-500 text-slate-950 font-bold text-sm shadow-md hover:opacity-90 transition-all"
+            >
+              Save & Apply Settings
             </button>
           </div>
-
-          {/* History */}
-          {history.length > 1 && (
-            <div className="glass-panel rounded-2xl border border-white/10 overflow-hidden">
-              <div className="px-6 py-3 border-b border-white/5 bg-white/5 flex items-center gap-2"><History className="w-4 h-4 text-[#859397]" /><span className="text-xs font-extrabold text-[#dfe2f3] uppercase tracking-wide font-mono">Past updates</span></div>
-              <div className="divide-y divide-white/5">
-                {history.map((h) => (
-                  <button key={h.date} onClick={() => loadDay(h.date)}
-                    className={`w-full text-left p-3.5 sm:px-6 hover:bg-white/5 transition-colors flex items-center justify-between gap-3 cursor-pointer ${d!.date === h.date ? "bg-[#8aebff]/5" : ""}`}>
-                    <div className="flex items-center gap-3 min-w-0">
-                      <span className="text-[10px] font-mono text-[#859397] flex-shrink-0">{h.date}</span>
-                      <span className="text-[12px] text-[#dfe2f3] truncate">{h.concept}</span>
-                    </div>
-                    <div className="flex items-center gap-1.5 flex-shrink-0">
-                      {h.difficulty && <span className="text-[9px] font-mono text-[#859397] border border-white/10 rounded px-1">{h.difficulty}</span>}
-                      {h.sent_whatsapp && <CheckCircle2 className="w-3 h-3 text-[#a3e635]" />}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-        </>
-      )}
-
-      {/* Floating "save highlight" bar — appears when you select lesson text */}
-      {highlight && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 max-w-[92vw] bg-[#0f131f]/95 backdrop-blur-md border border-[#8aebff]/40 rounded-xl px-4 py-3 shadow-[0_0_24px_rgba(138,235,255,0.2)]">
-          <Sparkles className="w-4 h-4 text-[#8aebff] flex-shrink-0" />
-          <span className="text-[12px] text-[#bbc9cd] truncate max-w-[46vw]">“{highlight}”</span>
-          <button onClick={() => saveNote(highlight)} className="px-3 py-1.5 rounded-lg text-[11px] font-bold font-mono text-[#0a0e1a] bg-[#8aebff] hover:bg-[#a5f0ff] cursor-pointer flex items-center gap-1.5 flex-shrink-0"><StickyNote className="w-3.5 h-3.5" /> Save highlight</button>
-          <button onClick={() => setHighlight("")} className="text-[#859397] hover:text-[#dfe2f3] cursor-pointer flex-shrink-0"><XCircle className="w-4 h-4" /></button>
         </div>
       )}
+
+      {/* 3-Slide Interactive Deck Navigation */}
+      <div className="flex items-center justify-between p-2 rounded-xl bg-slate-900/60 border border-slate-800">
+        <button
+          disabled={activeSlide === 1}
+          onClick={() => setActiveSlide((prev) => prev - 1)}
+          className={`flex items-center space-x-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+            activeSlide === 1 ? "opacity-30 cursor-not-allowed" : "bg-slate-800 text-slate-200 hover:bg-slate-700"
+          }`}
+        >
+          <ChevronLeft className="w-4 h-4" />
+          <span>Previous</span>
+        </button>
+
+        <div className="flex space-x-2">
+          {[
+            { id: 1, label: "1. ELI15 Story & Analogy", icon: Lightbulb },
+            { id: 2, label: "2. Visual Diagram & Code", icon: Code2 },
+            { id: 3, label: "3. Interactive Quiz Game", icon: HelpCircle }
+          ].map((tab) => {
+            const Icon = tab.icon;
+            const isActive = activeSlide === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveSlide(tab.id)}
+                className={`flex items-center space-x-1.5 px-4 py-2 rounded-xl text-xs font-semibold border transition-all ${
+                  isActive
+                    ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/50 shadow-md"
+                    : "bg-slate-800/40 text-slate-400 border-slate-800 hover:text-slate-200"
+                }`}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                <span>{tab.label}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        <button
+          disabled={activeSlide === 3}
+          onClick={() => setActiveSlide((prev) => prev + 1)}
+          className={`flex items-center space-x-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+            activeSlide === 3 ? "opacity-30 cursor-not-allowed" : "bg-slate-800 text-slate-200 hover:bg-slate-700"
+          }`}
+        >
+          <span>Next</span>
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* Main Interactive Slide Arena */}
+      <div className={`p-8 rounded-3xl border min-h-[420px] transition-all ${themeStyles}`}>
+        {/* SLIDE 1: ELI15 Story & Analogy */}
+        {activeSlide === 1 && (
+          <div className="space-y-6 animate-in fade-in duration-300">
+            <div className="flex items-center space-x-3">
+              <div className="p-3 rounded-2xl bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                <Lightbulb className="w-8 h-8" />
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold font-chalk tracking-wide text-amber-300">
+                  {lesson?.slide1_story.title}
+                </h2>
+                <p className="text-xs text-slate-400 uppercase tracking-widest font-semibold mt-0.5">
+                  15-Year-Old Explanation Level
+                </p>
+              </div>
+            </div>
+
+            <div className="p-6 rounded-2xl bg-black/30 border border-amber-900/30 backdrop-blur-sm space-y-4">
+              <p className="text-lg leading-relaxed text-slate-200 font-handwritten text-2xl">
+                "{lesson?.slide1_story.analogy}"
+              </p>
+            </div>
+
+            <div className="flex justify-end pt-4">
+              <button
+                onClick={() => setActiveSlide(2)}
+                className="flex items-center space-x-2 px-6 py-3 rounded-xl bg-amber-500 text-slate-950 font-bold text-sm hover:bg-amber-400 transition-all shadow-lg"
+              >
+                <span>See the Code & Visual Diagram</span>
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* SLIDE 2: Visual Diagram & Handwritten Code */}
+        {activeSlide === 2 && (
+          <div className="space-y-6 animate-in fade-in duration-300">
+            <div className="flex items-center space-x-3">
+              <div className="p-3 rounded-2xl bg-cyan-500/20 text-cyan-400 border border-cyan-500/30">
+                <Code2 className="w-8 h-8" />
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold font-chalk text-cyan-300">
+                  {lesson?.slide2_visual.title}
+                </h2>
+                <p className="text-xs text-slate-400 uppercase tracking-widest font-semibold mt-0.5">
+                  Visual Flowchart & Handwritten Code
+                </p>
+              </div>
+            </div>
+
+            {/* Visual Mermaid Flowchart Container */}
+            <div className="p-6 rounded-2xl bg-black/40 border border-cyan-900/40 space-y-3">
+              <h4 className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">Visual Concept Flow</h4>
+              <div className="p-4 rounded-xl bg-slate-950/80 border border-cyan-950 text-cyan-300 font-mono text-sm overflow-x-auto">
+                <pre>{lesson?.slide2_visual.mermaid_diagram}</pre>
+              </div>
+            </div>
+
+            {/* Handwritten Annotated Code Snippet */}
+            <div className="p-6 rounded-2xl bg-black/40 border border-emerald-900/40 space-y-3">
+              <h4 className="text-lg font-bold font-handwritten text-emerald-400 text-xl">
+                {lesson?.slide2_visual.handwritten_code_title}
+              </h4>
+              <div className="p-4 rounded-xl bg-slate-950/90 border border-emerald-950 text-emerald-300 font-mono text-sm leading-relaxed overflow-x-auto">
+                <pre>{lesson?.slide2_visual.code_snippet}</pre>
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-4">
+              <button
+                onClick={() => setActiveSlide(3)}
+                className="flex items-center space-x-2 px-6 py-3 rounded-xl bg-cyan-500 text-slate-950 font-bold text-sm hover:bg-cyan-400 transition-all shadow-lg"
+              >
+                <span>Take Today's Micro-Quiz</span>
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* SLIDE 3: Interactive Quiz Game */}
+        {activeSlide === 3 && (
+          <div className="space-y-6 animate-in fade-in duration-300">
+            <div className="flex items-center space-x-3">
+              <div className="p-3 rounded-2xl bg-purple-500/20 text-purple-400 border border-purple-500/30">
+                <HelpCircle className="w-8 h-8" />
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold font-chalk text-purple-300">
+                  Today's Micro-Quiz Challenge 🎮
+                </h2>
+                <p className="text-xs text-slate-400 uppercase tracking-widest font-semibold mt-0.5">
+                  Test Your Knowledge • Earn Streak Points
+                </p>
+              </div>
+            </div>
+
+            <div className="p-6 rounded-2xl bg-black/30 border border-purple-900/30 space-y-4">
+              <h3 className="text-lg font-semibold text-slate-100">
+                {lesson?.slide3_quiz.question}
+              </h3>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
+                {lesson?.slide3_quiz.options.map((option, idx) => {
+                  const isSelected = selectedOption === idx;
+                  const isCorrectOption = idx === lesson.slide3_quiz.correct_index;
+
+                  let btnStyle = "bg-slate-900/80 text-slate-200 border-slate-800 hover:border-purple-500/50";
+                  if (quizSubmitted) {
+                    if (isCorrectOption) {
+                      btnStyle = "bg-emerald-950/80 text-emerald-300 border-emerald-500 font-bold shadow-lg";
+                    } else if (isSelected && !isCorrectOption) {
+                      btnStyle = "bg-rose-950/80 text-rose-300 border-rose-500 font-bold";
+                    }
+                  }
+
+                  return (
+                    <button
+                      key={idx}
+                      disabled={quizSubmitted}
+                      onClick={() => handleQuizSubmit(idx)}
+                      className={`p-4 rounded-xl text-left text-sm border transition-all flex items-center justify-between ${btnStyle}`}
+                    >
+                      <span>{option}</span>
+                      {quizSubmitted && isCorrectOption && <CheckCircle2 className="w-5 h-5 text-emerald-400" />}
+                      {quizSubmitted && isSelected && !isCorrectOption && <XCircle className="w-5 h-5 text-rose-400" />}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Quiz Feedback & Explanation Box */}
+              {quizSubmitted && (
+                <div className={`p-4 rounded-xl border mt-4 animate-in fade-in duration-200 ${
+                  isCorrect ? "bg-emerald-950/40 border-emerald-800/60 text-emerald-200" : "bg-rose-950/40 border-rose-800/60 text-rose-200"
+                }`}>
+                  <div className="flex items-center space-x-2 font-bold mb-1">
+                    {isCorrect ? <Trophy className="w-5 h-5 text-yellow-400" /> : <Lightbulb className="w-5 h-5 text-rose-400" />}
+                    <span>{isCorrect ? "🎉 Correct Answer! Streak +1 Day!" : "💡 Close Try! Here is why:"}</span>
+                  </div>
+                  <p className="text-xs leading-relaxed opacity-90">{lesson?.slide3_quiz.explanation}</p>
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-between items-center pt-2">
+              <button
+                onClick={() => {
+                  setSelectedOption(null);
+                  setQuizSubmitted(false);
+                  setIsCorrect(null);
+                }}
+                className="flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-slate-800 text-slate-300 border border-slate-700 hover:bg-slate-700 text-xs font-semibold"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Reset Quiz</span>
+              </button>
+
+              <button
+                onClick={() => setActiveSlide(1)}
+                className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-purple-500 text-slate-950 font-bold text-sm hover:bg-purple-400 transition-all shadow-lg"
+              >
+                <span>Review Story Again</span>
+                <RotateCcw className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

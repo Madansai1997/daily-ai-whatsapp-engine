@@ -50,6 +50,20 @@ _ML_FOUNDATIONS = [
 ]
 
 
+_DATA_ANALYST = [
+    "SQL Select, Where, and Group By fundamentals",
+    "SQL Joins (Inner, Left, Right, Full Outer) explained with Venn diagrams",
+    "SQL Window Functions (ROW_NUMBER, RANK, DENSE_RANK)",
+    "Subqueries vs Common Table Expressions (CTEs)",
+    "Pandas DataFrame basics: filtering, grouping, and merging",
+    "Data cleaning: handling NULL values and duplicate removal",
+    "Data visualization: picking the right chart for the story",
+    "Statistical foundations: mean, median, mode, and standard deviation",
+    "A/B testing and hypothesis testing basics",
+    "Building interactive dashboards and KPI metrics",
+]
+
+
 def _interleave(a, b):
     """Weave two syllabi together (a, b, a, b, …) so the combo track alternates foundations
     with applied AI engineering."""
@@ -64,20 +78,26 @@ def _interleave(a, b):
 
 TRACKS = {
     "ai_engineering": {
-        "name": "AI Engineering",
-        "description": "Build production LLM & agentic systems — the hottest AI hiring lane, and the best fit for what you've already built.",
+        "name": "AI Engineering & LLM Magic 🚀",
+        "description": "Build production LLM & agentic systems — explained simply with fun analogies and visual code snippets.",
         "domain": "AI Engineering and applied LLM systems",
         "concepts": _AI_ENGINEERING,
     },
+    "data_analyst": {
+        "name": "Data Science & SQL Superpowers 📊",
+        "description": "Master SQL queries, Pandas, and data visualization like a pro data analyst.",
+        "domain": "Data analytics, SQL queries, and data visualization",
+        "concepts": _DATA_ANALYST,
+    },
     "ml_foundations": {
-        "name": "ML Foundations",
-        "description": "The core machine-learning concepts you need to be credible in AI interviews.",
+        "name": "ML Foundations 🧠",
+        "description": "The core machine-learning concepts made super simple for interviews.",
         "domain": "core machine learning fundamentals",
         "concepts": _ML_FOUNDATIONS,
     },
     "ai_engineer_combo": {
-        "name": "AI Engineer (role-focused)",
-        "description": "Interleaves ML foundations with AI engineering — your Data → AI combo path.",
+        "name": "Full Stack AI Mastery ⚡",
+        "description": "Interleaves ML foundations with AI engineering — your complete Data → AI combo path.",
         "domain": "AI engineering with machine-learning foundations",
         "concepts": _interleave(_ML_FOUNDATIONS, _AI_ENGINEERING),
     },

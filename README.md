@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- feat(study): Restructure Daily Study Guide into interactive ELI15 JARVIS Academy _(2026-07-30)_
 - refactor(routers): Modularize APIRouters into jobs.py, bills.py, rag.py, auth.py, system.py and fix ATS route precedence _(2026-07-27)_
 - fix(jobs-board): Render application cards in status columns regardless of reviewed flag _(2026-07-27)_
 - fix(ats-alignment): Resolve parameter mismatch in analyze function and return clean JSON response for missing JD _(2026-07-27)_
@@ -161,10 +162,9 @@ npm install && npm run build     # served by the engine at /console
 - fix(jobs-tracker): Pass both system_prompt and user_prompt in call_llm invocation for ATS Deep Scout _(2026-07-27)_
 - fix(jobs-tracker): Restore applications list API payload for board UI and fallback LLM in ATS Deep Scout _(2026-07-27)_
 - fix(jobs-board): Make NEW queue badge interactive button and fix review-queue JSON key parsing _(2026-07-27)_
-- feat(notebooklm): Wire NotebookLM Context Studio & RAG endpoints into routers/rag_notebook_analyst.py _(2026-07-27)_
 <!-- /AUTO:changelog -->
 
 ---
 
-_Last updated: 2026-07-27 · this README's inventory and changelog are auto-maintained by
+_Last updated: 2026-07-30 · this README's inventory and changelog are auto-maintained by
 `scripts/gen_readme.py` on every commit._
