@@ -156,7 +156,49 @@ def get_curriculum_index(track_key: str) -> list:
     return curriculum
 
 
+def calculate_sm2_interval(rating: str, repetitions: int, easiness_factor: float, interval: int) -> tuple:
+    """
+    SuperMemo-2 (SM-2) Spaced Repetition Algorithm.
+    rating: 'hard' (q=2), 'good' (q=4), 'easy' (q=5)
+    Returns: (new_repetitions, new_interval, new_easiness_factor)
+    """
+    q_map = {"hard": 2, "good": 4, "easy": 5}
+    q = q_map.get(rating, 4)
+
+    ef = easiness_factor + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02))
+    ef = max(1.3, ef)
+
+    if q < 3:
+        repetitions = 0
+        interval = 1
+    else:
+        repetitions += 1
+        if repetitions == 1:
+            interval = 1
+        elif repetitions == 2:
+            interval = 6
+        else:
+            interval = int(interval * ef)
+
+    return repetitions, interval, round(ef, 2)
+
+
+def extract_concepts_from_text(text: str) -> list:
+    """Parse key technical headings or concepts from uploaded document text."""
+    lines = [line.strip("- *#\t\r") for line in text.split("\n") if len(line.strip()) > 8]
+    if len(lines) >= 5:
+        return lines[:5]
+    return [
+        "Document Context & Core Foundations",
+        "System Architecture & Data Structures",
+        "Performance Tradeoffs & Optimization",
+        "Implementation & Code Formulation",
+        "Evaluation & Verification Metrics"
+    ]
+
+
 def list_tracks() -> list:
     return [{"key": k, "name": v["name"], "description": v["description"],
              "total": len(v["concepts"])} for k, v in TRACKS.items()]
+
 

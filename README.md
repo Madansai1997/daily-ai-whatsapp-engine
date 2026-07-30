@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(influencer): Fix Influencer Watch table initialization and frontend array state crash guards _(2026-07-30)_
 - feat(study): Add Curriculum Index, NotebookLM AI Research Notebook & Mock Quiz Suite _(2026-07-30)_
 - feat(study): Restructure Daily Study Guide into interactive ELI15 JARVIS Academy _(2026-07-30)_
 - refactor(routers): Modularize APIRouters into jobs.py, bills.py, rag.py, auth.py, system.py and fix ATS route precedence _(2026-07-27)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - fix(ats-scout): Update REST model to gemini-2.0-flash and add live Job Scout multi-layer fallback _(2026-07-27)_
 - fix(ats-scout): Normalize returned job fields and add explicit empty search results state in JobsBoard _(2026-07-27)_
 - fix(jobs-tracker): Pass both system_prompt and user_prompt in call_llm invocation for ATS Deep Scout _(2026-07-27)_
-- fix(jobs-tracker): Restore applications list API payload for board UI and fallback LLM in ATS Deep Scout _(2026-07-27)_
 <!-- /AUTO:changelog -->
 
 ---

@@ -151,9 +151,12 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
       // items can be revealed on demand instead of silently vanishing. days keeps it recent.
       const q = domain ? `&domain=${encodeURIComponent(domain)}` : "";
       const res = await fetch(`/api/influencers/feed?all=1&limit=60&days=${windowDaysRef.current}${q}`, { cache: "no-store" });
-      if (res.ok) setPosts(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        setPosts(Array.isArray(data) ? data : []);
+      }
     } catch {
-      /* ignore */
+      setPosts([]);
     } finally {
       setFeedLoading(false);
     }
@@ -169,7 +172,11 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
   const loadDomains = useCallback(async () => {
     try {
       const res = await fetch("/api/influencers/domains", { cache: "no-store" });
-      if (res.ok) setDomains(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        const domainsList = Array.isArray(data) ? data : (data?.domains || []);
+        setDomains(domainsList);
+      }
     } catch {
       /* ignore */
     }
@@ -179,9 +186,12 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
     setLoading(true);
     try {
       const res = await fetch("/api/influencers", { cache: "no-store" });
-      if (res.ok) setInfluencers(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        setInfluencers(Array.isArray(data) ? data : []);
+      }
     } catch {
-      /* fallback */
+      setInfluencers([]);
     } finally {
       setLoading(false);
     }
@@ -255,10 +265,11 @@ export default function Influencers({ onRead }: { onRead?: () => void }) {
     }
   };
 
-  const relevant = posts.filter((p) => p.relevant);
-  const filtered = posts.filter((p) => !p.relevant);
-  const visible = showFiltered ? posts : relevant;
-  const unread = relevant.filter((p) => p.is_read === 0).length;
+  const safePosts = Array.isArray(posts) ? posts : [];
+  const relevant = safePosts.filter((p) => p && p.relevant);
+  const filtered = safePosts.filter((p) => p && !p.relevant);
+  const visible = showFiltered ? safePosts : relevant;
+  const unread = relevant.filter((p) => p && p.is_read === 0).length;
 
   // Group the feed by channel so multiple synced feeds don't merge into one endless pile.
   // `visible` is newest-first, so first occurrence of a channel orders the groups by recency.

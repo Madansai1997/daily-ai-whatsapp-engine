@@ -26,11 +26,20 @@ _tables_ready = False  # migrations run once per process, not on every feed read
 
 
 async def _ensure_tables(db):
-    """Create the persistent feed table + run column migrations ONCE per process. Every ALTER is
-    a failing Turso round-trip after the first run, so guarding this keeps feed reads cheap."""
+    """Create persistent watched_influencers and feed tables + run column migrations ONCE per process."""
     global _tables_ready
     if _tables_ready:
         return
+    await db.execute('''CREATE TABLE IF NOT EXISTS watched_influencers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        handle TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        name TEXT,
+        yt_content TEXT DEFAULT 'all',
+        domain TEXT DEFAULT '',
+        added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(handle, platform)
+    )''')
     await db.execute('''CREATE TABLE IF NOT EXISTS influencer_posts (
         post_id TEXT PRIMARY KEY,
         platform TEXT,
@@ -49,9 +58,9 @@ async def _ensure_tables(db):
     for _ddl in (
         "ALTER TABLE influencer_posts ADD COLUMN domain TEXT DEFAULT ''",
         "ALTER TABLE influencer_posts ADD COLUMN contact_id INTEGER",
-        "ALTER TABLE influencer_posts ADD COLUMN brief TEXT",   # on-demand: what the update says
-        "ALTER TABLE influencer_posts ADD COLUMN apply TEXT",   # on-demand: how to use it in Madan's project
-        "ALTER TABLE influencer_posts ADD COLUMN insight_source TEXT",  # transcript|article|description|title
+        "ALTER TABLE influencer_posts ADD COLUMN brief TEXT",
+        "ALTER TABLE influencer_posts ADD COLUMN apply TEXT",
+        "ALTER TABLE influencer_posts ADD COLUMN insight_source TEXT",
     ):
         try:
             await db.execute(_ddl)
@@ -296,14 +305,19 @@ async def _apply_relevance(db, new_posts: list, call_llm_fn) -> list:
 
 async def get_watched_influencers() -> list:
     """Retrieve the list of watched influencers from the database."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT id, handle, platform, name, COALESCE(yt_content, 'all') AS yt_content, "
-            "COALESCE(domain, '') AS domain, added_at FROM watched_influencers"
-        )
-        rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await _ensure_tables(db)
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT id, handle, platform, name, COALESCE(yt_content, 'all') AS yt_content, "
+                "COALESCE(domain, '') AS domain, added_at FROM watched_influencers"
+            )
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"⚠️ get_watched_influencers error: {e}")
+        return []
 
 
 async def run_influencer_watcher_digest(call_llm_fn) -> str:
@@ -483,32 +497,36 @@ async def get_feed(limit: int = 60, only_relevant: bool = True, domain: str = ""
     """Persistent post history for the console feed view, newest first. Optional domain filter.
     days > 0 restricts to posts first seen in the last N days (keeps the feed to recent content
     instead of a growing 2-week backlog)."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await _ensure_tables(db)
-        db.row_factory = aiosqlite.Row
-        clauses, params = [
-            "contact_id IS NULL",
-            "EXISTS (SELECT 1 FROM watched_influencers w WHERE w.handle = influencer_posts.handle AND w.platform = influencer_posts.platform)"
-        ], []  # creator feed only & only from currently watched creators
-        if only_relevant:
-            clauses.append("relevant = 1")
-        if domain:
-            clauses.append("domain = ?")
-            params.append(domain)
-        if days and days > 0:
-            clauses.append("seen_at >= datetime('now', ?)")
-            params.append(f"-{int(days)} days")
-        where = "WHERE " + " AND ".join(clauses)
-        params.append(limit)
-        cursor = await db.execute(
-            f"SELECT post_id, platform, handle, name, title, summary, url, relevant, relevance_note, "
-            f"is_read, published_at, COALESCE(domain,'') AS domain, brief, apply, insight_source, seen_at "
-            f"FROM influencer_posts {where} "
-            f"ORDER BY seen_at DESC, rowid DESC LIMIT ?",
-            tuple(params),
-        )
-        rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await _ensure_tables(db)
+            db.row_factory = aiosqlite.Row
+            clauses, params = [
+                "contact_id IS NULL",
+                "EXISTS (SELECT 1 FROM watched_influencers w WHERE w.handle = influencer_posts.handle AND w.platform = influencer_posts.platform)"
+            ], []  # creator feed only & only from currently watched creators
+            if only_relevant:
+                clauses.append("relevant = 1")
+            if domain:
+                clauses.append("domain = ?")
+                params.append(domain)
+            if days and days > 0:
+                clauses.append("seen_at >= datetime('now', ?)")
+                params.append(f"-{int(days)} days")
+            where = "WHERE " + " AND ".join(clauses)
+            params.append(limit)
+            cursor = await db.execute(
+                f"SELECT post_id, platform, handle, name, title, summary, url, relevant, relevance_note, "
+                f"is_read, published_at, COALESCE(domain,'') AS domain, brief, apply, insight_source, seen_at "
+                f"FROM influencer_posts {where} "
+                f"ORDER BY seen_at DESC, rowid DESC LIMIT ?",
+                tuple(params),
+            )
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"⚠️ get_feed error: {e}")
+        return []
 
 
 
