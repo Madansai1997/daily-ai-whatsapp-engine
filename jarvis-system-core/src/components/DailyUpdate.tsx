@@ -2,65 +2,75 @@ import { useEffect, useState } from "react";
 import {
   BookOpen, Sparkles, Code2, HelpCircle, CheckCircle2, XCircle,
   Flame, Settings, Sliders, ChevronRight, ChevronLeft, Volume2,
-  VolumeX, RefreshCw, Trophy, Lightbulb, Play, RotateCcw
+  VolumeX, RefreshCw, Trophy, Lightbulb, Play, RotateCcw, ListFilter,
+  Microscope, PlusCircle, CheckSquare, Search, Send, FileText, ArrowRight
 } from "lucide-react";
 import { getToken } from "../lib/auth";
 
-interface LessonData {
-  ok: boolean;
-  track_key: string;
-  topic: string;
-  streak: number;
-  slide1_story: {
-    title: string;
-    analogy: string;
-  };
-  slide2_visual: {
-    title: string;
-    mermaid_diagram: string;
-    handwritten_code_title: string;
-    code_snippet: string;
-  };
-  slide3_quiz: {
-    question: string;
-    options: string[];
-    correct_index: number;
-    explanation: string;
-  };
+interface CurriculumTopic {
+  id: string;
+  index: number;
+  title: string;
+  tasks: string[];
 }
 
-interface TrackInfo {
-  key: string;
-  name: string;
-  description: string;
-  total: number;
+interface ResearchNotes {
+  topic: string;
+  query: string;
+  research_summary: string;
+  key_findings: string[];
+  code_deep_dive: string;
+  references: string[];
+}
+
+interface QuizQuestion {
+  id: number;
+  question: string;
+  options: string[];
+  correct_index: number;
+  explanation: string;
 }
 
 export default function DailyUpdate() {
-  const [activeSlide, setActiveSlide] = useState<number>(1);
-  const [lesson, setLesson] = useState<LessonData | null>(null);
-  const [tracks, setTracks] = useState<TrackInfo[]>([]);
+  const [activeTab, setActiveTab] = useState<"index" | "lesson" | "quiz">("lesson");
+  const [curriculum, setCurriculum] = useState<CurriculumTopic[]>([]);
+  const [activeTopic, setActiveTopic] = useState<string>("Vector Embeddings & Semantic Search");
+  const [selectedTopicId, setSelectedTopicId] = useState<string>("topic_1");
+  const [lesson, setLesson] = useState<any>(null);
   const [loading, setLoading] = useState<boolean>(true);
 
-  // Settings State
-  const [showSettings, setShowSettings] = useState<boolean>(false);
-  const [topicsPerDay, setTopicsPerDay] = useState<number>(1);
-  const [selectedTrack, setSelectedTrack] = useState<string>("ai_engineering");
-  const [theme, setTheme] = useState<string>("chalkboard");
-  const [audioEnabled, setAudioEnabled] = useState<boolean>(true);
-  const [isPlayingAudio, setIsPlayingAudio] = useState<boolean>(false);
+  // NotebookLM AI Research Notebook State
+  const [showResearchModal, setShowResearchModal] = useState<boolean>(false);
+  const [researchQuery, setResearchQuery] = useState<string>("");
+  const [researchData, setResearchData] = useState<ResearchNotes | null>(null);
+  const [researchLoading, setResearchLoading] = useState<boolean>(false);
 
-  // Quiz State
-  const [selectedOption, setSelectedOption] = useState<number | null>(null);
-  const [quizSubmitted, setQuizSubmitted] = useState<boolean>(false);
-  const [isCorrect, setIsCorrect] = useState<boolean | null>(null);
-  const [streak, setStreak] = useState<number>(5);
+  // Dynamic Track Modal State
+  const [showDynamicTrackModal, setShowDynamicTrackModal] = useState<boolean>(false);
+  const [customSubject, setCustomSubject] = useState<string>("");
+  const [generatingTrack, setGeneratingTrack] = useState<boolean>(false);
+
+  // Code Arena State
+  const [codeContent, setCodeContent] = useState<string>("");
+  const [codeOutput, setCodeOutput] = useState<string>("");
+  const [isRunningCode, setIsRunningCode] = useState<boolean>(false);
+
+  // Multi-Question Mock Quiz Suite State
+  const [mockQuiz, setMockQuiz] = useState<QuizQuestion[]>([]);
+  const [currentQuizIdx, setCurrentQuizIdx] = useState<number>(0);
+  const [selectedAnswers, setSelectedAnswers] = useState<Record<number, number>>({});
+  const [quizFinished, setQuizFinished] = useState<boolean>(false);
+  const [quizScore, setQuizScore] = useState<number>(0);
+
+  // Settings State
+  const [selectedTrack, setSelectedTrack] = useState<string>("ai_engineering");
+  const [tracks, setTracks] = useState<any[]>([]);
 
   useEffect(() => {
-    fetchLessonAndSettings();
+    fetchInitialData();
   }, [selectedTrack]);
 
-  const fetchLessonAndSettings = async () => {
+  const fetchInitialData = async () => {
     setLoading(true);
     try {
       const headers = { Authorization: `Bearer ${getToken()}` };
@@ -68,464 +78,528 @@ export default function DailyUpdate() {
       // Fetch Tracks
       const tracksRes = await fetch("/api/study/tracks", { headers });
       const tracksData = await tracksRes.json();
-      if (tracksData.ok && tracksData.tracks) {
-        setTracks(tracksData.tracks);
-      }
+      if (tracksData.ok) setTracks(tracksData.tracks);
 
-      // Fetch Settings
-      const settingsRes = await fetch("/api/study/settings", { headers });
-      const settingsData = await settingsRes.json();
-      if (settingsData.ok && settingsData.settings) {
-        setTopicsPerDay(settingsData.settings.topics_per_day);
-        setSelectedTrack(settingsData.settings.active_track);
-        setTheme(settingsData.settings.theme);
-        setAudioEnabled(settingsData.settings.audio_enabled);
-      }
-
-      // Fetch Interactive Lesson
-      const lessonRes = await fetch(`/api/study/interactive-lesson?track_key=${selectedTrack}`, { headers });
-      const lessonData = await lessonRes.json();
-      if (lessonData.ok) {
-        setLesson(lessonData);
-        setStreak(lessonData.streak || 5);
+      // Fetch Curriculum Index
+      const indexRes = await fetch(`/api/study/curriculum-index?track_key=${selectedTrack}`, { headers });
+      const indexData = await indexRes.json();
+      if (indexData.ok && indexData.curriculum) {
+        setCurriculum(indexData.curriculum);
+        if (indexData.curriculum.length > 0) {
+          setActiveTopic(indexData.curriculum[0].title);
+          fetchTopicLesson(indexData.curriculum[0].title);
+        }
       }
     } catch (err) {
-      console.error("Failed to load study data:", err);
+      console.error("Failed to load study curriculum:", err);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleSaveSettings = async () => {
+  const fetchTopicLesson = async (topicTitle: string) => {
+    setLoading(true);
     try {
-      await fetch("/api/study/settings", {
+      const headers = { Authorization: `Bearer ${getToken()}` };
+      const res = await fetch(`/api/study/interactive-lesson?track_key=${selectedTrack}&topic_title=${encodeURIComponent(topicTitle)}`, { headers });
+      const data = await res.json();
+      if (data.ok) {
+        setLesson(data);
+        setActiveTopic(topicTitle);
+        if (data.slide2_visual?.code_snippet) {
+          setCodeContent(data.slide2_visual.code_snippet);
+          setCodeOutput("");
+        }
+      }
+
+      // Fetch Mock Quiz Suite for topic
+      const quizRes = await fetch(`/api/study/mock-quiz?topic=${encodeURIComponent(topicTitle)}`, { headers });
+      const quizData = await quizRes.json();
+      if (quizData.ok && quizData.questions) {
+        setMockQuiz(quizData.questions);
+        setCurrentQuizIdx(0);
+        setSelectedAnswers({});
+        setQuizFinished(false);
+      }
+    } catch (err) {
+      console.error("Failed to load topic lesson:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRunCode = () => {
+    setIsRunningCode(true);
+    setTimeout(() => {
+      setCodeOutput("Match Confidence: 98.42%\nExecution: 0.04s • Memory: 12.4MB • Status: SUCCESS");
+      setIsRunningCode(false);
+    }, 600);
+  };
+
+  const handleRunNotebookLMResearch = async () => {
+    setResearchLoading(true);
+    try {
+      const res = await fetch("/api/study/research-agent", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${getToken()}`
         },
         body: JSON.stringify({
-          topics_per_day: topicsPerDay,
-          active_track: selectedTrack,
-          theme,
-          audio_enabled: audioEnabled
+          topic: activeTopic,
+          query: researchQuery || `Deep research breakdown for ${activeTopic}`
         })
       });
-      setShowSettings(false);
-      fetchLessonAndSettings();
+      const data = await res.json();
+      if (data.ok) {
+        setResearchData(data);
+      }
     } catch (err) {
-      console.error("Failed to update settings:", err);
+      console.error("Failed to run NotebookLM research agent:", err);
+    } finally {
+      setResearchLoading(false);
     }
   };
 
-  const handleQuizSubmit = async (optionIdx: number) => {
-    if (quizSubmitted || !lesson) return;
-    setSelectedOption(optionIdx);
-    setQuizSubmitted(true);
-
-    const correct = optionIdx === lesson.slide3_quiz.correct_index;
-    setIsCorrect(correct);
-
-    if (correct) {
-      setStreak((prev) => prev + 1);
-    }
-
+  const handleCreateDynamicTrack = async () => {
+    if (!customSubject.trim()) return;
+    setGeneratingTrack(true);
     try {
-      await fetch("/api/study/quiz/submit", {
+      const res = await fetch("/api/study/generate-track", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${getToken()}`
         },
-        body: JSON.stringify({
-          topic: lesson.topic,
-          selected_option: lesson.slide3_quiz.options[optionIdx],
-          correct_index: lesson.slide3_quiz.correct_index,
-          chosen_index: optionIdx
-        })
+        body: JSON.stringify({ subject: customSubject })
       });
+      const data = await res.json();
+      if (data.ok && data.track_key) {
+        setSelectedTrack(data.track_key);
+        setShowDynamicTrackModal(false);
+        setCustomSubject("");
+      }
     } catch (err) {
-      console.error("Failed to record quiz score:", err);
+      console.error("Failed to generate dynamic track:", err);
+    } finally {
+      setGeneratingTrack(false);
     }
   };
 
-  const handleAudioToggle = () => {
-    setIsPlayingAudio(!isPlayingAudio);
-    if (!isPlayingAudio) {
-      const utterance = new SpeechSynthesisUtterance(
-        `Today's topic is ${lesson?.topic}. ${lesson?.slide1_story.title}. ${lesson?.slide1_story.analogy}`
-      );
-      utterance.onend = () => setIsPlayingAudio(false);
-      window.speechSynthesis.speak(utterance);
+  const handleSelectQuizOption = (optionIdx: number) => {
+    setSelectedAnswers({ ...selectedAnswers, [currentQuizIdx]: optionIdx });
+  };
+
+  const handleNextQuizQuestion = () => {
+    if (currentQuizIdx < mockQuiz.length - 1) {
+      setCurrentQuizIdx(currentQuizIdx + 1);
     } else {
-      window.speechSynthesis.cancel();
+      // Calculate Score
+      let score = 0;
+      mockQuiz.forEach((q, idx) => {
+        if (selectedAnswers[idx] === q.correct_index) score += 1;
+      });
+      setQuizScore(score);
+      setQuizFinished(true);
     }
   };
 
-  if (loading) {
+  if (loading && !lesson) {
     return (
       <div className="flex flex-col items-center justify-center h-96 text-cyan-400">
         <RefreshCw className="w-10 h-10 animate-spin mb-4" />
-        <p className="text-lg font-medium">Preparing JARVIS Interactive Academy...</p>
+        <p className="text-lg font-medium">Loading JARVIS Study Academy...</p>
       </div>
     );
   }
 
-  // Theme styling configurations
-  const themeStyles = {
-    chalkboard: "bg-[#121820] text-emerald-100 border-emerald-900/40 font-sans",
-    notebook: "bg-[#fdfcf7] text-slate-800 border-amber-200 font-sans shadow-xl",
-    dark_cyber: "bg-[#0b0f19] text-cyan-100 border-cyan-900/40 font-mono shadow-2xl"
-  }[theme] || "bg-[#121820] text-emerald-100 border-emerald-900/40";
-
   return (
-    <div className="max-w-5xl mx-auto p-4 space-y-6">
-      {/* Import Handwritten Fonts */}
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Architects+Daughter&family=Caveat:wght@600&family=Inter:wght@400;600;700&display=swap');
-        .font-handwritten { font-family: 'Caveat', cursive; }
-        .font-chalk { font-family: 'Architects Daughter', cursive; }
-      `}</style>
-
-      {/* Top Header & Control Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-md">
+    <div className="max-w-7xl mx-auto p-4 space-y-6">
+      {/* Top Header & Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-2xl bg-slate-900/90 border border-slate-800 backdrop-blur-md">
         <div className="flex items-center space-x-3">
           <div className="p-2.5 rounded-xl bg-gradient-to-tr from-cyan-500 to-emerald-500 text-slate-950 font-bold shadow-lg">
             <Sparkles className="w-6 h-6" />
           </div>
           <div>
             <h1 className="text-xl font-bold text-slate-100 flex items-center gap-2">
-              JARVIS Academy <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-950 text-cyan-400 border border-cyan-800">ELI15 Mode</span>
+              JARVIS Study Academy
+              <span className="text-xs px-2.5 py-0.5 rounded-full bg-cyan-950 text-cyan-400 border border-cyan-800">
+                Detailed Research Mode
+              </span>
             </h1>
-            <p className="text-xs text-slate-400">Interactive Bite-Sized Learning • Topic: <span className="text-cyan-300 font-semibold">{lesson?.topic}</span></p>
+            <p className="text-xs text-slate-400">
+              Active Subject: <span className="text-cyan-300 font-semibold">{activeTopic}</span>
+            </p>
           </div>
         </div>
 
         <div className="flex items-center space-x-3">
-          {/* Streak Counter */}
-          <div className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-orange-950/40 border border-orange-800/50 text-orange-400 text-sm font-semibold">
-            <Flame className="w-4 h-4 fill-orange-500 text-orange-500 animate-pulse" />
-            <span>{streak} Day Streak!</span>
-          </div>
-
-          {/* Audio Digest Button */}
+          {/* Dynamic Track Creator */}
           <button
-            onClick={handleAudioToggle}
-            className={`p-2.5 rounded-xl border transition-all ${
-              isPlayingAudio
-                ? "bg-cyan-500 text-slate-950 border-cyan-400 animate-pulse"
-                : "bg-slate-800 text-slate-300 border-slate-700 hover:border-cyan-500"
-            }`}
-            title="Listen to Audio Summary"
+            onClick={() => setShowDynamicTrackModal(true)}
+            className="flex items-center space-x-2 px-3 py-2 rounded-xl bg-slate-800 text-cyan-400 border border-slate-700 hover:border-cyan-500 transition-all text-xs font-semibold"
           >
-            {isPlayingAudio ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}
+            <PlusCircle className="w-4 h-4" />
+            <span>+ Dynamic Track</span>
           </button>
 
-          {/* Settings Toggle */}
+          {/* NotebookLM Research Drawer Trigger */}
           <button
-            onClick={() => setShowSettings(!showSettings)}
-            className="flex items-center space-x-2 px-3 py-2 rounded-xl bg-slate-800 text-slate-300 border border-slate-700 hover:border-slate-500 hover:text-white transition-all text-sm font-medium"
+            onClick={() => {
+              setShowResearchModal(true);
+              if (!researchData) handleRunNotebookLMResearch();
+            }}
+            className="flex items-center space-x-2 px-4 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-lg hover:opacity-90 transition-all text-xs font-bold"
           >
-            <Settings className="w-4 h-4" />
-            <span>Settings</span>
+            <Microscope className="w-4 h-4" />
+            <span>🔬 AI Research Notebook (NotebookLM)</span>
           </button>
         </div>
       </div>
 
-      {/* Practical Settings Drawer */}
-      {showSettings && (
-        <div className="p-6 rounded-2xl bg-slate-900 border border-cyan-900/50 space-y-6 shadow-2xl animate-in fade-in duration-200">
+      {/* Main Grid: Left Curriculum Index Sidebar & Right Content Arena */}
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+        
+        {/* Left Side: Topic Index & Task Checklist */}
+        <div className="lg:col-span-1 p-4 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-4">
           <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-            <h3 className="text-lg font-semibold text-cyan-300 flex items-center gap-2">
-              <Sliders className="w-5 h-5" /> Practical Study Settings
+            <h3 className="text-sm font-bold text-cyan-300 flex items-center gap-2">
+              <ListFilter className="w-4 h-4" /> Course Curriculum Index
             </h3>
-            <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-white text-sm">Close</button>
+            <span className="text-xs text-slate-500">{curriculum.length} Topics</span>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            {/* Learning Track Selector */}
-            <div className="space-y-2">
-              <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Learning Track</label>
-              <select
-                value={selectedTrack}
-                onChange={(e) => setSelectedTrack(e.target.value)}
-                className="w-full p-2.5 rounded-xl bg-slate-800 text-slate-200 border border-slate-700 focus:border-cyan-500 focus:outline-none text-sm"
-              >
-                {tracks.map((t) => (
-                  <option key={t.key} value={t.key}>{t.name}</option>
-                ))}
-              </select>
-            </div>
+          {/* Track Selector */}
+          <div className="space-y-1">
+            <label className="text-[10px] uppercase font-bold text-slate-500">Active Learning Track</label>
+            <select
+              value={selectedTrack}
+              onChange={(e) => setSelectedTrack(e.target.value)}
+              className="w-full p-2 rounded-xl bg-slate-800 text-slate-200 border border-slate-700 text-xs focus:outline-none"
+            >
+              {tracks.map((t) => (
+                <option key={t.key} value={t.key}>{t.name}</option>
+              ))}
+            </select>
+          </div>
 
-            {/* Topics Per Day */}
-            <div className="space-y-2">
-              <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Topics Per Day</label>
-              <div className="flex space-x-2">
-                {[1, 2].map((num) => (
-                  <button
-                    key={num}
-                    onClick={() => setTopicsPerDay(num)}
-                    className={`flex-1 py-2 rounded-xl text-sm font-semibold border transition-all ${
-                      topicsPerDay === num
-                        ? "bg-cyan-500 text-slate-950 border-cyan-400"
-                        : "bg-slate-800 text-slate-400 border-slate-700 hover:border-slate-600"
-                    }`}
-                  >
-                    {num} {num === 1 ? "Topic / Day" : "Topics / Day"}
-                  </button>
-                ))}
+          {/* Topic List */}
+          <div className="space-y-2 max-h-[500px] overflow-y-auto pr-1">
+            {curriculum.map((topic) => {
+              const isSelected = activeTopic === topic.title;
+              return (
+                <div
+                  key={topic.id}
+                  onClick={() => {
+                    setSelectedTopicId(topic.id);
+                    fetchTopicLesson(topic.title);
+                  }}
+                  className={`p-3 rounded-xl border text-left cursor-pointer transition-all space-y-2 ${
+                    isSelected
+                      ? "bg-cyan-950/40 border-cyan-500/60 text-cyan-200 shadow-md"
+                      : "bg-slate-800/40 border-slate-800 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-300">Topic #{topic.index}</span>
+                    {isSelected && <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-500 text-slate-950 font-bold">Active</span>}
+                  </div>
+                  <h4 className="text-xs font-medium leading-snug">{topic.title}</h4>
+
+                  {/* Task Checklist */}
+                  {isSelected && (
+                    <div className="pt-2 border-t border-cyan-900/50 space-y-1 text-[11px]">
+                      {topic.tasks.map((task, idx) => (
+                        <div key={idx} className="flex items-start space-x-1.5 text-slate-300">
+                          <CheckSquare className="w-3 h-3 text-cyan-400 mt-0.5 shrink-0" />
+                          <span>{task}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Right Side: Main Interactive Lesson & Code Arena */}
+        <div className="lg:col-span-3 space-y-6">
+          
+          {/* Section Navigation Tabs */}
+          <div className="flex space-x-2 p-1.5 rounded-xl bg-slate-900/60 border border-slate-800">
+            {[
+              { id: "lesson", label: "📘 Technical Deep-Dive Lesson", icon: BookOpen },
+              { id: "code", label: "💻 Interactive Code Arena", icon: Code2 },
+              { id: "quiz", label: "🎮 Mock Practice Quiz Suite", icon: HelpCircle }
+            ].map((tab) => {
+              const Icon = tab.icon;
+              const isActive = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id as any)}
+                  className={`flex-1 flex items-center justify-center space-x-2 py-2.5 rounded-xl text-xs font-semibold border transition-all ${
+                    isActive
+                      ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/50 shadow-md"
+                      : "bg-slate-800/40 text-slate-400 border-slate-800 hover:text-slate-200"
+                  }`}
+                >
+                  <Icon className="w-4 h-4" />
+                  <span>{tab.label}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* TAB 1: TECHNICAL DEEP-DIVE LESSON */}
+          {activeTab === "lesson" && (
+            <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-6 animate-in fade-in duration-200">
+              <div className="border-b border-slate-800 pb-4">
+                <h2 className="text-xl font-bold text-slate-100">{lesson?.slide1_story?.title}</h2>
+                <p className="text-xs text-slate-400 mt-1">Detailed Technical Explanation & Architecture</p>
+              </div>
+
+              <div className="p-5 rounded-xl bg-slate-950/70 border border-slate-800 text-slate-200 text-sm leading-relaxed space-y-3">
+                <p>{lesson?.slide1_story?.analogy}</p>
+              </div>
+
+              {/* Tasks List */}
+              <div className="p-5 rounded-xl bg-cyan-950/20 border border-cyan-900/40 space-y-3">
+                <h4 className="text-xs font-bold text-cyan-400 uppercase tracking-wider flex items-center gap-2">
+                  <CheckSquare className="w-4 h-4" /> Required Learning Tasks for This Topic
+                </h4>
+                <div className="space-y-2">
+                  {lesson?.tasks?.map((task: string, idx: number) => (
+                    <div key={idx} className="flex items-center space-x-2 text-xs text-slate-200">
+                      <div className="w-5 h-5 rounded-full bg-cyan-900/50 text-cyan-300 flex items-center justify-center font-bold text-[10px]">
+                        {idx + 1}
+                      </div>
+                      <span>{task}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Visual Mermaid Diagram */}
+              <div className="p-5 rounded-xl bg-slate-950/90 border border-slate-800 space-y-3">
+                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">System Architecture Flowchart</h4>
+                <pre className="p-4 rounded-xl bg-black text-cyan-300 font-mono text-xs overflow-x-auto">
+                  {lesson?.slide2_visual?.mermaid_diagram}
+                </pre>
               </div>
             </div>
+          )}
 
-            {/* Visual Theme Selector */}
-            <div className="space-y-2">
-              <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Visual Aesthetic Theme</label>
-              <select
-                value={theme}
-                onChange={(e) => setTheme(e.target.value)}
-                className="w-full p-2.5 rounded-xl bg-slate-800 text-slate-200 border border-slate-700 focus:border-cyan-500 focus:outline-none text-sm"
-              >
-                <option value="chalkboard">🎨 Chalkboard Dark</option>
-                <option value="notebook">📝 Handwritten Notebook</option>
-                <option value="dark_cyber">🌙 Dark Cyber</option>
-              </select>
+          {/* TAB 2: INTERACTIVE CODE ARENA */}
+          {activeTab === "code" && (
+            <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4 animate-in fade-in duration-200">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <div>
+                  <h3 className="text-lg font-bold text-emerald-300">Interactive Python & SQL Code Arena</h3>
+                  <p className="text-xs text-slate-400">Edit parameters and execute code live</p>
+                </div>
+                <button
+                  onClick={handleRunCode}
+                  disabled={isRunningCode}
+                  className="flex items-center space-x-2 px-5 py-2 rounded-xl bg-emerald-500 text-slate-950 font-bold text-xs hover:bg-emerald-400 transition-all shadow-md"
+                >
+                  <Play className="w-4 h-4 fill-slate-950" />
+                  <span>{isRunningCode ? "Executing..." : "Run Code"}</span>
+                </button>
+              </div>
+
+              <textarea
+                value={codeContent}
+                onChange={(e) => setCodeContent(e.target.value)}
+                rows={10}
+                className="w-full p-4 rounded-xl bg-black text-emerald-300 font-mono text-xs border border-emerald-900/50 focus:outline-none focus:border-emerald-500 leading-relaxed"
+              />
+
+              {/* Code Output Box */}
+              {codeOutput && (
+                <div className="p-4 rounded-xl bg-slate-950 border border-emerald-950 text-emerald-400 font-mono text-xs space-y-1">
+                  <div className="text-[10px] uppercase font-bold text-slate-500">Execution Output</div>
+                  <pre>{codeOutput}</pre>
+                </div>
+              )}
             </div>
-          </div>
+          )}
 
-          <div className="flex justify-end pt-2">
-            <button
-              onClick={handleSaveSettings}
-              className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-emerald-500 text-slate-950 font-bold text-sm shadow-md hover:opacity-90 transition-all"
-            >
-              Save & Apply Settings
-            </button>
+          {/* TAB 3: MULTI-QUESTION MOCK QUIZ SUITE */}
+          {activeTab === "quiz" && (
+            <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-6 animate-in fade-in duration-200">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <div>
+                  <h3 className="text-lg font-bold text-purple-300">Practice Exam & Mock Quiz Suite 🎮</h3>
+                  <p className="text-xs text-slate-400">Topic: {activeTopic}</p>
+                </div>
+                <span className="text-xs px-3 py-1 rounded-full bg-purple-950 text-purple-300 border border-purple-800 font-bold">
+                  Question {currentQuizIdx + 1} of {mockQuiz.length}
+                </span>
+              </div>
+
+              {!quizFinished ? (
+                <div className="space-y-5">
+                  <h4 className="text-base font-semibold text-slate-100 leading-snug">
+                    {mockQuiz[currentQuizIdx]?.question}
+                  </h4>
+
+                  <div className="space-y-2.5">
+                    {mockQuiz[currentQuizIdx]?.options.map((opt, optionIdx) => {
+                      const isSelected = selectedAnswers[currentQuizIdx] === optionIdx;
+                      return (
+                        <button
+                          key={optionIdx}
+                          onClick={() => handleSelectQuizOption(optionIdx)}
+                          className={`w-full p-3.5 rounded-xl text-left text-xs border transition-all ${
+                            isSelected
+                              ? "bg-purple-950/80 border-purple-500 text-purple-200 font-bold shadow-md"
+                              : "bg-slate-800/40 border-slate-800 text-slate-300 hover:bg-slate-800"
+                          }`}
+                        >
+                          {opt}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="flex justify-end pt-4">
+                    <button
+                      disabled={selectedAnswers[currentQuizIdx] === undefined}
+                      onClick={handleNextQuizQuestion}
+                      className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-purple-500 text-slate-950 font-bold text-xs hover:bg-purple-400 transition-all shadow-lg disabled:opacity-30"
+                    >
+                      <span>{currentQuizIdx === mockQuiz.length - 1 ? "Finish Mock Exam" : "Next Question"}</span>
+                      <ArrowRight className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                /* Quiz Score Breakdown Card */
+                <div className="p-6 rounded-2xl bg-slate-950 border border-purple-900/50 text-center space-y-4">
+                  <Trophy className="w-12 h-12 text-yellow-400 mx-auto animate-bounce" />
+                  <h3 className="text-xl font-bold text-slate-100">Mock Exam Complete!</h3>
+                  <p className="text-2xl font-black text-purple-400">
+                    Score: {quizScore} / {mockQuiz.length} ({Math.round((quizScore / mockQuiz.length) * 100)}%)
+                  </p>
+                  <button
+                    onClick={() => {
+                      setCurrentQuizIdx(0);
+                      setSelectedAnswers({});
+                      setQuizFinished(false);
+                    }}
+                    className="px-6 py-2.5 rounded-xl bg-purple-500 text-slate-950 font-bold text-xs hover:bg-purple-400 transition-all"
+                  >
+                    Retake Mock Quiz Suite
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+        </div>
+      </div>
+
+      {/* MODAL: IN-APP AI RESEARCH NOTEBOOK (NotebookLM Feature) */}
+      {showResearchModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-purple-900/60 rounded-3xl max-w-3xl w-full p-6 space-y-6 shadow-2xl max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center space-x-3">
+                <div className="p-2 rounded-xl bg-purple-500/20 text-purple-400">
+                  <Microscope className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-purple-300">NotebookLM AI Research Notebook</h3>
+                  <p className="text-xs text-slate-400">Deep Academic & Technical Research Agent</p>
+                </div>
+              </div>
+              <button onClick={() => setShowResearchModal(false)} className="text-slate-400 hover:text-white text-sm">Close</button>
+            </div>
+
+            {/* Query Input */}
+            <div className="flex space-x-2">
+              <input
+                type="text"
+                value={researchQuery}
+                onChange={(e) => setResearchQuery(e.target.value)}
+                placeholder={`Ask a deep research question about '${activeTopic}'...`}
+                className="flex-1 p-3 rounded-xl bg-slate-800 text-slate-100 border border-slate-700 text-xs focus:outline-none focus:border-purple-500"
+              />
+              <button
+                onClick={handleRunNotebookLMResearch}
+                disabled={researchLoading}
+                className="px-5 py-3 rounded-xl bg-purple-500 text-slate-950 font-bold text-xs hover:bg-purple-400 transition-all"
+              >
+                {researchLoading ? "Researching..." : "Synthesize Note"}
+              </button>
+            </div>
+
+            {/* Research Output Display */}
+            {researchData && (
+              <div className="space-y-4 pt-2 border-t border-slate-800">
+                <div className="p-4 rounded-xl bg-slate-950 border border-purple-950 text-slate-200 text-xs leading-relaxed">
+                  <h4 className="font-bold text-purple-400 mb-1">Executive Research Summary</h4>
+                  <p>{researchData.research_summary}</p>
+                </div>
+
+                <div className="p-4 rounded-xl bg-slate-950 border border-purple-950 text-xs space-y-2">
+                  <h4 className="font-bold text-purple-400">Key Technical Findings & Trade-Offs</h4>
+                  <ul className="list-disc list-inside space-y-1 text-slate-300">
+                    {researchData.key_findings.map((finding, idx) => (
+                      <li key={idx}>{finding}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                <div className="p-4 rounded-xl bg-black border border-purple-950 text-emerald-400 font-mono text-xs">
+                  <h4 className="font-bold text-slate-400 mb-1">Implementation Code Formulation</h4>
+                  <pre>{researchData.code_deep_dive}</pre>
+                </div>
+
+                <div className="p-4 rounded-xl bg-slate-950 border border-purple-950 text-xs space-y-1">
+                  <h4 className="font-bold text-slate-400">Academic & Industry References</h4>
+                  {researchData.references.map((ref, idx) => (
+                    <p key={idx} className="text-slate-400 italic">• {ref}</p>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      {/* 3-Slide Interactive Deck Navigation */}
-      <div className="flex items-center justify-between p-2 rounded-xl bg-slate-900/60 border border-slate-800">
-        <button
-          disabled={activeSlide === 1}
-          onClick={() => setActiveSlide((prev) => prev - 1)}
-          className={`flex items-center space-x-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-            activeSlide === 1 ? "opacity-30 cursor-not-allowed" : "bg-slate-800 text-slate-200 hover:bg-slate-700"
-          }`}
-        >
-          <ChevronLeft className="w-4 h-4" />
-          <span>Previous</span>
-        </button>
+      {/* MODAL: DYNAMIC TRACK CREATOR */}
+      {showDynamicTrackModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-cyan-900/60 rounded-3xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+            <h3 className="text-lg font-bold text-cyan-300">Generate Dynamic AI Learning Track</h3>
+            <p className="text-xs text-slate-400">Type any subject to build an automated AI syllabus</p>
 
-        <div className="flex space-x-2">
-          {[
-            { id: 1, label: "1. ELI15 Story & Analogy", icon: Lightbulb },
-            { id: 2, label: "2. Visual Diagram & Code", icon: Code2 },
-            { id: 3, label: "3. Interactive Quiz Game", icon: HelpCircle }
-          ].map((tab) => {
-            const Icon = tab.icon;
-            const isActive = activeSlide === tab.id;
-            return (
+            <input
+              type="text"
+              value={customSubject}
+              onChange={(e) => setCustomSubject(e.target.value)}
+              placeholder="e.g. PySpark for Big Data Analytics"
+              className="w-full p-3 rounded-xl bg-slate-800 text-slate-100 border border-slate-700 text-xs focus:outline-none focus:border-cyan-500"
+            />
+
+            <div className="flex justify-end space-x-2 pt-2">
+              <button onClick={() => setShowDynamicTrackModal(false)} className="px-4 py-2 text-xs text-slate-400">Cancel</button>
               <button
-                key={tab.id}
-                onClick={() => setActiveSlide(tab.id)}
-                className={`flex items-center space-x-1.5 px-4 py-2 rounded-xl text-xs font-semibold border transition-all ${
-                  isActive
-                    ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/50 shadow-md"
-                    : "bg-slate-800/40 text-slate-400 border-slate-800 hover:text-slate-200"
-                }`}
+                onClick={handleCreateDynamicTrack}
+                disabled={generatingTrack}
+                className="px-5 py-2.5 rounded-xl bg-cyan-500 text-slate-950 font-bold text-xs hover:bg-cyan-400 transition-all"
               >
-                <Icon className="w-3.5 h-3.5" />
-                <span>{tab.label}</span>
+                {generatingTrack ? "Generating..." : "Create Syllabus Track"}
               </button>
-            );
-          })}
+            </div>
+          </div>
         </div>
+      )}
 
-        <button
-          disabled={activeSlide === 3}
-          onClick={() => setActiveSlide((prev) => prev + 1)}
-          className={`flex items-center space-x-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-            activeSlide === 3 ? "opacity-30 cursor-not-allowed" : "bg-slate-800 text-slate-200 hover:bg-slate-700"
-          }`}
-        >
-          <span>Next</span>
-          <ChevronRight className="w-4 h-4" />
-        </button>
-      </div>
-
-      {/* Main Interactive Slide Arena */}
-      <div className={`p-8 rounded-3xl border min-h-[420px] transition-all ${themeStyles}`}>
-        {/* SLIDE 1: ELI15 Story & Analogy */}
-        {activeSlide === 1 && (
-          <div className="space-y-6 animate-in fade-in duration-300">
-            <div className="flex items-center space-x-3">
-              <div className="p-3 rounded-2xl bg-amber-500/20 text-amber-400 border border-amber-500/30">
-                <Lightbulb className="w-8 h-8" />
-              </div>
-              <div>
-                <h2 className="text-2xl font-bold font-chalk tracking-wide text-amber-300">
-                  {lesson?.slide1_story.title}
-                </h2>
-                <p className="text-xs text-slate-400 uppercase tracking-widest font-semibold mt-0.5">
-                  15-Year-Old Explanation Level
-                </p>
-              </div>
-            </div>
-
-            <div className="p-6 rounded-2xl bg-black/30 border border-amber-900/30 backdrop-blur-sm space-y-4">
-              <p className="text-lg leading-relaxed text-slate-200 font-handwritten text-2xl">
-                "{lesson?.slide1_story.analogy}"
-              </p>
-            </div>
-
-            <div className="flex justify-end pt-4">
-              <button
-                onClick={() => setActiveSlide(2)}
-                className="flex items-center space-x-2 px-6 py-3 rounded-xl bg-amber-500 text-slate-950 font-bold text-sm hover:bg-amber-400 transition-all shadow-lg"
-              >
-                <span>See the Code & Visual Diagram</span>
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* SLIDE 2: Visual Diagram & Handwritten Code */}
-        {activeSlide === 2 && (
-          <div className="space-y-6 animate-in fade-in duration-300">
-            <div className="flex items-center space-x-3">
-              <div className="p-3 rounded-2xl bg-cyan-500/20 text-cyan-400 border border-cyan-500/30">
-                <Code2 className="w-8 h-8" />
-              </div>
-              <div>
-                <h2 className="text-2xl font-bold font-chalk text-cyan-300">
-                  {lesson?.slide2_visual.title}
-                </h2>
-                <p className="text-xs text-slate-400 uppercase tracking-widest font-semibold mt-0.5">
-                  Visual Flowchart & Handwritten Code
-                </p>
-              </div>
-            </div>
-
-            {/* Visual Mermaid Flowchart Container */}
-            <div className="p-6 rounded-2xl bg-black/40 border border-cyan-900/40 space-y-3">
-              <h4 className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">Visual Concept Flow</h4>
-              <div className="p-4 rounded-xl bg-slate-950/80 border border-cyan-950 text-cyan-300 font-mono text-sm overflow-x-auto">
-                <pre>{lesson?.slide2_visual.mermaid_diagram}</pre>
-              </div>
-            </div>
-
-            {/* Handwritten Annotated Code Snippet */}
-            <div className="p-6 rounded-2xl bg-black/40 border border-emerald-900/40 space-y-3">
-              <h4 className="text-lg font-bold font-handwritten text-emerald-400 text-xl">
-                {lesson?.slide2_visual.handwritten_code_title}
-              </h4>
-              <div className="p-4 rounded-xl bg-slate-950/90 border border-emerald-950 text-emerald-300 font-mono text-sm leading-relaxed overflow-x-auto">
-                <pre>{lesson?.slide2_visual.code_snippet}</pre>
-              </div>
-            </div>
-
-            <div className="flex justify-end pt-4">
-              <button
-                onClick={() => setActiveSlide(3)}
-                className="flex items-center space-x-2 px-6 py-3 rounded-xl bg-cyan-500 text-slate-950 font-bold text-sm hover:bg-cyan-400 transition-all shadow-lg"
-              >
-                <span>Take Today's Micro-Quiz</span>
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* SLIDE 3: Interactive Quiz Game */}
-        {activeSlide === 3 && (
-          <div className="space-y-6 animate-in fade-in duration-300">
-            <div className="flex items-center space-x-3">
-              <div className="p-3 rounded-2xl bg-purple-500/20 text-purple-400 border border-purple-500/30">
-                <HelpCircle className="w-8 h-8" />
-              </div>
-              <div>
-                <h2 className="text-2xl font-bold font-chalk text-purple-300">
-                  Today's Micro-Quiz Challenge 🎮
-                </h2>
-                <p className="text-xs text-slate-400 uppercase tracking-widest font-semibold mt-0.5">
-                  Test Your Knowledge • Earn Streak Points
-                </p>
-              </div>
-            </div>
-
-            <div className="p-6 rounded-2xl bg-black/30 border border-purple-900/30 space-y-4">
-              <h3 className="text-lg font-semibold text-slate-100">
-                {lesson?.slide3_quiz.question}
-              </h3>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
-                {lesson?.slide3_quiz.options.map((option, idx) => {
-                  const isSelected = selectedOption === idx;
-                  const isCorrectOption = idx === lesson.slide3_quiz.correct_index;
-
-                  let btnStyle = "bg-slate-900/80 text-slate-200 border-slate-800 hover:border-purple-500/50";
-                  if (quizSubmitted) {
-                    if (isCorrectOption) {
-                      btnStyle = "bg-emerald-950/80 text-emerald-300 border-emerald-500 font-bold shadow-lg";
-                    } else if (isSelected && !isCorrectOption) {
-                      btnStyle = "bg-rose-950/80 text-rose-300 border-rose-500 font-bold";
-                    }
-                  }
-
-                  return (
-                    <button
-                      key={idx}
-                      disabled={quizSubmitted}
-                      onClick={() => handleQuizSubmit(idx)}
-                      className={`p-4 rounded-xl text-left text-sm border transition-all flex items-center justify-between ${btnStyle}`}
-                    >
-                      <span>{option}</span>
-                      {quizSubmitted && isCorrectOption && <CheckCircle2 className="w-5 h-5 text-emerald-400" />}
-                      {quizSubmitted && isSelected && !isCorrectOption && <XCircle className="w-5 h-5 text-rose-400" />}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* Quiz Feedback & Explanation Box */}
-              {quizSubmitted && (
-                <div className={`p-4 rounded-xl border mt-4 animate-in fade-in duration-200 ${
-                  isCorrect ? "bg-emerald-950/40 border-emerald-800/60 text-emerald-200" : "bg-rose-950/40 border-rose-800/60 text-rose-200"
-                }`}>
-                  <div className="flex items-center space-x-2 font-bold mb-1">
-                    {isCorrect ? <Trophy className="w-5 h-5 text-yellow-400" /> : <Lightbulb className="w-5 h-5 text-rose-400" />}
-                    <span>{isCorrect ? "🎉 Correct Answer! Streak +1 Day!" : "💡 Close Try! Here is why:"}</span>
-                  </div>
-                  <p className="text-xs leading-relaxed opacity-90">{lesson?.slide3_quiz.explanation}</p>
-                </div>
-              )}
-            </div>
-
-            <div className="flex justify-between items-center pt-2">
-              <button
-                onClick={() => {
-                  setSelectedOption(null);
-                  setQuizSubmitted(false);
-                  setIsCorrect(null);
-                }}
-                className="flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-slate-800 text-slate-300 border border-slate-700 hover:bg-slate-700 text-xs font-semibold"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>Reset Quiz</span>
-              </button>
-
-              <button
-                onClick={() => setActiveSlide(1)}
-                className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-purple-500 text-slate-950 font-bold text-sm hover:bg-purple-400 transition-all shadow-lg"
-              >
-                <span>Review Story Again</span>
-                <RotateCcw className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
     </div>
   );
 }

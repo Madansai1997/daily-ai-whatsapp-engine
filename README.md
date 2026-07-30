@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- feat(study): Add Curriculum Index, NotebookLM AI Research Notebook & Mock Quiz Suite _(2026-07-30)_
 - feat(study): Restructure Daily Study Guide into interactive ELI15 JARVIS Academy _(2026-07-30)_
 - refactor(routers): Modularize APIRouters into jobs.py, bills.py, rag.py, auth.py, system.py and fix ATS route precedence _(2026-07-27)_
 - fix(jobs-board): Render application cards in status columns regardless of reviewed flag _(2026-07-27)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - fix(ats-scout): Normalize returned job fields and add explicit empty search results state in JobsBoard _(2026-07-27)_
 - fix(jobs-tracker): Pass both system_prompt and user_prompt in call_llm invocation for ATS Deep Scout _(2026-07-27)_
 - fix(jobs-tracker): Restore applications list API payload for board UI and fallback LLM in ATS Deep Scout _(2026-07-27)_
-- fix(jobs-board): Make NEW queue badge interactive button and fix review-queue JSON key parsing _(2026-07-27)_
 <!-- /AUTO:changelog -->
 
 ---

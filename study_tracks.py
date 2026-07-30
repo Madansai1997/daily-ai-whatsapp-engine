@@ -127,6 +127,36 @@ def track_progress(track_key: str, completed_lower: set) -> dict:
             "total": total, "completed": done, "next": nxt, "concepts": t["concepts"]}
 
 
+def add_dynamic_track(key: str, name: str, description: str, domain: str, concepts: list):
+    """Add a dynamically generated learning track."""
+    TRACKS[key] = {
+        "name": name,
+        "description": description,
+        "domain": domain,
+        "concepts": concepts
+    }
+    return TRACKS[key]
+
+
+def get_curriculum_index(track_key: str) -> list:
+    """Return structured topic index with task checklists for a track."""
+    t = TRACKS.get(track_key, TRACKS["ai_engineering"])
+    curriculum = []
+    for idx, c in enumerate(t["concepts"]):
+        curriculum.append({
+            "id": f"topic_{idx + 1}",
+            "index": idx + 1,
+            "title": c,
+            "tasks": [
+                f"Task 1: Understand the core intuition of {c}",
+                f"Task 2: Implement the hands-on code snippet for {c}",
+                f"Task 3: Complete the mock quiz evaluation"
+            ]
+        })
+    return curriculum
+
+
 def list_tracks() -> list:
     return [{"key": k, "name": v["name"], "description": v["description"],
              "total": len(v["concepts"])} for k, v in TRACKS.items()]
+
