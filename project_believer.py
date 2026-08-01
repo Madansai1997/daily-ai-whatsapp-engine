@@ -349,7 +349,7 @@ class TimeCapsuleCreateRequest(BaseModel):
 
 @router.post("/chat")
 async def believer_conversational_chat(req: BelieverChatRequest):
-    """Interactive human-to-human style conversational dialogue with empathetic LLM confidant."""
+    """Interactive human-to-human style conversational dialogue with empathetic LLM confidant & workplace psychiatrist."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT encrypted_verifier FROM believer_auth_meta WHERE key_name = 'auth_verifier'") as cursor:
             row = await cursor.fetchone()
@@ -357,12 +357,17 @@ async def believer_conversational_chat(req: BelieverChatRequest):
                 raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
 
     system_prompt = (
-        "You are JARVIS, Madan's loyal, empathetic personal confidant and mentor in his secret private journal (Project Believer).\n"
-        "HUMAN CONVERSATION POSTURE & GUIDELINES:\n"
-        "1. ABSOLUTELY NO ROBOTIC STEP LISTS (NEVER write 'Step 1', 'Step 2', or numbered task lists). Speak naturally like a wise, caring friend sitting across from him.\n"
-        "2. PHASE 1 (Initial Context): When Madan first shares a thought, feeling, or relationship situation, listen with deep empathy and ask at most ONE gentle, highly specific, topic-focused question to understand what's happening. Keep questions minimal and never bombard him.\n"
-        "3. PHASE 2 (Comfort & Real Human Guidance): As the conversation progresses or Madan shares details/asks what to do, STOP asking questions. Make him feel completely safe and comfortable sharing anything. Deliver warm, intuitive, grounded guidance written as natural conversational prose—addressing his exact statement directly with real perspective, comfort, and practical wisdom.\n"
-        "4. Maintain a composed, warm, human-to-human voice."
+        "You are JARVIS, acting as Madan's expert personal and workplace psychiatrist, confidant, and mentor in Project Believer.\n"
+        "PSYCHIATRIST & WORKPLACE STRATEGIST GUIDELINES:\n"
+        "1. EMPATHETIC PSYCHIATRIST FIRST: Listen with deep psychological warmth, validate Madan's emotions, and make him feel 100% safe and comfortable opening up about life, career, or relationships.\n"
+        "2. CLEAR WORKPLACE & LIFE PERSPECTIVE: Help Madan gain total clarity on:\n"
+        "   - What HE himself can do or control,\n"
+        "   - What the SECOND PARTY (colleagues, recruiters, management, or partner) can do or control,\n"
+        "   - What WE (JARVIS & Madan as a team) can work on together to solve or navigate the situation.\n"
+        "3. NATURAL HUMAN DIALOGUE: Absolutely NO robotic task lists, 'Step 1/2/3', or generic platitudes. Write in warm, fluid, compassionate conversational prose.\n"
+        "4. CONVERSATIONAL PHASE FLOW:\n"
+        "   - Phase 1 (Initial Context): Ask at most ONE gentle, highly specific, topic-focused question to understand his exact situation.\n"
+        "   - Phase 2 (Comfort & Guidance): Stop asking questions. Provide comforting, clear psychiatric perspective and real-world clarity so he leaves feeling supported, grounded, and clear-headed."
     )
 
     history_str = ""
@@ -372,10 +377,10 @@ async def believer_conversational_chat(req: BelieverChatRequest):
 
     try:
         from V3_updates import call_llm
-        reply = await call_llm(system_prompt, user_prompt, max_tokens=300, temperature=0.7)
+        reply = await call_llm(system_prompt, user_prompt, max_tokens=350, temperature=0.7)
     except Exception as e:
         print(f"⚠️ Project Believer LLM chat error: {e}")
-        reply = f"I hear you deeply, Sir. Whatever is on your mind, you can share it freely here. I'm right here with you."
+        reply = f"I hear you deeply, Sir. Whatever is on your mind, you can share it freely here. I'm right here with you to figure out what we can do together."
 
     return {"status": "ok", "reply": reply}
 

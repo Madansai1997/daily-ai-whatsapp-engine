@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- refactor(believer): Update prompt to Personal & Workplace Psychiatrist role providing 3-tier clarity (what user can do, what second party can do, what we can do together) _(2026-08-01)_
 - refactor(believer): Enforce natural human conversation posture without robotic step lists or repeated questions _(2026-08-01)_
 - fix(believer): Upgrade Key Cards and 3 Lenses prompts to be 100% specific to exact entry text and remove generic advice _(2026-08-01)_
 - fix(believer): Fix LLM invocation signature in Project Believer conversational chat and key cards _(2026-08-01)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - fix(jobs-board): Render application cards in status columns regardless of reviewed flag _(2026-07-27)_
 - fix(ats-alignment): Resolve parameter mismatch in analyze function and return clean JSON response for missing JD _(2026-07-27)_
 - feat(jobs-board): Display Ghost and Authorized verification tags on new scout jobs and board cards _(2026-07-27)_
-- fix(console): Fix missing icon imports and invalid function reference causing blank screen render crash _(2026-07-27)_
 <!-- /AUTO:changelog -->
 
 ---
