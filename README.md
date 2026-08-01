@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(believer): Upgrade Key Cards and 3 Lenses prompts to be 100% specific to exact entry text and remove generic advice _(2026-08-01)_
 - fix(believer): Fix LLM invocation signature in Project Believer conversational chat and key cards _(2026-08-01)_
 - feat(believer-jobs): Upgrade AI Job Hunt suite with Slide-Over Drawer and Project Believer with Conversational AI & Key Cards _(2026-08-01)_
 - fix(influencer): Fix Influencer Watch table initialization and frontend array state crash guards _(2026-07-30)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - feat(jobs-board): Display Ghost and Authorized verification tags on new scout jobs and board cards _(2026-07-27)_
 - fix(console): Fix missing icon imports and invalid function reference causing blank screen render crash _(2026-07-27)_
 - fix(job-scout): Comprehensive fix for board cards payload, ATS Deep Scout auth gate, on-demand search parameters, and DB loop safety _(2026-07-27)_
-- fix(ats-scout): Update REST model to gemini-2.0-flash and add live Job Scout multi-layer fallback _(2026-07-27)_
 <!-- /AUTO:changelog -->
 
 ---

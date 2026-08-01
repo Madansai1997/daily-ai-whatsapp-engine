@@ -392,32 +392,42 @@ async def generate_key_cards(req: BelieverKeyCardsRequest):
             if not entry_row:
                 raise HTTPException(status_code=404, detail="Entry not found")
             entry_text = decrypt_text(entry_row[0], req.passphrase)
+            mood_tag = entry_row[1]
 
-    system_prompt = "You are a psychological analyst and life coach. Return ONLY a strict JSON object with 4 Key Presentation Cards."
+    system_prompt = (
+        "You are Madan's elite personal growth analyst and AI mentor. You MUST analyze his specific journal entry with deep, tailored relevance. "
+        "STRICT RULE: NEVER output generic advice like 'take 5 deep breaths' or generic platitudes. Every single card MUST reference Madan's exact words, "
+        "his specific situation, tools, career, or emotions mentioned in the entry. Return ONLY a strict JSON object."
+    )
     user_prompt = (
-        "Analyze this private journal entry and return ONLY a strict JSON object with 4 Key Presentation Cards:\n"
+        "Analyze Madan's private journal entry and return ONLY a strict JSON object with 4 Key Presentation Cards tailored 100% to his exact text:\n"
         "{\n"
-        '  "mindset_shift": {"title": "Mindset Realignment", "content": "<one powerful perspective shift>"},\n'
-        '  "actionable_steps": {"title": "Immediate Micro-Steps", "steps": ["<step 1>", "<step 2>", "<step 3>"]},\n'
-        '  "reflection_question": {"title": "Deep Inquiry Today", "question": "<one thought-provoking question>"},\n'
-        '  "affirmation": {"title": "Empowering Grounding Statement", "statement": "<personalized strong affirmation>"}\n'
+        '  "mindset_shift": {"title": "Mindset Realignment", "content": "<deeply tailored perspective shift directly addressing his entry>"},\n'
+        '  "actionable_steps": {"title": "Immediate Micro-Steps", "steps": ["<specific actionable step 1 for his situation>", "<specific step 2>", "<specific step 3>"]},\n'
+        '  "reflection_question": {"title": "Deep Inquiry Today", "question": "<a probing question specifically referencing his entry words>"},\n'
+        '  "affirmation": {"title": "Empowering Grounding Statement", "statement": "<a strong, highly personal grounding statement tailored to his emotion>"}\n'
         "}\n\n"
-        f"Journal Entry: \"{entry_text}\"\n"
+        f"Journal Entry Mood: {mood_tag}\n"
+        f"Journal Entry Content:\n\"{entry_text}\"\n"
     )
 
     try:
         from V3_updates import call_llm
-        raw_res = await call_llm(system_prompt, user_prompt, max_tokens=350, temperature=0.5)
+        raw_res = await call_llm(system_prompt, user_prompt, max_tokens=400, temperature=0.5)
         import re
         match = re.search(r"\{.*\}", raw_res, re.DOTALL)
         cards_json = json.loads(match.group(0)) if match else {}
+        if not cards_json or not isinstance(cards_json, dict) or "mindset_shift" not in cards_json:
+            raise ValueError("Failed to parse structured JSON from LLM response")
     except Exception as e:
         print(f"⚠️ Project Believer LLM key-cards error: {e}")
+        # Context-aware fallback using Madan's entry snippet
+        snippet = entry_text[:60].strip()
         cards_json = {
-            "mindset_shift": {"title": "Mindset Realignment", "content": "Focus on what you can influence directly today."},
-            "actionable_steps": {"title": "Immediate Micro-Steps", "steps": ["Take 5 deep breaths", "Write down your top priority", "Execute 15 mins of focused action"]},
-            "reflection_question": {"title": "Deep Inquiry Today", "question": "What would success look like if this worry was completely removed?"},
-            "affirmation": {"title": "Empowering Grounding Statement", "statement": "I have the capability and resilience to navigate any obstacle."}
+            "mindset_shift": {"title": "Mindset Realignment", "content": f"Reframe your thought around '{snippet}...': Focus entirely on your immediate sphere of execution today."},
+            "actionable_steps": {"title": "Immediate Micro-Steps", "steps": [f"Break down your thought '{snippet}' into 1 immediate task", "Dedicate 20 minutes of uninterrupted focus to it", "Document your progress before ending the day"]},
+            "reflection_question": {"title": "Deep Inquiry Today", "question": f"Regarding '{snippet}...', what is the single most valuable outcome you can control today?"},
+            "affirmation": {"title": "Empowering Grounding Statement", "statement": f"I own my trajectory. My reflection on '{snippet}' is a stepping stone to mastery."}
         }
 
     return {"status": "ok", "key_cards": cards_json}
@@ -438,29 +448,36 @@ async def perspective_shift_simulator(req: BelieverPerspectiveRequest):
                 raise HTTPException(status_code=404, detail="Entry not found")
             entry_text = decrypt_text(entry_row[0], req.passphrase)
 
-    system_prompt = "You are a wisdom mentor. Evaluate the given journal entry through 3 distinct perspective lenses. Return STRICT JSON only."
+    system_prompt = (
+        "You are Madan's personal wisdom mentor evaluating his journal entry through 3 distinct perspective lenses. "
+        "STRICT RULE: Do NOT output generic textbook definitions. You MUST directly analyze the SPECIFIC situation, words, and feelings Madan wrote. "
+        "Return STRICT JSON only."
+    )
     user_prompt = (
-        "Evaluate this journal entry through 3 distinct perspective lenses. Return STRICT JSON:\n"
+        "Evaluate Madan's entry through 3 highly specific, tailored perspective lenses. Return STRICT JSON:\n"
         "{\n"
-        '  "stoic_lens": "<Marcus Aurelius / Epictetus control vs non-control perspective>",\n'
-        '  "visionary_lens": "<Tech lead first-principles breakdown of the situation>",\n'
-        '  "compassionate_lens": "<Warm, human, encouraging mentor viewpoint>"\n'
+        '  "stoic_lens": "<Marcus Aurelius / Epictetus style analysis directly referencing his entry situation>",\n'
+        '  "visionary_lens": "<Tech lead first-principles breakdown analyzing the root variables of his entry>",\n'
+        '  "compassionate_lens": "<Warm, deeply human, empathetic mentor response addressing his exact feelings>"\n'
         "}\n\n"
-        f"Entry: \"{entry_text}\""
+        f"Madan's Entry Content:\n\"{entry_text}\""
     )
 
     try:
         from V3_updates import call_llm
-        raw_res = await call_llm(system_prompt, user_prompt, max_tokens=400, temperature=0.6)
+        raw_res = await call_llm(system_prompt, user_prompt, max_tokens=450, temperature=0.6)
         import re
         match = re.search(r"\{.*\}", raw_res, re.DOTALL)
         lenses = json.loads(match.group(0)) if match else {}
+        if not lenses or not isinstance(lenses, dict) or "stoic_lens" not in lenses:
+            raise ValueError("Failed to parse structured JSON from LLM response")
     except Exception as e:
         print(f"⚠️ Project Believer LLM perspective error: {e}")
+        snippet = entry_text[:60].strip()
         lenses = {
-            "stoic_lens": "Separate what is in your power from what is outside your control. Direct all effort to your actions.",
-            "visionary_lens": "Break the challenge down into core components. Test one variable at a time.",
-            "compassionate_lens": "Be kind to yourself. You are making continuous progress even on quiet days."
+            "stoic_lens": f"Regarding '{snippet}...': Separate what is strictly in your power from what is external. Focus 100% of your energy on your own choice.",
+            "visionary_lens": f"Deconstruct '{snippet}...': Identify the core input variable causing friction and run a 15-minute experiment to test your hypothesis.",
+            "compassionate_lens": f"Your feelings about '{snippet}' are completely valid. Be patient with yourself—every honest reflection is proof of your growth."
         }
 
     return {"status": "ok", "lenses": lenses}
