@@ -287,17 +287,18 @@ async def reflect_on_entry(req: ReflectRequest):
     # Generate JARVIS reflection via LLM
     try:
         from V3_updates import call_llm
-        prompt = (
-            "You are JARVIS, Madan's loyal, sharp, composed personal AI assistant and confidant. "
-            "Madan has written a private reflection in his confidential diary (Project Believer).\n"
+        system_prompt = "You are JARVIS, Madan's loyal, sharp, composed personal AI assistant and confidant."
+        user_prompt = (
+            f"Madan has written a private reflection in his confidential diary (Project Believer).\n"
             f"Entry Mood: {mood_tag}\n"
             f"Entry Content: \"{entry_text}\"\n\n"
             "Provide a composed, thoughtful, 2-3 sentence personal reflection back to Madan. "
             "Be empathetic, witty, and grounded like movie-JARVIS—acknowledge his mindset, offer genuine perspective or encouragement, "
             "and sign off smoothly (e.g., 'At your service, Sir'). Do not use generic bullet lists."
         )
-        reflection_text = await call_llm([{"role": "user", "content": prompt}], max_tokens=200, temperature=0.7)
+        reflection_text = await call_llm(system_prompt, user_prompt, max_tokens=200, temperature=0.7)
     except Exception as e:
+        print(f"⚠️ Project Believer LLM reflection error: {e}")
         reflection_text = "I am standing by, Sir. Keep striving forward; every reflection brings clarity."
 
     # Encrypt and save reflection
@@ -362,16 +363,17 @@ async def believer_conversational_chat(req: BelieverChatRequest):
         "that encourages him to reflect further on his feelings, goals, or mindset. Keep responses concise (2-4 sentences)."
     )
 
-    messages = [{"role": "system", "content": system_prompt}]
-    for h in (req.history or []):
-        messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
-    messages.append({"role": "user", "content": req.message})
+    history_str = ""
+    if req.history:
+        history_str = "Conversation History:\n" + "\n".join([f"{h.get('role','user').title()}: {h.get('content','')}" for h in req.history[-6:]]) + "\n\n"
+    user_prompt = f"{history_str}Madan says: \"{req.message}\""
 
     try:
         from V3_updates import call_llm
-        reply = await call_llm(messages, max_tokens=250, temperature=0.7)
+        reply = await call_llm(system_prompt, user_prompt, max_tokens=250, temperature=0.7)
     except Exception as e:
-        reply = "I am listening closely, Sir. How does carrying this thought make you feel right now?"
+        print(f"⚠️ Project Believer LLM chat error: {e}")
+        reply = f"I hear you deeply, Sir. Carrying '{req.message}' sounds heavy — what step can we take together to lighten this load?"
 
     return {"status": "ok", "reply": reply}
 
@@ -391,7 +393,8 @@ async def generate_key_cards(req: BelieverKeyCardsRequest):
                 raise HTTPException(status_code=404, detail="Entry not found")
             entry_text = decrypt_text(entry_row[0], req.passphrase)
 
-    prompt = (
+    system_prompt = "You are a psychological analyst and life coach. Return ONLY a strict JSON object with 4 Key Presentation Cards."
+    user_prompt = (
         "Analyze this private journal entry and return ONLY a strict JSON object with 4 Key Presentation Cards:\n"
         "{\n"
         '  "mindset_shift": {"title": "Mindset Realignment", "content": "<one powerful perspective shift>"},\n'
@@ -404,13 +407,12 @@ async def generate_key_cards(req: BelieverKeyCardsRequest):
 
     try:
         from V3_updates import call_llm
-        from relevance import extract_json_array
-        raw_res = await call_llm([{"role": "user", "content": prompt}], max_tokens=350, temperature=0.5)
-        # Parse JSON
+        raw_res = await call_llm(system_prompt, user_prompt, max_tokens=350, temperature=0.5)
         import re
         match = re.search(r"\{.*\}", raw_res, re.DOTALL)
         cards_json = json.loads(match.group(0)) if match else {}
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ Project Believer LLM key-cards error: {e}")
         cards_json = {
             "mindset_shift": {"title": "Mindset Realignment", "content": "Focus on what you can influence directly today."},
             "actionable_steps": {"title": "Immediate Micro-Steps", "steps": ["Take 5 deep breaths", "Write down your top priority", "Execute 15 mins of focused action"]},
@@ -436,7 +438,8 @@ async def perspective_shift_simulator(req: BelieverPerspectiveRequest):
                 raise HTTPException(status_code=404, detail="Entry not found")
             entry_text = decrypt_text(entry_row[0], req.passphrase)
 
-    prompt = (
+    system_prompt = "You are a wisdom mentor. Evaluate the given journal entry through 3 distinct perspective lenses. Return STRICT JSON only."
+    user_prompt = (
         "Evaluate this journal entry through 3 distinct perspective lenses. Return STRICT JSON:\n"
         "{\n"
         '  "stoic_lens": "<Marcus Aurelius / Epictetus control vs non-control perspective>",\n'
@@ -448,11 +451,12 @@ async def perspective_shift_simulator(req: BelieverPerspectiveRequest):
 
     try:
         from V3_updates import call_llm
-        raw_res = await call_llm([{"role": "user", "content": prompt}], max_tokens=400, temperature=0.6)
+        raw_res = await call_llm(system_prompt, user_prompt, max_tokens=400, temperature=0.6)
         import re
         match = re.search(r"\{.*\}", raw_res, re.DOTALL)
         lenses = json.loads(match.group(0)) if match else {}
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ Project Believer LLM perspective error: {e}")
         lenses = {
             "stoic_lens": "Separate what is in your power from what is outside your control. Direct all effort to your actions.",
             "visionary_lens": "Break the challenge down into core components. Test one variable at a time.",
