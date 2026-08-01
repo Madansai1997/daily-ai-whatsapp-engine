@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- feat(believer-jobs): Upgrade AI Job Hunt suite with Slide-Over Drawer and Project Believer with Conversational AI & Key Cards _(2026-08-01)_
 - fix(influencer): Fix Influencer Watch table initialization and frontend array state crash guards _(2026-07-30)_
 - feat(study): Add Curriculum Index, NotebookLM AI Research Notebook & Mock Quiz Suite _(2026-07-30)_
 - feat(study): Restructure Daily Study Guide into interactive ELI15 JARVIS Academy _(2026-07-30)_
@@ -161,10 +162,9 @@ npm install && npm run build     # served by the engine at /console
 - fix(job-scout): Comprehensive fix for board cards payload, ATS Deep Scout auth gate, on-demand search parameters, and DB loop safety _(2026-07-27)_
 - fix(ats-scout): Update REST model to gemini-2.0-flash and add live Job Scout multi-layer fallback _(2026-07-27)_
 - fix(ats-scout): Normalize returned job fields and add explicit empty search results state in JobsBoard _(2026-07-27)_
-- fix(jobs-tracker): Pass both system_prompt and user_prompt in call_llm invocation for ATS Deep Scout _(2026-07-27)_
 <!-- /AUTO:changelog -->
 
 ---
 
-_Last updated: 2026-07-30 · this README's inventory and changelog are auto-maintained by
+_Last updated: 2026-08-01 · this README's inventory and changelog are auto-maintained by
 `scripts/gen_readme.py` on every commit._

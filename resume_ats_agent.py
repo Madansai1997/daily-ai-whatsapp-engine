@@ -46,14 +46,16 @@ RESUME_ATS_PROMPT = (
     "  },\n"
     '  "ghost_job_evaluation": {\n'
     '    "risk": "none|low|medium|high",\n'
-    '    "reasons": [<list of strings: specific indicators why this might be a ghost job/suspicious posting, e.g. stale posting date, extremely generic, missing recruiter info>]\n'
+    '    "reasons": [<list of strings: specific indicators why this might be a ghost job/suspicious posting>]\n'
     "  },\n"
+    '  "honest_bridge_strategy": [\n'
+    '    {"missing_skill": "<missing keyword>", "bridge_advice": "<truthful advice on how candidate can highlight transferable genuine experience in interviews without faking tools>"}\n'
+    "  ],\n"
     '  "star_xyz_breakdown": [\n'
     '    {"section_name": "<company or project + which bullet>",\n'
     '     "current_text": "<the existing bullet copied VERBATIM from the resume>",\n'
     '     "optimized_text": "<the rewritten bullet>",\n'
-    '     "issue": "<the weakness: \'no quantified result\' | \'weak action verb\' | \'JD keyword '
-    "the candidate genuinely used but didn't name' | 'buries the impact'>\"}\n"
+    '     "issue": "<the weakness: \'no quantified result\' | \'weak action verb\' | \'JD keyword the candidate genuinely used but didn\'t name\' | \'buries the impact\'>\"}\n'
     "  ]\n"
     "}\n\n"
     "DOMAIN ALIGNMENT RULE:\n"

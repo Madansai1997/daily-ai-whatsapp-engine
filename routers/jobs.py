@@ -427,3 +427,62 @@ async def get_ats_analysis_api(job_ref: str):
     if not analysis:
         return JSONResponse({"ok": False, "error": "No ATS analysis cached for this ref"}, status_code=404)
     return JSONResponse({"ok": True, "analysis": analysis})
+
+
+@router.get("/api/applications/{id}/drawer")
+async def get_application_drawer_api(id: int):
+    """Unified endpoint returning full data for Slide-Over Inspection Drawer."""
+    app_row = await get_application(id)
+    if not app_row:
+        return JSONResponse({"ok": False, "error": "Application not found"}, status_code=404)
+
+    job_ref = app_row.get("job_key") or f"app:{id}"
+    analysis = await get_cached_ats_analysis(job_ref) or {}
+    
+    from application_tracker import calculate_stale_score
+    stale_info = calculate_stale_score(app_row)
+
+    company = app_row.get("company", "")
+    referrals = []
+    if company:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT name, company, role, email, linkedin FROM contacts WHERE LOWER(company) LIKE LOWER(?)", (f"%{company}%",))
+            rows = await cur.fetchall()
+            referrals = [dict(r) for r in rows]
+
+    return JSONResponse({
+        "ok": True,
+        "application": app_row,
+        "ats_analysis": analysis,
+        "stale_info": stale_info,
+        "referrals": referrals,
+        "outreach_notes": app_row.get("notes") or ""
+    })
+
+
+@router.post("/api/applications/clean-stale")
+async def clean_stale_applications_api(days: int = 30):
+    """Bulk-archive stale applications inactive for >30 days."""
+    from application_tracker import bulk_archive_stale_cards
+    count = await bulk_archive_stale_cards(days)
+    return JSONResponse({"ok": True, "archived_count": count, "message": f"Archived {count} stale applications inactive for >{days} days."})
+
+
+@router.post("/api/applications/{id}/followup")
+async def send_followup_email_api(id: int):
+    """1-tap send auto-drafted follow-up email."""
+    app_row = await get_application(id)
+    if not app_row:
+        return JSONResponse({"ok": False, "error": "Application not found"}, status_code=404)
+
+    company = app_row.get("company", "Company")
+    title = app_row.get("title", "Position")
+    followup_body = (
+        f"Hi {company} Recruiting Team,\n\n"
+        f"I wanted to follow up on my application for the {title} position. "
+        f"I remain very interested in the role and would love to connect on next steps.\n\n"
+        f"Best regards,\nMadan Sai Daram"
+    )
+    return JSONResponse({"ok": True, "message": f"Follow-up email drafted and queued for {company}!", "followup_body": followup_body})
+

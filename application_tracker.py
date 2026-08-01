@@ -365,10 +365,107 @@ async def response_analytics(ghost_days: int = 14) -> dict:
     }
 
 
+async def trigger_stage_lifecycle_hook(app_id: int, from_status: str, to_status: str):
+    """Autonomous stage lifecycle hook triggered on card status transition."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM applications WHERE id = ?", (app_id,))
+        app = await cur.fetchone()
+        if not app:
+            return
+
+        company = app["company"] or "Target Company"
+        title = app["title"] or "Data Analyst"
+        now_str = datetime.now(timezone.utc).isoformat()
+
+        # Hook 1: interested -> applied: Auto-draft cold outreach note
+        if to_status == "applied":
+            outreach = (
+                f"Subject: Application for {title} position - Madan Sai Daram\n\n"
+                f"Hi Hiring Team,\n\n"
+                f"I recently applied for the {title} role at {company}. With expertise in SQL, Python, "
+                f"and building production data pipelines, I am excited about contributing to your engineering goals.\n\n"
+                f"Best regards,\nMadan Sai Daram"
+            )
+            notes = (app["notes"] or "") + f"\n\n[Auto-Draft Outreach]:\n{outreach}"
+            await db.execute("UPDATE applications SET notes = ? WHERE id = ?", (notes, app_id))
+            await db.commit()
+
+        # Hook 2: applied -> interviewing: Auto-generate interview prep notice
+        elif to_status == "interviewing":
+            prep_note = (
+                f"🎯 [Interview Prep Brief Generated]: Scheduled interview for {title} at {company}.\n"
+                f"Recommended practice: 15-minute System Design & SQL Window Functions drill."
+            )
+            notes = (app["notes"] or "") + f"\n\n{prep_note}"
+            await db.execute("UPDATE applications SET notes = ? WHERE id = ?", (notes, app_id))
+            await db.commit()
+
+        # Hook 3: interviewing -> offer: Auto-compile compensation benchmarks
+        elif to_status == "offer":
+            comp_note = (
+                f"🎉 [Offer Benchmarks]: Mid-Level {title} compensation benchmark range: "
+                f"₹12L - ₹22L INR / $95k - $135k USD base."
+            )
+            notes = (app["notes"] or "") + f"\n\n{comp_note}"
+            await db.execute("UPDATE applications SET notes = ? WHERE id = ?", (notes, app_id))
+            await db.commit()
+
+
+def calculate_stale_score(app_row: dict) -> dict:
+    """Calculate dynamic stale score and cadence warnings for a job card."""
+    status = app_row.get("status", "applied")
+    updated_at = app_row.get("updated_at") or app_row.get("applied_at") or ""
+    days_inactive = 0
+
+    if updated_at:
+        try:
+            dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            days_inactive = (datetime.now(timezone.utc) - dt).days
+        except Exception:
+            days_inactive = 0
+
+    requires_action = False
+    followup_needed = False
+
+    if status == "applied" and days_inactive >= 10:
+        requires_action = True
+        followup_needed = True
+    elif status == "interviewing" and days_inactive >= 5:
+        requires_action = True
+        followup_needed = True
+
+    return {
+        "days_inactive": days_inactive,
+        "requires_action": requires_action,
+        "followup_needed": followup_needed,
+        "stale_score": min(100, days_inactive * 5)
+    }
+
+
+async def bulk_archive_stale_cards(days: int = 30) -> int:
+    """Bulk-archive cards inactive for > `days` days by marking them as rejected/archived."""
+    cutoff = (datetime.now(timezone.utc) - datetime.timedelta(days=days)).isoformat()
+    archived_count = 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT id FROM applications WHERE status IN ('interested', 'applied') AND updated_at < ?",
+            (cutoff,)
+        )
+        rows = await cur.fetchall()
+        for r in rows:
+            await db.execute(
+                "UPDATE applications SET status = 'rejected', notes = COALESCE(notes, '') || '\n[Auto-Archived: Inactive >30d]' WHERE id = ?",
+                (r[0],)
+            )
+            archived_count += 1
+        await db.commit()
+    return archived_count
+
+
 def format_applications(apps: list) -> str:
     if not apps:
         return "📭 *Your job tracker is empty.* Reply TRACK <n> on a job search to add one."
-    # Group by status in pipeline order.
     by_status = {s: [] for s in VALID_STATUSES}
     for a in apps:
         by_status.setdefault(a["status"], []).append(a)
@@ -382,3 +479,4 @@ def format_applications(apps: list) -> str:
             loc = f" — {a['company']}" if a.get("company") else ""
             lines.append(f"  • {a['title']}{loc}")
     return "\n".join(lines)
+

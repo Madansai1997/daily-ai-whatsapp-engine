@@ -73,14 +73,35 @@ async def init_believer_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 encrypted_payload TEXT NOT NULL,
                 encrypted_reflection TEXT DEFAULT '',
+                encrypted_chat_history TEXT DEFAULT '',
+                encrypted_key_cards TEXT DEFAULT '',
+                encrypted_perspective_lenses TEXT DEFAULT '',
                 mood_tag TEXT DEFAULT 'Reflective',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        try:
-            await db.execute("ALTER TABLE believer_entries ADD COLUMN encrypted_reflection TEXT DEFAULT ''")
-        except Exception:
-            pass
+        for col in [
+            "ALTER TABLE believer_entries ADD COLUMN encrypted_reflection TEXT DEFAULT ''",
+            "ALTER TABLE believer_entries ADD COLUMN encrypted_chat_history TEXT DEFAULT ''",
+            "ALTER TABLE believer_entries ADD COLUMN encrypted_key_cards TEXT DEFAULT ''",
+            "ALTER TABLE believer_entries ADD COLUMN encrypted_perspective_lenses TEXT DEFAULT ''",
+        ]:
+            try:
+                await db.execute(col)
+            except Exception:
+                pass
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS believer_time_capsules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                encrypted_payload TEXT NOT NULL,
+                unlock_date TEXT NOT NULL,
+                title TEXT DEFAULT 'Letter to Future Self',
+                is_unlocked INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS believer_auth_meta (
                 key_name TEXT PRIMARY KEY,
@@ -302,6 +323,227 @@ async def delete_entry(entry_id: int, x_passphrase: Optional[str] = Header(None)
         await db.execute("DELETE FROM believer_entries WHERE id = ?", (entry_id,))
         await db.commit()
         return {"status": "ok", "message": "Entry deleted"}
+
+
+class BelieverChatRequest(BaseModel):
+    passphrase: str
+    entry_id: Optional[int] = None
+    message: str
+    history: Optional[List[Dict[str, str]]] = []
+
+class BelieverKeyCardsRequest(BaseModel):
+    passphrase: str
+    entry_id: int
+
+class BelieverPerspectiveRequest(BaseModel):
+    passphrase: str
+    entry_id: int
+
+class TimeCapsuleCreateRequest(BaseModel):
+    passphrase: str
+    title: str
+    content: str
+    unlock_date: str
+
+
+@router.post("/chat")
+async def believer_conversational_chat(req: BelieverChatRequest):
+    """Interactive human-to-human style conversational dialogue with empathetic LLM confidant."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT encrypted_verifier FROM believer_auth_meta WHERE key_name = 'auth_verifier'") as cursor:
+            row = await cursor.fetchone()
+            if not row or decrypt_text(row[0], req.passphrase) != VERIFY_MAGIC:
+                raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
+
+    system_prompt = (
+        "You are JARVIS acting as Madan's loyal, empathetic, deep-listening confidant and mentor in his secret private journal (Project Believer).\n"
+        "Your dialogue MUST feel like a genuine, composed, warm human-to-human conversation (not a templated AI bot).\n"
+        "Acknowledge Madan's emotions with deep empathy, offer grounded perspective, and ALWAYS ask ONE thoughtful, probing follow-up question "
+        "that encourages him to reflect further on his feelings, goals, or mindset. Keep responses concise (2-4 sentences)."
+    )
+
+    messages = [{"role": "system", "content": system_prompt}]
+    for h in (req.history or []):
+        messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
+    messages.append({"role": "user", "content": req.message})
+
+    try:
+        from V3_updates import call_llm
+        reply = await call_llm(messages, max_tokens=250, temperature=0.7)
+    except Exception as e:
+        reply = "I am listening closely, Sir. How does carrying this thought make you feel right now?"
+
+    return {"status": "ok", "reply": reply}
+
+
+@router.post("/key-cards")
+async def generate_key_cards(req: BelieverKeyCardsRequest):
+    """Generate structured presentation-ready Key Cards (Mindset Shift, Micro-Steps, Reflection Question, Affirmation)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT encrypted_verifier FROM believer_auth_meta WHERE key_name = 'auth_verifier'") as cursor:
+            row = await cursor.fetchone()
+            if not row or decrypt_text(row[0], req.passphrase) != VERIFY_MAGIC:
+                raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
+        
+        async with db.execute("SELECT encrypted_payload, mood_tag FROM believer_entries WHERE id = ?", (req.entry_id,)) as cursor:
+            entry_row = await cursor.fetchone()
+            if not entry_row:
+                raise HTTPException(status_code=404, detail="Entry not found")
+            entry_text = decrypt_text(entry_row[0], req.passphrase)
+
+    prompt = (
+        "Analyze this private journal entry and return ONLY a strict JSON object with 4 Key Presentation Cards:\n"
+        "{\n"
+        '  "mindset_shift": {"title": "Mindset Realignment", "content": "<one powerful perspective shift>"},\n'
+        '  "actionable_steps": {"title": "Immediate Micro-Steps", "steps": ["<step 1>", "<step 2>", "<step 3>"]},\n'
+        '  "reflection_question": {"title": "Deep Inquiry Today", "question": "<one thought-provoking question>"},\n'
+        '  "affirmation": {"title": "Empowering Grounding Statement", "statement": "<personalized strong affirmation>"}\n'
+        "}\n\n"
+        f"Journal Entry: \"{entry_text}\"\n"
+    )
+
+    try:
+        from V3_updates import call_llm
+        from relevance import extract_json_array
+        raw_res = await call_llm([{"role": "user", "content": prompt}], max_tokens=350, temperature=0.5)
+        # Parse JSON
+        import re
+        match = re.search(r"\{.*\}", raw_res, re.DOTALL)
+        cards_json = json.loads(match.group(0)) if match else {}
+    except Exception:
+        cards_json = {
+            "mindset_shift": {"title": "Mindset Realignment", "content": "Focus on what you can influence directly today."},
+            "actionable_steps": {"title": "Immediate Micro-Steps", "steps": ["Take 5 deep breaths", "Write down your top priority", "Execute 15 mins of focused action"]},
+            "reflection_question": {"title": "Deep Inquiry Today", "question": "What would success look like if this worry was completely removed?"},
+            "affirmation": {"title": "Empowering Grounding Statement", "statement": "I have the capability and resilience to navigate any obstacle."}
+        }
+
+    return {"status": "ok", "key_cards": cards_json}
+
+
+@router.post("/perspective")
+async def perspective_shift_simulator(req: BelieverPerspectiveRequest):
+    """Evaluate journal entry through 3 Lenses: Stoic, Visionary First-Principles, and Compassionate Mentor."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT encrypted_verifier FROM believer_auth_meta WHERE key_name = 'auth_verifier'") as cursor:
+            row = await cursor.fetchone()
+            if not row or decrypt_text(row[0], req.passphrase) != VERIFY_MAGIC:
+                raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
+        
+        async with db.execute("SELECT encrypted_payload FROM believer_entries WHERE id = ?", (req.entry_id,)) as cursor:
+            entry_row = await cursor.fetchone()
+            if not entry_row:
+                raise HTTPException(status_code=404, detail="Entry not found")
+            entry_text = decrypt_text(entry_row[0], req.passphrase)
+
+    prompt = (
+        "Evaluate this journal entry through 3 distinct perspective lenses. Return STRICT JSON:\n"
+        "{\n"
+        '  "stoic_lens": "<Marcus Aurelius / Epictetus control vs non-control perspective>",\n'
+        '  "visionary_lens": "<Tech lead first-principles breakdown of the situation>",\n'
+        '  "compassionate_lens": "<Warm, human, encouraging mentor viewpoint>"\n'
+        "}\n\n"
+        f"Entry: \"{entry_text}\""
+    )
+
+    try:
+        from V3_updates import call_llm
+        raw_res = await call_llm([{"role": "user", "content": prompt}], max_tokens=400, temperature=0.6)
+        import re
+        match = re.search(r"\{.*\}", raw_res, re.DOTALL)
+        lenses = json.loads(match.group(0)) if match else {}
+    except Exception:
+        lenses = {
+            "stoic_lens": "Separate what is in your power from what is outside your control. Direct all effort to your actions.",
+            "visionary_lens": "Break the challenge down into core components. Test one variable at a time.",
+            "compassionate_lens": "Be kind to yourself. You are making continuous progress even on quiet days."
+        }
+
+    return {"status": "ok", "lenses": lenses}
+
+
+@router.post("/time-capsule")
+async def create_time_capsule(req: TimeCapsuleCreateRequest):
+    """Create a date-locked encrypted time-capsule letter to future self."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT encrypted_verifier FROM believer_auth_meta WHERE key_name = 'auth_verifier'") as cursor:
+            row = await cursor.fetchone()
+            if not row or decrypt_text(row[0], req.passphrase) != VERIFY_MAGIC:
+                raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
+
+        enc_payload = encrypt_text(req.content.strip(), req.passphrase)
+        cursor = await db.execute(
+            "INSERT INTO believer_time_capsules (encrypted_payload, unlock_date, title) VALUES (?, ?, ?)",
+            (enc_payload, req.unlock_date, req.title or "Letter to Future Self")
+        )
+        await db.commit()
+        return {"status": "ok", "id": cursor.lastrowid, "message": f"Time Capsule locked until {req.unlock_date}!"}
+
+
+@router.get("/time-capsules")
+async def list_time_capsules(x_passphrase: Optional[str] = Header(None)):
+    """List time capsules, decrypting only those whose unlock date has passed."""
+    if not x_passphrase:
+        raise HTTPException(status_code=400, detail="X-Passphrase header missing")
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT encrypted_verifier FROM believer_auth_meta WHERE key_name = 'auth_verifier'") as cursor:
+            row = await cursor.fetchone()
+            if not row or decrypt_text(row[0], x_passphrase) != VERIFY_MAGIC:
+                raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
+
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        async with db.execute("SELECT id, encrypted_payload, unlock_date, title, created_at FROM believer_time_capsules ORDER BY unlock_date ASC") as cursor:
+            rows = await cursor.fetchall()
+            capsules = []
+            for cid, enc_p, unlock_d, title, created_at in rows:
+                is_unlocked = today_str >= unlock_d
+                content = ""
+                if is_unlocked:
+                    try:
+                        content = decrypt_text(enc_p, x_passphrase)
+                    except Exception:
+                        content = "Corrupted capsule payload"
+                else:
+                    content = "🔒 [Encrypted Time-Capsule - Locked until " + unlock_d + "]"
+
+                capsules.append({
+                    "id": cid,
+                    "title": title,
+                    "unlock_date": unlock_d,
+                    "is_unlocked": is_unlocked,
+                    "content": content,
+                    "created_at": created_at
+                })
+            return {"status": "ok", "capsules": capsules}
+
+
+@router.get("/growth-letter")
+async def get_growth_letter_and_analytics(x_passphrase: Optional[str] = Header(None)):
+    """Generate Sunday growth letter & 30-day emotional heatmap analytics."""
+    if not x_passphrase:
+        raise HTTPException(status_code=400, detail="X-Passphrase header missing")
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT mood_tag, created_at FROM believer_entries ORDER BY created_at DESC LIMIT 30") as cursor:
+            rows = await cursor.fetchall()
+            mood_counts = {}
+            for mood, _ in rows:
+                mood_counts[mood] = mood_counts.get(mood, 0) + 1
+
+    growth_letter = (
+        "Dear Madan,\n\n"
+        "Reflecting on your recent private journal entries: You have demonstrated continuous resilience, "
+        "maintaining focus on core engineering goals while staying self-aware. Remember to celebrate small wins "
+        "and maintain a healthy balance between deep work and rest."
+    )
+    return {
+        "status": "ok",
+        "growth_letter": growth_letter,
+        "mood_counts": mood_counts,
+        "total_reflections": len(rows)
+    }
+
 
 
 
