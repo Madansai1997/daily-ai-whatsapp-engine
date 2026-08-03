@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(ats): Fix route collision on /ats/{job_ref}/tailored-docx and add automatic .docx download fallback on Google Docs invalid_grant _(2026-08-03)_
 - fix(jobs-board): Restore full rich feature suite including AI Scouted Jobs Stream, Review Queue, ATS Deep Scout, Ghost Job badges, and Master Resume studio _(2026-08-03)_
 - refactor(believer): Update prompt to Personal & Workplace Psychiatrist role providing 3-tier clarity (what user can do, what second party can do, what we can do together) _(2026-08-01)_
 - refactor(believer): Enforce natural human conversation posture without robotic step lists or repeated questions _(2026-08-01)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - feat(study): Restructure Daily Study Guide into interactive ELI15 JARVIS Academy _(2026-07-30)_
 - refactor(routers): Modularize APIRouters into jobs.py, bills.py, rag.py, auth.py, system.py and fix ATS route precedence _(2026-07-27)_
 - fix(jobs-board): Render application cards in status columns regardless of reviewed flag _(2026-07-27)_
-- fix(ats-alignment): Resolve parameter mismatch in analyze function and return clean JSON response for missing JD _(2026-07-27)_
 <!-- /AUTO:changelog -->
 
 ---

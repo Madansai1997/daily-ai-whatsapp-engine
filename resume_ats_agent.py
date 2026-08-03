@@ -369,10 +369,33 @@ async def analyze(job: dict = None, call_llm_fn = None, domain: str = DEFAULT_DO
 
 
 async def get_analysis(job_ref: str) -> dict:
+    import urllib.parse
+    refs_to_try = [
+        str(job_ref),
+        urllib.parse.unquote(str(job_ref)),
+        urllib.parse.quote(str(job_ref)),
+    ]
+    for r in list(refs_to_try):
+        if r.endswith("/tailored-docx"):
+            refs_to_try.append(r[:-14])
+        if r.endswith("/download"):
+            refs_to_try.append(r[:-9])
+        if r.endswith("/gdoc") or r.endswith("/google-doc"):
+            refs_to_try.append(r.rsplit("/", 1)[0])
+
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT * FROM ats_analysis_cache WHERE job_ref = ?", (str(job_ref),))
-        row = await cur.fetchone()
+        row = None
+        for r in refs_to_try:
+            cur = await db.execute("SELECT * FROM ats_analysis_cache WHERE job_ref = ?", (r,))
+            row = await cur.fetchone()
+            if row:
+                break
+        if not row:
+            clean_ref = urllib.parse.unquote(str(job_ref)).split("/")[0]
+            cur = await db.execute("SELECT * FROM ats_analysis_cache WHERE job_ref LIKE ? OR job_title LIKE ? ORDER BY id DESC LIMIT 1", (f"%{clean_ref}%", f"%{clean_ref}%"))
+            row = await cur.fetchone()
+
     if not row:
         return None
     a = dict(row)
@@ -978,12 +1001,33 @@ async def save_tailored_docx(job_ref: str, filename: str, data: bytes):
 
 
 async def get_tailored_docx(job_ref: str):
+    import urllib.parse
+    refs_to_try = [
+        str(job_ref),
+        urllib.parse.unquote(str(job_ref)),
+        urllib.parse.quote(str(job_ref)),
+    ]
+    for r in list(refs_to_try):
+        if r.endswith("/tailored-docx"):
+            refs_to_try.append(r[:-14])
+        if r.endswith("/download"):
+            refs_to_try.append(r[:-9])
+
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT filename, data_b64 FROM tailored_docx WHERE job_ref = ?", (str(job_ref),))
+        row = None
+        for r in refs_to_try:
+            cur = await db.execute("SELECT filename, data_b64 FROM tailored_docx WHERE job_ref = ?", (r,))
+            row = await cur.fetchone()
+            if row and row[1]:
+                return row[0], _b64.b64decode(row[1])
+
+        clean_ref = urllib.parse.unquote(str(job_ref)).split("/")[0]
+        cur = await db.execute("SELECT filename, data_b64 FROM tailored_docx WHERE job_ref LIKE ? OR filename LIKE ? ORDER BY id DESC LIMIT 1", (f"%{clean_ref}%", f"%{clean_ref}%"))
         row = await cur.fetchone()
-    if not row or not row[1]:
-        return None
-    return row[0], _b64.b64decode(row[1])
+        if row and row[1]:
+            return row[0], _b64.b64decode(row[1])
+
+    return None
 
 
 JOB_PREP_PROMPT = (

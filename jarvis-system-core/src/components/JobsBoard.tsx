@@ -1673,7 +1673,14 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       }
       if (data?.url) window.open(data.url, "_blank");
     } catch (e) {
-      alert(`Couldn't create the Google Doc: ${e instanceof Error ? e.message : e}`);
+      const errMsg = e instanceof Error ? e.message : String(e);
+      if (errMsg.includes("invalid_grant")) {
+        alert("Google Docs auth token has expired. Automatically downloading your Tailored Word (.docx) document instead!");
+        window.location.href = `/ats/${encodeURIComponent(jobRef)}/tailored-docx`;
+      } else {
+        alert(`Couldn't create the Google Doc. Downloading your Tailored Word (.docx) resume directly instead!`);
+        window.location.href = `/ats/${encodeURIComponent(jobRef)}/tailored-docx`;
+      }
     } finally {
       setDocLoading(false);
     }

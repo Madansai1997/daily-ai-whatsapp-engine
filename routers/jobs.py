@@ -423,7 +423,24 @@ async def get_ats_pending_count_api():
 
 @router.get("/ats/{job_ref:path}")
 async def get_ats_analysis_api(job_ref: str):
-    analysis = await get_cached_ats_analysis(job_ref)
+    import urllib.parse
+    raw_ref = job_ref.strip()
+    
+    # Handle tailored-docx download route collision cleanly
+    if raw_ref.endswith("/tailored-docx") or raw_ref.endswith("/download"):
+        clean_ref = raw_ref.rsplit("/", 1)[0]
+        from resume_ats_agent import get_tailored_docx
+        t = await get_tailored_docx(clean_ref)
+        if not t:
+            return JSONResponse({"ok": False, "error": "No tailored docx generated yet for this job"}, status_code=404)
+        filename, data = t
+        return Response(
+            content=data,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    analysis = await get_cached_ats_analysis(raw_ref)
     if not analysis:
         return JSONResponse({"ok": False, "error": "No ATS analysis cached for this ref"}, status_code=404)
     return JSONResponse({"ok": True, "analysis": analysis})
