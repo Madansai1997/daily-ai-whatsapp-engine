@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(jobs-board): Restore full rich feature suite including AI Scouted Jobs Stream, Review Queue, ATS Deep Scout, Ghost Job badges, and Master Resume studio _(2026-08-03)_
 - refactor(believer): Update prompt to Personal & Workplace Psychiatrist role providing 3-tier clarity (what user can do, what second party can do, what we can do together) _(2026-08-01)_
 - refactor(believer): Enforce natural human conversation posture without robotic step lists or repeated questions _(2026-08-01)_
 - fix(believer): Upgrade Key Cards and 3 Lenses prompts to be 100% specific to exact entry text and remove generic advice _(2026-08-01)_
@@ -161,10 +162,9 @@ npm install && npm run build     # served by the engine at /console
 - refactor(routers): Modularize APIRouters into jobs.py, bills.py, rag.py, auth.py, system.py and fix ATS route precedence _(2026-07-27)_
 - fix(jobs-board): Render application cards in status columns regardless of reviewed flag _(2026-07-27)_
 - fix(ats-alignment): Resolve parameter mismatch in analyze function and return clean JSON response for missing JD _(2026-07-27)_
-- feat(jobs-board): Display Ghost and Authorized verification tags on new scout jobs and board cards _(2026-07-27)_
 <!-- /AUTO:changelog -->
 
 ---
 
-_Last updated: 2026-08-01 · this README's inventory and changelog are auto-maintained by
+_Last updated: 2026-08-03 · this README's inventory and changelog are auto-maintained by
 `scripts/gen_readme.py` on every commit._
