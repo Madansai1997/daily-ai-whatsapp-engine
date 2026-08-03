@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(jobs): Fix search-now HTTP 200 error alert and fix Recruiter Read tab empty state with on-demand Run Recruiter Read button _(2026-08-03)_
 - fix(auth): Exempt file download endpoints (/tailored-docx, /download, /gdoc) from auth gate to allow direct browser file downloads _(2026-08-03)_
 - fix(ats): Fix route collision on /ats/{job_ref}/tailored-docx and add automatic .docx download fallback on Google Docs invalid_grant _(2026-08-03)_
 - fix(jobs-board): Restore full rich feature suite including AI Scouted Jobs Stream, Review Queue, ATS Deep Scout, Ghost Job badges, and Master Resume studio _(2026-08-03)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - fix(influencer): Fix Influencer Watch table initialization and frontend array state crash guards _(2026-07-30)_
 - feat(study): Add Curriculum Index, NotebookLM AI Research Notebook & Mock Quiz Suite _(2026-07-30)_
 - feat(study): Restructure Daily Study Guide into interactive ELI15 JARVIS Academy _(2026-07-30)_
-- refactor(routers): Modularize APIRouters into jobs.py, bills.py, rag.py, auth.py, system.py and fix ATS route precedence _(2026-07-27)_
 <!-- /AUTO:changelog -->
 
 ---

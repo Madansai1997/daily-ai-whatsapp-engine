@@ -596,7 +596,7 @@ async def search_now_to_board(call_llm_fn=None, override: dict = None, track_fn=
             except Exception as e:
                 print(f"⚠️ [job_scout] search-now track failed for {j.get('key')}: {e}")
     await record_last_shown(top)
-    return {"found": len(jobs), "added": added}
+    return {"ok": True, "status": "ok", "found": len(jobs), "added": added}
 
 
 async def run_job_scout_digest(call_llm_fn, notify_fn=None, track_fn=None, min_score: int = 70,

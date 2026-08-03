@@ -343,7 +343,9 @@ async def api_job_scout_ats_search(request: Request):
 async def api_job_scout_search_now(request: Request):
     body = await request.json() if request.headers.get("content-type") == "application/json" else {}
     q = body.get("query")
-    res = await search_now_to_board(query=q, call_llm=call_llm_fn, notify_fn=send_whatsapp_fn, track_fn=add_application)
+    res = await search_now_to_board(query=q, call_llm=call_llm_fn, notify_fn=send_whatsapp_fn, track_fn=add_application) or {}
+    res["ok"] = True
+    res["status"] = "ok"
     return JSONResponse(res)
 
 

@@ -1151,7 +1151,7 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
         method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
       });
       const data = await res.json();
-      if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      if (!res.ok || (data?.ok === false && data?.status !== "ok")) throw new Error(data?.error || `HTTP ${res.status}`);
       await Promise.all([loadReviewQueue(), loadReviewCount(), loadApplications()]);
       setReviewMsg(
         data.added
@@ -2772,13 +2772,13 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                         )}
                       </div>
                     )}
-                    {!recruiterLoading && !recruiterError && recruiterReview && (
+                    {!recruiterLoading && !recruiterError && recruiterReview && recruiterReview.verdict ? (
                       <>
                         {/* Verdict + fit score */}
                         <div className="p-4 bg-white/5 rounded-lg border border-white/5 flex items-start gap-4">
                           <div className="flex flex-col items-center flex-shrink-0">
                             <span className="text-3xl font-extrabold text-[#8aebff] leading-none">
-                              {recruiterReview.role_fit_score}
+                              {recruiterReview.role_fit_score ?? "—"}
                             </span>
                             <span className="text-[9px] text-[#859397] uppercase tracking-widest mt-1">
                               Fit
@@ -2892,6 +2892,16 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
                           suggests fabricating experience.
                         </p>
                       </>
+                    ) : !recruiterLoading && !recruiterError && (
+                      <div className="p-6 rounded-lg bg-white/5 border border-white/10 text-center space-y-3 font-mono">
+                        <p className="text-xs text-[#859397]">No recruiter read analysis generated for this role yet.</p>
+                        <button
+                          onClick={() => loadRecruiterReview(activeAtsAppId!, true)}
+                          className="px-4 py-2 rounded-lg bg-[#8aebff] text-[#00363e] font-bold text-xs hover:scale-105 transition-all cursor-pointer shadow-md inline-flex items-center gap-1.5"
+                        >
+                          <Sparkles className="w-3.5 h-3.5" /> RUN RECRUITER READ ANALYSIS
+                        </button>
+                      </div>
                     )}
                   </div>
                 )}
