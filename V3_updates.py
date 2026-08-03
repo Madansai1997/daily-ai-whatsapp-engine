@@ -1253,6 +1253,10 @@ def _verify_token(token: str) -> bool:
 async def _auth_gate(request: Request, call_next):
     if AUTH_REQUIRED:
         path = request.url.path
+        # Allow file download endpoints to be accessible via direct browser navigation
+        if path.endswith("/tailored-docx") or path.endswith("/download") or path.endswith("/gdoc"):
+            return await call_next(request)
+
         if any(path.startswith(p) for p in _PROTECTED_PREFIXES):
             auth_hdr = request.headers.get("Authorization", "")
             bearer_tok = auth_hdr.replace("Bearer ", "").strip() if auth_hdr.startswith("Bearer ") else auth_hdr.strip()

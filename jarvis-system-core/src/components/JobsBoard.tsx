@@ -1665,6 +1665,9 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
 
   const openInGoogleDoc = async (jobRef: string) => {
     setDocLoading(true);
+    const tok = getToken();
+    const docxPath = `/ats/${encodeURIComponent(jobRef)}/tailored-docx`;
+    const docxUrl = tok ? `${docxPath}?token=${encodeURIComponent(tok)}` : docxPath;
     try {
       const res = await fetch(`/ats/${encodeURIComponent(jobRef)}/google-doc`, { method: "POST" });
       const data = await res.json();
@@ -1676,10 +1679,10 @@ export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHa
       const errMsg = e instanceof Error ? e.message : String(e);
       if (errMsg.includes("invalid_grant")) {
         alert("Google Docs auth token has expired. Automatically downloading your Tailored Word (.docx) document instead!");
-        window.location.href = `/ats/${encodeURIComponent(jobRef)}/tailored-docx`;
+        window.location.href = docxUrl;
       } else {
         alert(`Couldn't create the Google Doc. Downloading your Tailored Word (.docx) resume directly instead!`);
-        window.location.href = `/ats/${encodeURIComponent(jobRef)}/tailored-docx`;
+        window.location.href = docxUrl;
       }
     } finally {
       setDocLoading(false);
