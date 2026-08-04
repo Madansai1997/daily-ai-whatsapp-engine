@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(db): Remove AUTOINCREMENT from claude_code_live_session and pending_claude_code_task for Turso cloud HTTP API compatibility _(2026-08-04)_
 - feat(ai-autofill): Add two-stage AI Form Schema Classifier pipeline for 100% error-free form filling on any web element or portal _(2026-08-04)_
 - fix(chrome-extension): Add strict label exclusions (no email/location overlap), radio option auto-clicker, and AI open-ended question auto-answering _(2026-08-04)_
 - fix(chrome-extension): Upgrade form field matching with 6-level ancestor scanning and native React/Google Forms property setter overrides _(2026-08-04)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - feat(profile): Add Candidate Master Profile Studio & DB persistence for Chrome Extension autofill preferences _(2026-08-04)_
 - feat(chrome-extension): Add JARVIS Career Copilot Chrome Extension with 1-Click Form Autofill, AI Question Answering, and Auto-Sync _(2026-08-04)_
 - feat(auto-apply): Implement autonomous direct Auto-Apply engine with 100% format-preserving in-place .docx resume bullet rewrites _(2026-08-04)_
-- fix(job-scout): Add keyless Remotive live fallback to search_now_to_board so live search always finds jobs without API keys _(2026-08-04)_
 <!-- /AUTO:changelog -->
 
 ---

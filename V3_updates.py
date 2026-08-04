@@ -848,14 +848,14 @@ def init_db_tables():
         PRIMARY KEY (scope, item_id, fired_on))''')
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS pending_claude_code_task (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id INTEGER PRIMARY KEY,
         task_text TEXT,
         proposed_plan TEXT,
         status TEXT DEFAULT 'proposed',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS claude_code_live_session (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id INTEGER PRIMARY KEY,
         cc_session_id TEXT,
         status TEXT DEFAULT 'active',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
