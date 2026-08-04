@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- feat(profile): Add Candidate Master Profile Studio & DB persistence for Chrome Extension autofill preferences _(2026-08-04)_
 - feat(chrome-extension): Add JARVIS Career Copilot Chrome Extension with 1-Click Form Autofill, AI Question Answering, and Auto-Sync _(2026-08-04)_
 - feat(auto-apply): Implement autonomous direct Auto-Apply engine with 100% format-preserving in-place .docx resume bullet rewrites _(2026-08-04)_
 - fix(job-scout): Add keyless Remotive live fallback to search_now_to_board so live search always finds jobs without API keys _(2026-08-04)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - refactor(believer): Update prompt to Personal & Workplace Psychiatrist role providing 3-tier clarity (what user can do, what second party can do, what we can do together) _(2026-08-01)_
 - refactor(believer): Enforce natural human conversation posture without robotic step lists or repeated questions _(2026-08-01)_
 - fix(believer): Upgrade Key Cards and 3 Lenses prompts to be 100% specific to exact entry text and remove generic advice _(2026-08-01)_
-- fix(believer): Fix LLM invocation signature in Project Believer conversational chat and key cards _(2026-08-01)_
 <!-- /AUTO:changelog -->
 
 ---

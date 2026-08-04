@@ -495,6 +495,61 @@ function JobsBoardInner({ activeScreen, onNavigate, intent, onIntentHandled }: J
   const [selectedAuditKeywords, setSelectedAuditKeywords] = useState<string[]>([]);
   const [selectedGrammar, setSelectedGrammar] = useState<any[]>([]);
 
+  // Candidate Master Profile (for Chrome Extension & Job Autofill)
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [candidateProfile, setCandidateProfile] = useState<any>({
+    full_name: "Madansai Daram",
+    first_name: "Madansai",
+    last_name: "Daram",
+    email: "madansai1997@gmail.com",
+    phone: "+91 9876543210",
+    location: "India / Remote",
+    linkedin: "https://linkedin.com/in/madansaidaram",
+    github: "https://github.com/Madansai1997",
+    portfolio: "https://github.com/Madansai1997",
+    work_authorization: "Authorized to work in India / Remote",
+    requires_sponsorship: "No",
+    notice_period: "Immediate / 15 Days",
+    expected_salary: "Negotiable as per market standards",
+    target_role: "Data Analyst / Analytics Engineer",
+    skills: "SQL, Python, Power BI, Tableau, Excel, Data Modeling, ETL, PostgreSQL, BigQuery, Pandas, NumPy, Machine Learning",
+    experience_years: "3+ years in Data Analytics & Business Intelligence",
+    custom_qa_prompt_notes: "Experienced in building automated data pipelines, interactive Power BI dashboards, complex SQL analytics, and financial/operations modeling.",
+  });
+
+  const loadCandidateProfile = async () => {
+    try {
+      const res = await fetch("/api/extension/profile");
+      const data = await res.json();
+      if (data?.ok && data?.profile) {
+        setCandidateProfile(data.profile);
+      }
+    } catch (e) {
+      console.error("Failed to load candidate profile:", e);
+    }
+  };
+
+  const saveCandidateProfile = async () => {
+    try {
+      const res = await fetch("/api/extension/profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(candidateProfile),
+      });
+      const data = await res.json();
+      if (data?.ok) {
+        alert("✅ Master Candidate Profile saved! Your Chrome Extension will now autofill these exact details.");
+        setProfileOpen(false);
+      }
+    } catch (e) {
+      alert("Failed to save candidate profile: " + String(e));
+    }
+  };
+
+  useEffect(() => {
+    loadCandidateProfile();
+  }, []);
+
   // Apply-to-.docx (format-preserving) flow
   const [applyOpen, setApplyOpen] = useState(false);
   const [applyRef, setApplyRef] = useState<string>("");
@@ -1877,6 +1932,14 @@ function JobsBoardInner({ activeScreen, onNavigate, intent, onIntentHandled }: J
                 {reviewCount} NEW
               </button>
             )}
+            <button
+              onClick={() => { loadCandidateProfile(); setProfileOpen(true); }}
+              className="flex items-center gap-2 px-4 py-2 bg-[#5eead4]/10 border border-[#5eead4]/30 rounded-lg text-xs font-semibold hover:bg-[#5eead4]/20 transition-all text-[#5eead4] cursor-pointer"
+              title="Manage your Candidate Master Profile & Chrome Extension Autofill Preferences"
+            >
+              <UserCheck className="w-4 h-4" />
+              AUTOFILL PROFILE
+            </button>
             <button
               onClick={openAdd}
               className="flex items-center gap-2 px-5 py-2 bg-[#8aebff]/10 border border-[#8aebff]/30 rounded-lg text-xs font-semibold hover:bg-[#8aebff]/20 transition-all text-[#8aebff] cursor-pointer"
@@ -4658,6 +4721,166 @@ function JobsBoardInner({ activeScreen, onNavigate, intent, onIntentHandled }: J
                       </div>
                     </div>
                   )}
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Master Candidate Profile Modal ── */}
+      <AnimatePresence>
+        {profileOpen && (
+          <div className="fixed inset-0 bg-[#0a0e1a]/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ y: 30, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: 30, opacity: 0 }}
+              className="w-full max-w-2xl glass-panel rounded-2xl overflow-hidden shadow-2xl border border-[#5eead4]/30 flex flex-col max-h-[90vh]"
+            >
+              <div className="p-5 border-b border-[#3c494c]/50 bg-[#161e2e]/80 flex justify-between items-center">
+                <h2 className="text-lg font-extrabold text-[#dfe2f3] tracking-wide uppercase font-mono flex items-center gap-2">
+                  <UserCheck className="w-5 h-5 text-[#5eead4]" /> Master Candidate Profile & Autofill Settings
+                </h2>
+                <button
+                  onClick={() => setProfileOpen(false)}
+                  className="p-2 hover:bg-white/5 text-[#bbc9cd] hover:text-[#5eead4] rounded-full cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-6 overflow-y-auto space-y-4 font-mono text-xs">
+                <p className="text-[#859397] leading-relaxed">
+                  These details sync directly to your <strong>JARVIS Chrome Extension</strong> for 1-click form autofill across Workday, Lever, Greenhouse, LinkedIn, and Taleo.
+                </p>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-[#859397] uppercase text-[10px] tracking-wider mb-1">Full Name</label>
+                    <input
+                      type="text"
+                      value={candidateProfile.full_name || ""}
+                      onChange={(e) => setCandidateProfile({ ...candidateProfile, full_name: e.target.value })}
+                      className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-[#dfe2f3]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[#859397] uppercase text-[10px] tracking-wider mb-1">Email Address</label>
+                    <input
+                      type="email"
+                      value={candidateProfile.email || ""}
+                      onChange={(e) => setCandidateProfile({ ...candidateProfile, email: e.target.value })}
+                      className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-[#dfe2f3]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[#859397] uppercase text-[10px] tracking-wider mb-1">Phone Number</label>
+                    <input
+                      type="text"
+                      value={candidateProfile.phone || ""}
+                      onChange={(e) => setCandidateProfile({ ...candidateProfile, phone: e.target.value })}
+                      className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-[#dfe2f3]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[#859397] uppercase text-[10px] tracking-wider mb-1">Location / Region</label>
+                    <input
+                      type="text"
+                      value={candidateProfile.location || ""}
+                      onChange={(e) => setCandidateProfile({ ...candidateProfile, location: e.target.value })}
+                      className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-[#dfe2f3]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[#859397] uppercase text-[10px] tracking-wider mb-1">LinkedIn Profile URL</label>
+                    <input
+                      type="text"
+                      value={candidateProfile.linkedin || ""}
+                      onChange={(e) => setCandidateProfile({ ...candidateProfile, linkedin: e.target.value })}
+                      className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-[#dfe2f3]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[#859397] uppercase text-[10px] tracking-wider mb-1">GitHub / Portfolio URL</label>
+                    <input
+                      type="text"
+                      value={candidateProfile.github || ""}
+                      onChange={(e) => setCandidateProfile({ ...candidateProfile, github: e.target.value })}
+                      className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-[#dfe2f3]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[#859397] uppercase text-[10px] tracking-wider mb-1">Work Authorization</label>
+                    <input
+                      type="text"
+                      value={candidateProfile.work_authorization || ""}
+                      onChange={(e) => setCandidateProfile({ ...candidateProfile, work_authorization: e.target.value })}
+                      className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-[#dfe2f3]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[#859397] uppercase text-[10px] tracking-wider mb-1">Notice Period</label>
+                    <input
+                      type="text"
+                      value={candidateProfile.notice_period || ""}
+                      onChange={(e) => setCandidateProfile({ ...candidateProfile, notice_period: e.target.value })}
+                      className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-[#dfe2f3]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[#859397] uppercase text-[10px] tracking-wider mb-1">Expected Salary / CTC</label>
+                    <input
+                      type="text"
+                      value={candidateProfile.expected_salary || ""}
+                      onChange={(e) => setCandidateProfile({ ...candidateProfile, expected_salary: e.target.value })}
+                      className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-[#dfe2f3]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[#859397] uppercase text-[10px] tracking-wider mb-1">Years of Experience</label>
+                    <input
+                      type="text"
+                      value={candidateProfile.experience_years || ""}
+                      onChange={(e) => setCandidateProfile({ ...candidateProfile, experience_years: e.target.value })}
+                      className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-[#dfe2f3]"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[#859397] uppercase text-[10px] tracking-wider mb-1">Core Technical Skills</label>
+                  <input
+                    type="text"
+                    value={candidateProfile.skills || ""}
+                    onChange={(e) => setCandidateProfile({ ...candidateProfile, skills: e.target.value })}
+                    className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-[#dfe2f3]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[#859397] uppercase text-[10px] tracking-wider mb-1">Custom QA Experience Notes (used by AI for custom portal questions)</label>
+                  <textarea
+                    rows={3}
+                    value={candidateProfile.custom_qa_prompt_notes || ""}
+                    onChange={(e) => setCandidateProfile({ ...candidateProfile, custom_qa_prompt_notes: e.target.value })}
+                    className="w-full bg-white/5 border border-white/10 rounded p-3 text-[#dfe2f3] leading-relaxed"
+                  />
+                </div>
+
+                <div className="pt-4 border-t border-white/10 flex justify-end gap-3">
+                  <button
+                    onClick={() => setProfileOpen(false)}
+                    className="px-4 py-2 rounded bg-white/5 text-[#bbc9cd] hover:bg-white/10 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={saveCandidateProfile}
+                    className="px-5 py-2 rounded bg-[#5eead4] text-[#00363e] font-bold hover:scale-105 transition-all cursor-pointer shadow-lg"
+                  >
+                    Save Master Profile
+                  </button>
                 </div>
               </div>
             </motion.div>

@@ -25,33 +25,71 @@ def set_extension_deps(llm_fn):
     call_llm_fn = llm_fn
 
 
+DEFAULT_CANDIDATE_PROFILE = {
+    "full_name": "Madansai Daram",
+    "first_name": "Madansai",
+    "last_name": "Daram",
+    "email": "madansai1997@gmail.com",
+    "phone": "+91 9876543210",
+    "location": "India / Remote",
+    "linkedin": "https://linkedin.com/in/madansaidaram",
+    "github": "https://github.com/Madansai1997",
+    "portfolio": "https://github.com/Madansai1997",
+    "work_authorization": "Authorized to work in India / Remote",
+    "requires_sponsorship": "No",
+    "notice_period": "Immediate / 15 Days",
+    "expected_salary": "Negotiable as per market standards",
+    "target_role": "Data Analyst / Analytics Engineer",
+    "skills": "SQL, Python, Power BI, Tableau, Excel, Data Modeling, ETL, PostgreSQL, BigQuery, Pandas, NumPy, Machine Learning",
+    "experience_years": "3+ years in Data Analytics & Business Intelligence",
+    "custom_qa_prompt_notes": "Experienced in building automated data pipelines, interactive Power BI dashboards, complex SQL analytics, and financial/operations modeling.",
+}
+
+async def init_extension_tables():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_profile (
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                data_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        await db.commit()
+
 @router.get("/api/extension/profile")
 async def get_extension_profile_api():
-    """Returns candidate profile data, contact details, work authorization,
-    and application defaults for Chrome extension autofill."""
-    profile = {
-        "full_name": "Madansai Daram",
-        "first_name": "Madansai",
-        "last_name": "Daram",
-        "email": "madansai1997@gmail.com",
-        "phone": "+91 9876543210", # Customize as needed
-        "location": "India / Remote",
-        "linkedin": "https://linkedin.com/in/madansaidaram",
-        "github": "https://github.com/Madansai1997",
-        "portfolio": "https://github.com/Madansai1997",
-        "work_authorization": "Authorized to work in India / Remote",
-        "requires_sponsorship": "No",
-        "notice_period": "Immediate / 15 Days",
-        "expected_salary": "Negotiable as per market standards",
-        "target_role": "Data Analyst / Analytics Engineer",
-        "skills": "SQL, Python, Power BI, Tableau, Excel, Data Modeling, ETL, PostgreSQL, BigQuery, Pandas, NumPy, Machine Learning",
-        "experience_years": "3+ years in Data Analytics & Business Intelligence",
-    }
-    
-    # Check master docx presence
+    """Returns stored candidate profile data for Chrome extension autofill."""
+    await init_extension_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT data_json FROM user_profile WHERE id = 1")
+        row = await cur.fetchone()
+        if row and row["data_json"]:
+            try:
+                profile = json.loads(row["data_json"])
+            except Exception:
+                profile = dict(DEFAULT_CANDIDATE_PROFILE)
+        else:
+            profile = dict(DEFAULT_CANDIDATE_PROFILE)
+            
     from resume_ats_agent import has_master_docx
     profile["has_master_docx"] = await has_master_docx()
     return JSONResponse({"ok": True, "profile": profile})
+
+@router.post("/api/extension/profile")
+async def save_extension_profile_api(payload: dict = Body(...)):
+    """Saves updated candidate profile details to database."""
+    await init_extension_tables()
+    profile = dict(DEFAULT_CANDIDATE_PROFILE)
+    profile.update(payload)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO user_profile (id, data_json, updated_at) VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET data_json=excluded.data_json, updated_at=excluded.updated_at
+        """, (json.dumps(profile), now_iso))
+        await db.commit()
+    return JSONResponse({"ok": True, "message": "Candidate profile updated successfully!", "profile": profile})
 
 
 @router.post("/api/extension/answer-question")
