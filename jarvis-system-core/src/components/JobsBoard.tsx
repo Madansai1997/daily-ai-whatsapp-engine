@@ -270,7 +270,59 @@ function daysSince(ts?: string | null): number | null {
   return Math.floor((Date.now() - d.getTime()) / 86400000);
 }
 
-export default function JobsBoard({ activeScreen, onNavigate, intent, onIntentHandled }: JobsBoardProps) {
+class JobsBoardErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; error: Error | null }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error("🔴 JobsBoard Error Boundary Caught Crash:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="p-8 glass-panel rounded-2xl border border-[#ffb4ab]/30 bg-[#ffb4ab]/5 text-center space-y-4 max-w-2xl mx-auto my-12 font-mono">
+          <div className="w-12 h-12 rounded-full bg-[#ffb4ab]/20 text-[#ffb4ab] flex items-center justify-center mx-auto border border-[#ffb4ab]/40">
+            <AlertCircle className="w-6 h-6" />
+          </div>
+          <h2 className="text-lg font-bold text-[#ffb4ab]">Jobs Board Self-Healed From Error</h2>
+          <p className="text-xs text-[#bbc9cd] leading-relaxed">
+            {this.state.error?.message || "An unexpected error occurred in the board module."}
+          </p>
+          <button
+            onClick={() => {
+              this.setState({ hasError: false, error: null });
+              window.location.reload();
+            }}
+            className="px-5 py-2.5 rounded-xl bg-[#8aebff] text-[#00363e] font-bold text-xs hover:scale-105 transition-all cursor-pointer shadow-lg inline-flex items-center gap-2"
+          >
+            <RefreshCw className="w-4 h-4" /> RELOAD BOARD
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+export default function JobsBoard(props: JobsBoardProps) {
+  return (
+    <JobsBoardErrorBoundary>
+      <JobsBoardInner {...props} />
+    </JobsBoardErrorBoundary>
+  );
+}
+
+function JobsBoardInner({ activeScreen, onNavigate, intent, onIntentHandled }: JobsBoardProps) {
   const [applications, setApplications] = useState<Application[]>([]);
   const [statuses, setStatuses] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
