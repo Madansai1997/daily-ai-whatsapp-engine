@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(extension-auth): Exempt /api/extension/ endpoints in _auth_gate middleware and send auth headers in JobsBoard _(2026-08-04)_
 - fix(profile): Fix candidate profile save query for Turso cloud DB compatibility and add safe JSON error handling _(2026-08-04)_
 - fix(console): Add robust SPA router fallback for /console and sub-routes without 404/307 redirects _(2026-08-04)_
 - feat(profile): Add Candidate Master Profile Studio & DB persistence for Chrome Extension autofill preferences _(2026-08-04)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - fix(auth): Exempt file download endpoints (/tailored-docx, /download, /gdoc) from auth gate to allow direct browser file downloads _(2026-08-03)_
 - fix(ats): Fix route collision on /ats/{job_ref}/tailored-docx and add automatic .docx download fallback on Google Docs invalid_grant _(2026-08-03)_
 - fix(jobs-board): Restore full rich feature suite including AI Scouted Jobs Stream, Review Queue, ATS Deep Scout, Ghost Job badges, and Master Resume studio _(2026-08-03)_
-- refactor(believer): Update prompt to Personal & Workplace Psychiatrist role providing 3-tier clarity (what user can do, what second party can do, what we can do together) _(2026-08-01)_
 <!-- /AUTO:changelog -->
 
 ---

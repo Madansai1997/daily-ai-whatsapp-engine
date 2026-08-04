@@ -519,7 +519,12 @@ function JobsBoardInner({ activeScreen, onNavigate, intent, onIntentHandled }: J
 
   const loadCandidateProfile = async () => {
     try {
-      const res = await fetch("/api/extension/profile");
+      const tok = getToken();
+      const res = await fetch("/api/extension/profile", {
+        headers: {
+          ...(tok ? { Authorization: `Bearer ${tok}`, "X-Jarvis-Token": tok } : {}),
+        },
+      });
       const data = await res.json();
       if (data?.ok && data?.profile) {
         setCandidateProfile(data.profile);
@@ -531,9 +536,13 @@ function JobsBoardInner({ activeScreen, onNavigate, intent, onIntentHandled }: J
 
   const saveCandidateProfile = async () => {
     try {
+      const tok = getToken();
       const res = await fetch("/api/extension/profile", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(tok ? { Authorization: `Bearer ${tok}`, "X-Jarvis-Token": tok } : {}),
+        },
         body: JSON.stringify(candidateProfile),
       });
       const text = await res.text();

@@ -1258,8 +1258,8 @@ def _verify_token(token: str) -> bool:
 async def _auth_gate(request: Request, call_next):
     if AUTH_REQUIRED:
         path = request.url.path
-        # Allow file download endpoints to be accessible via direct browser navigation
-        if path.endswith("/tailored-docx") or path.endswith("/download") or path.endswith("/gdoc"):
+        # Allow file download and extension endpoints to be accessible via direct navigation / Chrome Extension
+        if path.endswith("/tailored-docx") or path.endswith("/download") or path.endswith("/gdoc") or path.startswith("/api/extension/"):
             return await call_next(request)
 
         if any(path.startswith(p) for p in _PROTECTED_PREFIXES):
