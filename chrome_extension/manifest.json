@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "JARVIS Career Copilot & Job Autofill",
+  "version": "1.0.0",
+  "description": "1-Click AI Job Application Autofill & Live Page ATS Match Copilot connected to your JARVIS engine.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "JARVIS Career Copilot"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*/*",
+        "http://*/*"
+      ],
+      "js": ["content.js"],
+      "css": ["content.css"]
+    }
+  ]
+}

@@ -490,7 +490,8 @@ async def auto_apply_application_api(id: int):
 
     # 3. Advance status to 'applied'
     now_iso = datetime.now(timezone.utc).isoformat()
-    await update_application_status(id, "applied")
+    from application_tracker import update_status_by_id
+    await update_status_by_id(id, "applied")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE applications SET applied_at = ? WHERE id = ?", (now_iso, id))
         await db.commit()

@@ -1,0 +1,79 @@
+/* JARVIS Career Copilot Content Script Styling */
+
+#jarvis-copilot-badge {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 999999;
+  background: rgba(10, 14, 26, 0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(138, 235, 255, 0.3);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), 0 0 20px rgba(138, 235, 255, 0.15);
+  border-radius: 16px;
+  padding: 12px 18px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: #dfe2f3;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  user-select: none;
+}
+
+#jarvis-copilot-badge:hover {
+  transform: translateY(-2px);
+  border-color: rgba(138, 235, 255, 0.6);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.6), 0 0 25px rgba(138, 235, 255, 0.25);
+}
+
+.jarvis-badge-icon {
+  width: 22px;
+  height: 22px;
+  background: radial-gradient(circle, #8aebff 0%, #0088a8 100%);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #00363e;
+  font-weight: 900;
+  font-size: 11px;
+  box-shadow: 0 0 10px rgba(138, 235, 255, 0.5);
+}
+
+.jarvis-btn-autofill {
+  background: linear-gradient(135deg, #8aebff 0%, #00a8cc 100%);
+  color: #002b33;
+  font-weight: 800;
+  font-size: 11px;
+  border: none;
+  padding: 7px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  letter-spacing: 0.5px;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.jarvis-btn-autofill:hover {
+  transform: scale(1.04);
+  box-shadow: 0 0 12px rgba(138, 235, 255, 0.6);
+}
+
+.jarvis-btn-save {
+  background: rgba(255, 255, 255, 0.08);
+  color: #bbc9cd;
+  font-size: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.jarvis-btn-save:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: #8aebff;
+}

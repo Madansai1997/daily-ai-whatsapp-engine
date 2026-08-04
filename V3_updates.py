@@ -1193,6 +1193,7 @@ from routers.system import router as system_router
 from routers.influencers_trends import router as influencers_router
 from routers.rag import router as rag_router, init_rag_router_deps
 from routers.chat_voice_bills import router as chat_bills_router
+from routers.extension import router as extension_router, set_extension_deps
 
 app.include_router(auth_router)
 app.include_router(jobs_router)
@@ -1202,6 +1203,10 @@ app.include_router(system_router)
 app.include_router(influencers_router)
 app.include_router(rag_router)
 app.include_router(chat_bills_router)
+app.include_router(extension_router)
+
+# Initialize extension router dependencies
+set_extension_deps(call_llm)
 
 
 # ── PIN lock for the JARVIS console ──────────────────────────────────────────
