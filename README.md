@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(console): Add robust SPA router fallback for /console and sub-routes without 404/307 redirects _(2026-08-04)_
 - feat(profile): Add Candidate Master Profile Studio & DB persistence for Chrome Extension autofill preferences _(2026-08-04)_
 - feat(chrome-extension): Add JARVIS Career Copilot Chrome Extension with 1-Click Form Autofill, AI Question Answering, and Auto-Sync _(2026-08-04)_
 - feat(auto-apply): Implement autonomous direct Auto-Apply engine with 100% format-preserving in-place .docx resume bullet rewrites _(2026-08-04)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - fix(jobs-board): Restore full rich feature suite including AI Scouted Jobs Stream, Review Queue, ATS Deep Scout, Ghost Job badges, and Master Resume studio _(2026-08-03)_
 - refactor(believer): Update prompt to Personal & Workplace Psychiatrist role providing 3-tier clarity (what user can do, what second party can do, what we can do together) _(2026-08-01)_
 - refactor(believer): Enforce natural human conversation posture without robotic step lists or repeated questions _(2026-08-01)_
-- fix(believer): Upgrade Key Cards and 3 Lenses prompts to be 100% specific to exact entry text and remove generic advice _(2026-08-01)_
 <!-- /AUTO:changelog -->
 
 ---

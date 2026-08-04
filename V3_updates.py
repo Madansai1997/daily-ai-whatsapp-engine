@@ -1305,14 +1305,22 @@ async def auth_login(request: Request):
     return JSONResponse({"ok": False, "error": "Incorrect PIN."}, status_code=401)
 
 
-# New React (Vite) console UI — served as pre-built static files under /console.
-# Guarded so a fresh clone without a build doesn't crash startup; run `npm run build`
-# in jarvis-system-core/ to (re)generate dist. The old /chat UI stays untouched.
+# New React (Vite) console UI — served under /console with full SPA routing fallback
 _CONSOLE_DIST = os.path.join(BASE_DIR, "jarvis-system-core", "dist")
 if os.path.isdir(_CONSOLE_DIST):
-    from fastapi.staticfiles import StaticFiles
-    app.mount("/console", StaticFiles(directory=_CONSOLE_DIST, html=True), name="console")
-    print("✅ Console UI mounted at /console")
+    from fastapi.responses import FileResponse
+    @app.get("/console")
+    @app.get("/console/{full_path:path}")
+    async def serve_console_spa(full_path: str = ""):
+        if full_path:
+            asset_path = os.path.join(_CONSOLE_DIST, full_path)
+            if os.path.isfile(asset_path):
+                return FileResponse(asset_path)
+        index_html = os.path.join(_CONSOLE_DIST, "index.html")
+        if os.path.isfile(index_html):
+            return FileResponse(index_html)
+        return JSONResponse({"error": "index.html not found"}, status_code=404)
+    print("✅ Console UI mounted with SPA fallback at /console")
 else:
     print("ℹ️ Console UI dist not found — /console disabled until jarvis-system-core is built.")
 
