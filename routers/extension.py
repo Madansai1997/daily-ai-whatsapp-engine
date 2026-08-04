@@ -48,8 +48,8 @@ DEFAULT_CANDIDATE_PROFILE = {
 async def init_extension_tables():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS user_profile (
-                id INTEGER PRIMARY KEY DEFAULT 1,
+            CREATE TABLE IF NOT EXISTS candidate_profile (
+                profile_key TEXT PRIMARY KEY,
                 data_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -62,7 +62,7 @@ async def get_extension_profile_api():
     await init_extension_tables()
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT data_json FROM user_profile WHERE id = 1")
+        cur = await db.execute("SELECT data_json FROM candidate_profile WHERE profile_key = 'master'")
         row = await cur.fetchone()
         if row and row["data_json"]:
             try:
@@ -85,9 +85,9 @@ async def save_extension_profile_api(payload: dict = Body(...)):
         profile.update(payload)
         now_iso = datetime.now(timezone.utc).isoformat()
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("DELETE FROM user_profile WHERE id = 1")
+            await db.execute("DELETE FROM candidate_profile WHERE profile_key = 'master'")
             await db.execute(
-                "INSERT INTO user_profile (id, data_json, updated_at) VALUES (1, ?, ?)",
+                "INSERT INTO candidate_profile (profile_key, data_json, updated_at) VALUES ('master', ?, ?)",
                 (json.dumps(profile), now_iso)
             )
             await db.commit()

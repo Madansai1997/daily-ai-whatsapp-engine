@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(db): Migrate profile storage to candidate_profile table with profile_key PRIMARY KEY to fix Turso column mismatch error _(2026-08-04)_
 - fix(cors): Add CORSMiddleware to FastAPI app for Chrome Extension cross-origin requests from docs.google.com and job portals _(2026-08-04)_
 - fix(extension-auth): Exempt /api/extension/ endpoints in _auth_gate middleware and send auth headers in JobsBoard _(2026-08-04)_
 - fix(profile): Fix candidate profile save query for Turso cloud DB compatibility and add safe JSON error handling _(2026-08-04)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - fix(jobs-board): Add React JobsBoardErrorBoundary class component for self-healing board crashes and defensive null guards _(2026-08-04)_
 - fix(jobs): Fix search-now HTTP 200 error alert and fix Recruiter Read tab empty state with on-demand Run Recruiter Read button _(2026-08-03)_
 - fix(auth): Exempt file download endpoints (/tailored-docx, /download, /gdoc) from auth gate to allow direct browser file downloads _(2026-08-03)_
-- fix(ats): Fix route collision on /ats/{job_ref}/tailored-docx and add automatic .docx download fallback on Google Docs invalid_grant _(2026-08-03)_
 <!-- /AUTO:changelog -->
 
 ---
