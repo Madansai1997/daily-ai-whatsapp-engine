@@ -44,6 +44,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
+  if (request.type === "AUTOFILL_SCHEMA") {
+    chrome.storage.local.get(["serverUrl"], async (data) => {
+      let baseUrl = (data.serverUrl || DEFAULT_SERVER).trim().replace(/\/$/, "");
+      if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
+        baseUrl = "https://" + baseUrl;
+      }
+      try {
+        const res = await fetch(`${baseUrl}/api/extension/autofill-schema`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request.payload)
+        });
+        const json = await res.json();
+        sendResponse(json);
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e) });
+      }
+    });
+    return true;
+  }
+
   if (request.type === "SAVE_JOB") {
     chrome.storage.local.get(["serverUrl"], async (data) => {
       const baseUrl = data.serverUrl || DEFAULT_SERVER;

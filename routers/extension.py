@@ -103,6 +103,54 @@ async def save_extension_profile_api(payload: dict = Body(...)):
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
+@router.post("/api/extension/autofill-schema")
+async def autofill_schema_api(payload: dict = Body(...)):
+    """AI Form Schema Classifier: Takes extracted form fields from browser page + candidate profile
+    and uses LLM reasoning to map every field to its 100% exact value or option selection with ZERO ambiguity."""
+    fields = payload.get("fields", [])
+    profile = payload.get("profile", {})
+    company = payload.get("company", "the company")
+    
+    if not fields or not profile:
+        return JSONResponse({"ok": False, "error": "Missing fields or profile"}, status_code=400)
+        
+    if not call_llm_fn:
+        return JSONResponse({"ok": False, "error": "LLM service unavailable"}, status_code=500)
+
+    sys_prompt = (
+        "You are JARVIS, an expert AI Job Application Assistant for Madan Daram. "
+        "Your task is to analyze form fields extracted from a job application page and generate a 100% accurate, error-free JSON fill mapping.\n\n"
+        "STRICT GUIDELINES:\n"
+        "1. Map each field ID to the candidate's exact profile value.\n"
+        "2. Never mix up Email Address vs Location, or Candidate Name vs Company Name.\n"
+        "3. For radio/dropdown options, select the exact string from the provided 'options' list that best matches the candidate's preferences.\n"
+        "4. For open-ended questions ('Why do you want to join...', 'Share your motivation...'), write a confident 2-sentence response.\n"
+        "5. Output ONLY valid JSON matching this structure:\n"
+        '{\n  "fill_map": {\n    "field_id_1": {"action": "fill", "value": "madansai1997@gmail.com"},\n    "field_id_2": {"action": "select_option", "option": "Work from Home (Full-Time)"}\n  }\n}'
+    )
+    
+    user_prompt = (
+        f"Candidate Profile Data:\n{json.dumps(profile, indent=2)}\n\n"
+        f"Company Name: {company}\n\n"
+        f"Extracted Page Form Fields:\n{json.dumps(fields, indent=2)}\n\n"
+        "Return ONLY the JSON fill mapping object:"
+    )
+
+    try:
+        raw_res = await call_llm_fn(sys_prompt, user_prompt)
+        cleaned = raw_res.strip()
+        if "```json" in cleaned:
+            cleaned = cleaned.split("```json", 1)[1].split("```", 1)[0].strip()
+        elif "```" in cleaned:
+            cleaned = cleaned.split("```", 1)[1].split("```", 1)[0].strip()
+            
+        data = json.loads(cleaned)
+        return JSONResponse({"ok": True, "fill_map": data.get("fill_map", {})})
+    except Exception as e:
+        print(f"❌ Extension AI schema classifier error: {e}")
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
 @router.post("/api/extension/answer-question")
 async def answer_extension_question_api(payload: dict = Body(...)):
     """AI Question Answering for custom application fields (e.g. 'Why do you want to work here?',
