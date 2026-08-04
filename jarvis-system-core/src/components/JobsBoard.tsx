@@ -1741,20 +1741,31 @@ function JobsBoardInner({ activeScreen, onNavigate, intent, onIntentHandled }: J
     }
   };
 
+  const runAutoApply = async (id: number) => {
+    try {
+      setLoading(true);
+      const res = await fetch(`/api/applications/${id}/auto-apply`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      alert(`🚀 ${data.message}`);
+      await loadApplications();
+    } catch (e) {
+      alert(`Auto-Apply failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const closeModal = () => {
     onNavigate(ScreenId.Jobs);
   };
 
   /* ---- Derived: kanban columns grouped by status ---- */
 
-  // Phase 3 — the one next step for a card, by stage (the board drives itself).
-  // The SINGLE primary action shown on a card's face, by stage. Everything else lives in the ⋯ menu.
-  // (Folds in the old nextStep + the stale-applied follow-up + the interviewing prep cue, and wires
-  // the previously-dead "Respond to offer" to the email drafter — one action, no duplicates.)
   const primaryAction = (card: Application): { label: string; tint: string; onClick?: () => void } | null => {
     switch (card.status) {
       case "interested":
-        return { label: "Assess & apply", tint: "#8aebff", onClick: () => runAts(card.id) };
+        return { label: "⚡ Auto-Apply (Format Preserved)", tint: "#8aebff", onClick: () => runAutoApply(card.id) };
       case "applied": {
         const d = daysSince(card.applied_at || card.updated_at) ?? 0;
         return { label: d >= 7 ? `Follow up · ${d}d` : "Follow up", tint: "#ffd6a3", onClick: openFollowups };

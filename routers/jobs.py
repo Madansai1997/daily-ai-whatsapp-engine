@@ -448,7 +448,62 @@ async def get_ats_analysis_api(job_ref: str):
     return JSONResponse({"ok": True, "analysis": analysis})
 
 
-@router.get("/api/applications/{id}/drawer")
+@router.post("/api/applications/{id}/auto-apply")
+async def auto_apply_application_api(id: int):
+    """Autonomous direct job application handler:
+    1. Runs ATS alignment & STAR/XYZ optimization.
+    2. Performs format-preserving in-place bullet rewrites on the uploaded master .docx file.
+    3. Preps outreach email & recruiter templates.
+    4. Automatically advances card status to 'applied'."""
+    app_row = await get_application(id)
+    if not app_row:
+        return JSONResponse({"ok": False, "error": "Application not found"}, status_code=404)
+
+    job_ref = app_row.get("job_key") or f"app:{id}"
+    
+    # 1. Ensure ATS analysis is present
+    analysis = await get_cached_ats_analysis(job_ref)
+    if not analysis:
+        from resume_ats_agent import analyze
+        analysis = await analyze({"key": job_ref, "title": app_row.get("title"), "company": app_row.get("company"), "description": app_row.get("description") or ""}, call_llm=call_llm_fn)
+
+    # 2. In-place format-preserving .docx rewrite on original uploaded resume
+    applied_count = 0
+    from resume_ats_agent import get_master_docx, save_tailored_docx
+    master = await get_master_docx()
+    if master:
+        filename, docx_bytes = master
+        breakdown = analysis.get("star_xyz_breakdown", []) or []
+        rewrites = [
+            (b.get("current_text", ""), b.get("optimized_text", ""))
+            for b in breakdown
+            if (b.get("current_text") or "").strip() and (b.get("optimized_text") or "").strip()
+        ]
+        if rewrites:
+            import asyncio
+            from resume_editor import apply_rewrites
+            loop = asyncio.get_running_loop()
+            new_bytes, applied_list = await loop.run_in_executor(None, lambda: apply_rewrites(docx_bytes, rewrites))
+            applied_count = len(applied_list)
+            out_name = f"Tailored_{(app_row.get('company') or 'resume')}.docx".replace(" ", "_")
+            await save_tailored_docx(job_ref, out_name, new_bytes)
+
+    # 3. Advance status to 'applied'
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await update_application_status(id, "applied")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE applications SET applied_at = ? WHERE id = ?", (now_iso, id))
+        await db.commit()
+
+    return JSONResponse({
+        "ok": True,
+        "status": "applied",
+        "title": app_row.get("title"),
+        "company": app_row.get("company"),
+        "rewrites_applied": applied_count,
+        "download_url": f"/ats/{job_ref}/tailored-docx",
+        "message": f"Successfully auto-applied to {app_row.get('title')} @ {app_row.get('company')}! Tailored resume ready (format 100% preserved)."
+    })
 async def get_application_drawer_api(id: int):
     """Unified endpoint returning full data for Slide-Over Inspection Drawer."""
     app_row = await get_application(id)

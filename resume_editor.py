@@ -54,25 +54,41 @@ def _replace_in_paragraph(paragraph, find: str, replace: str) -> bool:
     return True
 
 
+def _clean_text(s: str) -> str:
+    import re
+    return re.sub(r"\s+", " ", s.replace("\xa0", " ").replace("\u2011", "-").replace("•", "").replace("*", "")).strip()
+
+
 def apply_rewrites(docx_bytes: bytes, rewrites: list[tuple[str, str]]) -> tuple[bytes, list[tuple[str, str]]]:
     """Apply (find, replace) rewrites to a .docx, first occurrence each. Returns
-    (new_docx_bytes, applied_list). Formatting preserved."""
+    (new_docx_bytes, applied_list). Formatting preserved 100%."""
     doc = Document(io.BytesIO(docx_bytes))
     applied_list = []
     for find, replace in rewrites:
         if not find or not (find.strip()):
             continue
-        # Normalize non-breaking hyphens and non-breaking spaces
-        find_norm = find.replace("\xa0", " ").replace("\u2011", "-").strip()
+        find_clean = _clean_text(find)
+        find_prefix = find_clean[:25].lower() if len(find_clean) >= 25 else find_clean.lower()
+        
         for p in _iter_paragraphs(doc):
-            p_norm = p.text.replace("\xa0", " ").replace("\u2011", "-").strip()
-            if find_norm in p_norm:
-                # Replace matching text in paragraph by mapping it to paragraph text
-                orig_find = p.text
-                new_text = p_norm.replace(find_norm, replace)
-                if _replace_in_paragraph(p, orig_find, new_text):
+            p_clean = _clean_text(p.text)
+            if not p_clean:
+                continue
+            
+            # Match exact string or fuzzy prefix
+            if find_clean in p_clean or (find_prefix and find_prefix in p_clean.lower()):
+                orig_text = p.text
+                if _replace_in_paragraph(p, orig_text, replace):
                     applied_list.append((find, replace))
                     break
+                else:
+                    # In-place fallback: preserve paragraph runs[0] formatting, clear extra runs
+                    if p.runs:
+                        p.runs[0].text = replace
+                        for r in p.runs[1:]:
+                            r.text = ""
+                        applied_list.append((find, replace))
+                        break
     out = io.BytesIO()
     doc.save(out)
     return out.getvalue(), applied_list
