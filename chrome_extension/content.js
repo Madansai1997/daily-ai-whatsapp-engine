@@ -17,35 +17,70 @@
   `;
   document.body.appendChild(badge);
 
-  // Field selector mapping helper
+  function getFieldTextContext(input) {
+    const name = (input.name || "").toLowerCase();
+    const id = (input.id || "").toLowerCase();
+    const placeholder = (input.placeholder || "").toLowerCase();
+    const aria = (input.getAttribute("aria-label") || "").toLowerCase();
+    const title = (input.title || "").toLowerCase();
+    
+    let labelText = "";
+    if (input.labels && input.labels.length) {
+      labelText = Array.from(input.labels).map(l => l.innerText).join(" ").toLowerCase();
+    }
+    
+    // Search up to 6 parent levels for container text (covers Google Forms, Workday, Lever, Greenhouse)
+    let parent = input.parentElement;
+    let ancestorText = "";
+    let depth = 0;
+    while (parent && depth < 6) {
+      ancestorText += " " + (parent.innerText || "").toLowerCase();
+      if (parent.getAttribute("role") === "listitem" || parent.classList.contains("freebirdFormviewerComponentsQuestionBaseRoot")) {
+        break;
+      }
+      parent = parent.parentElement;
+      depth++;
+    }
+
+    return `${name} ${id} ${placeholder} ${aria} ${title} ${labelText} ${ancestorText}`;
+  }
+
   function findInputs(labels) {
     const inputs = Array.from(document.querySelectorAll("input, textarea, select"));
     return inputs.filter(input => {
-      const name = (input.name || "").toLowerCase();
-      const id = (input.id || "").toLowerCase();
-      const placeholder = (input.placeholder || "").toLowerCase();
-      const aria = (input.getAttribute("aria-label") || "").toLowerCase();
-      
-      // Look up parent label text
-      let labelText = "";
-      if (input.labels && input.labels.length) {
-        labelText = Array.from(input.labels).map(l => l.innerText).join(" ").toLowerCase();
-      } else if (input.parentElement) {
-        labelText = input.parentElement.innerText.toLowerCase();
-      }
-
-      const combined = `${name} ${id} ${placeholder} ${aria} ${labelText}`;
-      return labels.some(l => combined.includes(l.toLowerCase()));
+      const type = (input.type || "").toLowerCase();
+      if (["hidden", "submit", "button", "image", "reset"].includes(type)) return false;
+      const context = getFieldTextContext(input);
+      return labels.some(l => context.includes(l.toLowerCase()));
     });
   }
 
   function setInputValue(input, val) {
-    if (!input || val == null) return;
-    input.focus();
-    input.value = val;
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    input.dispatchEvent(new Event('change', { bubbles: true }));
-    input.blur();
+    if (!input || val == null || val === "") return false;
+    try {
+      input.focus();
+      
+      // Native Property Setter Override (bypasses React, Google Forms, & framework state traps)
+      const prototype = Object.getPrototypeOf(input);
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
+      if (descriptor && descriptor.set) {
+        descriptor.set.call(input, val);
+      } else {
+        input.value = val;
+      }
+
+      // Dispatch all input/change/keydown events
+      input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+      input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter" }));
+      input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: "Enter" }));
+      input.blur();
+      return true;
+    } catch (e) {
+      console.error("setInputValue error:", e);
+      input.value = val;
+      return false;
+    }
   }
 
   // 1-Click Autofill Handler
@@ -62,30 +97,50 @@
       }
 
       const p = res.profile;
+      let filledCount = 0;
+
+      const fillGroup = (labels, val) => {
+        if (!val) return;
+        const matches = findInputs(labels);
+        matches.forEach(input => {
+          if (setInputValue(input, val)) filledCount++;
+        });
+      };
 
       // Fill First Name
-      findInputs(["first name", "given name", "fname"]).forEach(i => setInputValue(i, p.first_name));
+      fillGroup(["first name", "given name", "fname"], p.first_name);
       // Fill Last Name
-      findInputs(["last name", "family name", "surname", "lname"]).forEach(i => setInputValue(i, p.last_name));
+      fillGroup(["last name", "family name", "surname", "lname"], p.last_name);
       // Fill Full Name
-      findInputs(["full name", "your name", "candidate name", "applicant name"]).forEach(i => setInputValue(i, p.full_name));
+      fillGroup(["full name", "your name", "candidate name", "applicant name", "name"], p.full_name);
       // Fill Email
-      findInputs(["email", "e-mail"]).forEach(i => setInputValue(i, p.email));
+      fillGroup(["email", "e-mail", "mail"], p.email);
       // Fill Phone
-      findInputs(["phone", "mobile", "contact number", "telephone"]).forEach(i => setInputValue(i, p.phone));
+      fillGroup(["phone", "mobile", "contact number", "telephone", "cell"], p.phone);
       // Fill LinkedIn
-      findInputs(["linkedin"]).forEach(i => setInputValue(i, p.linkedin));
+      fillGroup(["linkedin"], p.linkedin);
       // Fill GitHub / Portfolio
-      findInputs(["github", "portfolio", "website"]).forEach(i => setInputValue(i, p.github));
+      fillGroup(["github", "portfolio", "website", "link"], p.github);
       // Fill Location
-      findInputs(["location", "city", "address"]).forEach(i => setInputValue(i, p.location));
+      fillGroup(["location", "city", "address", "country", "state"], p.location);
       // Fill Notice Period
-      findInputs(["notice", "availability", "start date"]).forEach(i => setInputValue(i, p.notice_period));
+      fillGroup(["notice", "availability", "start date", "how soon"], p.notice_period);
       // Fill Expected Salary
-      findInputs(["salary", "ctc", "compensation"]).forEach(i => setInputValue(i, p.expected_salary));
+      fillGroup(["salary", "ctc", "compensation", "expected"], p.expected_salary);
+      // Fill Work Authorization
+      fillGroup(["authorized", "citizenship", "sponsorship", "work auth"], p.work_authorization);
+      // Fill Experience
+      fillGroup(["experience", "years of experience", "total experience"], p.experience_years);
+      // Fill Skills
+      fillGroup(["skills", "technical skills", "technologies"], p.skills);
 
-      btn.innerText = "✓ FILLED!";
-      setTimeout(() => { btn.innerText = "⚡ AUTOFILL"; }, 2500);
+      if (filledCount > 0) {
+        btn.innerText = `✓ FILLED (${filledCount})`;
+      } else {
+        alert("⚠️ No matching fields found on this form. Try clicking inside an input or checking your profile fields.");
+        btn.innerText = "⚡ AUTOFILL";
+      }
+      setTimeout(() => { btn.innerText = "⚡ AUTOFILL"; }, 3000);
     });
   });
 
