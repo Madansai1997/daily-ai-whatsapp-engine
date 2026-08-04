@@ -536,13 +536,16 @@ function JobsBoardInner({ activeScreen, onNavigate, intent, onIntentHandled }: J
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(candidateProfile),
       });
-      const data = await res.json();
-      if (data?.ok) {
-        alert("✅ Master Candidate Profile saved! Your Chrome Extension will now autofill these exact details.");
-        setProfileOpen(false);
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { throw new Error(text || `HTTP ${res.status}`); }
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
       }
+      alert("✅ Master Candidate Profile saved! Your Chrome Extension will now autofill these exact details.");
+      setProfileOpen(false);
     } catch (e) {
-      alert("Failed to save candidate profile: " + String(e));
+      alert("Failed to save candidate profile: " + (e instanceof Error ? e.message : String(e)));
     }
   };
 

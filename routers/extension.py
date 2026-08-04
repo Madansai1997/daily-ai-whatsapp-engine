@@ -79,17 +79,22 @@ async def get_extension_profile_api():
 @router.post("/api/extension/profile")
 async def save_extension_profile_api(payload: dict = Body(...)):
     """Saves updated candidate profile details to database."""
-    await init_extension_tables()
-    profile = dict(DEFAULT_CANDIDATE_PROFILE)
-    profile.update(payload)
-    now_iso = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            INSERT INTO user_profile (id, data_json, updated_at) VALUES (1, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET data_json=excluded.data_json, updated_at=excluded.updated_at
-        """, (json.dumps(profile), now_iso))
-        await db.commit()
-    return JSONResponse({"ok": True, "message": "Candidate profile updated successfully!", "profile": profile})
+    try:
+        await init_extension_tables()
+        profile = dict(DEFAULT_CANDIDATE_PROFILE)
+        profile.update(payload)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM user_profile WHERE id = 1")
+            await db.execute(
+                "INSERT INTO user_profile (id, data_json, updated_at) VALUES (1, ?, ?)",
+                (json.dumps(profile), now_iso)
+            )
+            await db.commit()
+        return JSONResponse({"ok": True, "message": "Candidate profile updated successfully!", "profile": profile})
+    except Exception as e:
+        print(f"❌ Error saving candidate profile: {e}")
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 @router.post("/api/extension/answer-question")
