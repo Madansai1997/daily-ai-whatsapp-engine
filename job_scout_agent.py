@@ -235,15 +235,13 @@ async def fetch_adzuna(profile: dict, limit: int = 30) -> list:
 
 
 async def fetch_remotive(profile: dict, limit: int = 50) -> list:
-    """Secondary source (remote-global). Its search is loose, so we filter client-side by
-    keyword AND keep only roles a candidate in the profile's region could take (India /
-    Worldwide / Anywhere)."""
-    ok_locs = [l.lower() for l in profile.get("locations", [])] + ["worldwide", "anywhere"]
-    keywords = [k.lower() for k in profile.get("keywords", [profile.get("role", "")])]
+    """Secondary source (remote-global). Keyless, free open API."""
+    role = profile.get("role", "data analyst")
+    keywords = [k.lower() for k in profile.get("keywords", [role])] + [role.lower(), "data", "analyst", "analytics"]
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=UA) as c:
             r = await c.get("https://remotive.com/api/remote-jobs",
-                            params={"search": profile.get("role", ""), "limit": limit})
+                            params={"search": role, "limit": limit})
             r.raise_for_status()
             data = r.json()
     except Exception as e:
@@ -252,16 +250,12 @@ async def fetch_remotive(profile: dict, limit: int = 50) -> list:
     out = []
     for j in data.get("jobs", []):
         title = (j.get("title") or "").lower()
-        loc = (j.get("candidate_required_location") or "").lower()
-        if not any(k in title for k in keywords):
-            continue
-        if loc and not any(l in loc for l in ok_locs):
-            continue  # geo-locked away from the candidate's region
-        out.append(_norm(
-            j.get("id"), j.get("title"), j.get("company_name"),
-            j.get("candidate_required_location") or "Remote", True, j.get("salary") or None,
-            j.get("url"), "remotive", j.get("publication_date"), j.get("description"),
-        ))
+        if any(k in title for k in keywords):
+            out.append(_norm(
+                j.get("id"), j.get("title"), j.get("company_name"),
+                j.get("candidate_required_location") or "Remote", True, j.get("salary") or None,
+                j.get("url"), "remotive", j.get("publication_date"), j.get("description"),
+            ))
     return out
 
 
@@ -581,9 +575,23 @@ async def search_now_to_board(call_llm_fn=None, override: dict = None, track_fn=
         override["keywords"] = [query]
     if override:
         profile.update({k: v for k, v in override.items() if v is not None})
-    jobs = await fetch_jsearch(profile, limit=15) if RAPIDAPI_KEY else await fetch_adzuna(profile, limit=15)
+    jobs = []
+    if RAPIDAPI_KEY:
+        try:
+            jobs = await fetch_jsearch(profile, limit=15)
+        except Exception:
+            jobs = []
+    if not jobs and ADZUNA_APP_ID and ADZUNA_APP_KEY:
+        try:
+            jobs = await fetch_adzuna(profile, limit=15)
+        except Exception:
+            jobs = []
     if not jobs:
-        return {"found": 0, "added": 0}
+        try:
+            jobs = await fetch_remotive(profile, limit=25)
+        except Exception as e:
+            print(f"⚠️ [job_scout] search_now remotive fallback error: {e}")
+            jobs = []
     candidates = prefilter(jobs, profile) or jobs[:top_n]
     scored = await rank_jobs(candidates, profile, llm_fn, batch_size=10) if llm_fn else candidates
     top = scored[:top_n]

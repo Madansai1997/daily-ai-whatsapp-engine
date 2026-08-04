@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(job-scout): Add keyless Remotive live fallback to search_now_to_board so live search always finds jobs without API keys _(2026-08-04)_
 - fix(jobs-board): Add React JobsBoardErrorBoundary class component for self-healing board crashes and defensive null guards _(2026-08-04)_
 - fix(jobs): Fix search-now HTTP 200 error alert and fix Recruiter Read tab empty state with on-demand Run Recruiter Read button _(2026-08-03)_
 - fix(auth): Exempt file download endpoints (/tailored-docx, /download, /gdoc) from auth gate to allow direct browser file downloads _(2026-08-03)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - fix(believer): Fix LLM invocation signature in Project Believer conversational chat and key cards _(2026-08-01)_
 - feat(believer-jobs): Upgrade AI Job Hunt suite with Slide-Over Drawer and Project Believer with Conversational AI & Key Cards _(2026-08-01)_
 - fix(influencer): Fix Influencer Watch table initialization and frontend array state crash guards _(2026-07-30)_
-- feat(study): Add Curriculum Index, NotebookLM AI Research Notebook & Mock Quiz Suite _(2026-07-30)_
 <!-- /AUTO:changelog -->
 
 ---
