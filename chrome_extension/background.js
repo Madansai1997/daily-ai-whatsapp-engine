@@ -10,12 +10,16 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === "GET_PROFILE") {
     chrome.storage.local.get(["serverUrl"], async (data) => {
-      const baseUrl = data.serverUrl || DEFAULT_SERVER;
+      let baseUrl = (data.serverUrl || DEFAULT_SERVER).trim().replace(/\/$/, "");
+      if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
+        baseUrl = "https://" + baseUrl;
+      }
       try {
         const res = await fetch(`${baseUrl}/api/extension/profile`);
         const json = await res.json();
         sendResponse(json);
       } catch (e) {
+        console.error("GET_PROFILE fetch error:", e);
         sendResponse({ ok: false, error: String(e) });
       }
     });

@@ -55,7 +55,8 @@
 
     chrome.runtime.sendMessage({ type: "GET_PROFILE" }, (res) => {
       if (!res || !res.ok || !res.profile) {
-        alert("⚠️ Failed to fetch candidate profile from JARVIS backend.");
+        const errMsg = (res && res.error) ? res.error : "Network error / Backend unreachable";
+        alert(`⚠️ Failed to fetch candidate profile from JARVIS backend: ${errMsg}`);
         btn.innerText = "⚡ AUTOFILL";
         return;
       }
