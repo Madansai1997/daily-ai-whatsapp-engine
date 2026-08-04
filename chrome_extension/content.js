@@ -1,4 +1,4 @@
-// JARVIS Career Copilot Content Script — Form Filler & Page Inspector
+// JARVIS Career Copilot Content Script — Smart Form Filler & Page Inspector
 
 (function () {
   if (window.hasJarvisBadge) return;
@@ -45,13 +45,21 @@
     return `${name} ${id} ${placeholder} ${aria} ${title} ${labelText} ${ancestorText}`;
   }
 
-  function findInputs(labels) {
+  function findInputs(labels, excludes = []) {
     const inputs = Array.from(document.querySelectorAll("input, textarea, select"));
     return inputs.filter(input => {
       const type = (input.type || "").toLowerCase();
-      if (["hidden", "submit", "button", "image", "reset"].includes(type)) return false;
+      if (["hidden", "submit", "button", "image", "reset", "radio", "checkbox"].includes(type)) return false;
       const context = getFieldTextContext(input);
-      return labels.some(l => context.includes(l.toLowerCase()));
+      
+      // Must match at least one inclusion label
+      const hasMatch = labels.some(l => context.includes(l.toLowerCase()));
+      if (!hasMatch) return false;
+      
+      // Must NOT match any exclusion terms
+      if (excludes.some(ex => context.includes(ex.toLowerCase()))) return false;
+      
+      return true;
     });
   }
 
@@ -83,6 +91,34 @@
     }
   }
 
+  // Radio button option selector helper (Google Forms, Workday, Lever)
+  function fillRadioGroup(questionKeywords, targetOptionText) {
+    if (!targetOptionText) return false;
+    let clicked = false;
+    
+    const containers = Array.from(document.querySelectorAll('div[role="listitem"], fieldset, .freebirdFormviewerComponentsQuestionBaseRoot, .geFormComponents, div.form-group, div.mb-4, div.py-3'));
+    
+    for (const container of containers) {
+      const text = (container.innerText || "").toLowerCase();
+      if (questionKeywords.some(k => text.includes(k.toLowerCase()))) {
+        // Find options inside this question container
+        const options = Array.from(container.querySelectorAll('div[role="radio"], input[type="radio"], label, div.docssharedWizToggleLabeledContainer'));
+        for (const opt of options) {
+          const optText = (opt.innerText || opt.getAttribute("aria-label") || opt.value || opt.parentElement.innerText || "").toLowerCase();
+          if (optText.includes(targetOptionText.toLowerCase()) || targetOptionText.toLowerCase().includes(optText)) {
+            opt.focus();
+            opt.click();
+            opt.dispatchEvent(new Event("change", { bubbles: true }));
+            clicked = true;
+            break;
+          }
+        }
+        if (clicked) break;
+      }
+    }
+    return clicked;
+  }
+
   // 1-Click Autofill Handler
   document.getElementById("jarvis-autofill-trigger").addEventListener("click", () => {
     const btn = document.getElementById("jarvis-autofill-trigger");
@@ -99,45 +135,89 @@
       const p = res.profile;
       let filledCount = 0;
 
-      const fillGroup = (labels, val) => {
+      const fillGroup = (labels, val, excludes = []) => {
         if (!val) return;
-        const matches = findInputs(labels);
+        const matches = findInputs(labels, excludes);
         matches.forEach(input => {
           if (setInputValue(input, val)) filledCount++;
         });
       };
 
-      // Fill First Name
-      fillGroup(["first name", "given name", "fname"], p.first_name);
-      // Fill Last Name
-      fillGroup(["last name", "family name", "surname", "lname"], p.last_name);
-      // Fill Full Name
-      fillGroup(["full name", "your name", "candidate name", "applicant name", "name"], p.full_name);
-      // Fill Email
-      fillGroup(["email", "e-mail", "mail"], p.email);
-      // Fill Phone
-      fillGroup(["phone", "mobile", "contact number", "telephone", "cell"], p.phone);
-      // Fill LinkedIn
+      // 1. Email Address (Excludes 'city', 'location')
+      fillGroup(["email address", "email", "e-mail", "enter your email address"], p.email, ["city", "country", "location", "address in city"]);
+      
+      // 2. Mobile Number (Excludes 'email')
+      fillGroup(["mobile number", "mobile", "phone number", "phone", "contact number", "enter your mobile number"], p.phone || "+91 9963214141", ["email"]);
+
+      // 3. Age
+      fillGroup(["age", "enter your age"], p.age || "29", ["page", "percentage", "manage"]);
+
+      // 4. City (Excludes 'email', 'company')
+      fillGroup(["city", "current city", "enter your current city"], p.city || "Hyderabad", ["email", "company", "address"]);
+
+      // 5. Current/Last Company Name (Excludes 'full name', 'your name')
+      fillGroup(["company name", "last/current company", "current company", "last company", "employer", "organization"], p.current_company || "Analytics Consultancy", ["full name", "your name"]);
+
+      // 6. Full Name (Excludes 'company', 'employer', 'organization')
+      fillGroup(["full name", "your name", "candidate name", "applicant name", "enter your name"], p.full_name, ["company", "employer", "organization", "college", "university"]);
+
+      // 7. First / Last Name
+      fillGroup(["first name", "given name", "fname"], p.first_name, ["company"]);
+      fillGroup(["last name", "family name", "surname", "lname"], p.last_name, ["company"]);
+
+      // 8. Location (Excludes 'email', 'address')
+      fillGroup(["location", "current location", "country", "state"], p.location || "Hyderabad, India", ["email", "address"]);
+
+      // 9. Notice Period Text
+      fillGroup(["notice period", "availability", "how soon"], p.notice_period || "Immediate / 15 Days", ["work mode", "company"]);
+
+      // 10. Current CTC & Expected CTC
+      fillGroup(["current ctc", "current annual salary", "current salary"], p.expected_salary || "Negotiable as per market standards");
+      fillGroup(["expected ctc", "expected annual salary", "expected salary"], p.expected_salary || "Negotiable as per market standards");
+
+      // 11. LinkedIn / Portfolio / GitHub
       fillGroup(["linkedin"], p.linkedin);
-      // Fill GitHub / Portfolio
       fillGroup(["github", "portfolio", "website", "link"], p.github);
-      // Fill Location
-      fillGroup(["location", "city", "address", "country", "state"], p.location);
-      // Fill Notice Period
-      fillGroup(["notice", "availability", "start date", "how soon"], p.notice_period);
-      // Fill Expected Salary
-      fillGroup(["salary", "ctc", "compensation", "expected"], p.expected_salary);
-      // Fill Work Authorization
-      fillGroup(["authorized", "citizenship", "sponsorship", "work auth"], p.work_authorization);
-      // Fill Experience
-      fillGroup(["experience", "years of experience", "total experience"], p.experience_years);
-      // Fill Skills
-      fillGroup(["skills", "technical skills", "technologies"], p.skills);
+
+      // ── RADIO BUTTON / OPTION SELECTION ──
+      // Preferred Work Setting (Remote / Home / Office / Hybrid)
+      if (fillRadioGroup(["work setting", "how would you like to work", "work mode", "remote, on-site, hybrid"], p.work_mode || "Work from Home (Full-Time)")) {
+        filledCount++;
+      }
+
+      // Start Timeframe / Notice Option (Immediately / 7 days / 15 days)
+      if (fillRadioGroup(["how soon you can start", "start working", "timeframe to start"], p.notice_period_option || "Immediately")) {
+        filledCount++;
+      }
+
+      // Total Experience Range (2 to 4 years / 4 to 6 years)
+      if (fillRadioGroup(["total experience", "work experience in years", "choose your total work experience"], p.experience_range_option || "2 to 4 years")) {
+        filledCount++;
+      }
+
+      // ── AI CUSTOM OPEN-ENDED QUESTION ANSWERING ──
+      const textareas = Array.from(document.querySelectorAll("textarea, input[type='text']"));
+      for (const ta of textareas) {
+        if (ta.value && ta.value.trim() !== "") continue;
+        const ctx = getFieldTextContext(ta);
+        if (ctx.includes("why do you want to join") || ctx.includes("share your motivation") || ctx.includes("why should we hire")) {
+          const companyName = document.title.replace(/[-|].*/, "").trim() || "the company";
+          chrome.runtime.sendMessage({
+            type: "ANSWER_QUESTION",
+            payload: { question: ctx.slice(0, 300), company: companyName, role: p.target_role || "Data Analyst" }
+          }, (ansRes) => {
+            if (ansRes && ansRes.ok && ansRes.answer) {
+              setInputValue(ta, ansRes.answer);
+            }
+          });
+          break;
+        }
+      }
 
       if (filledCount > 0) {
         btn.innerText = `✓ FILLED (${filledCount})`;
       } else {
-        alert("⚠️ No matching fields found on this form. Try clicking inside an input or checking your profile fields.");
+        alert("⚠️ Form labels mismatch or custom portal. Try clicking inside an input.");
         btn.innerText = "⚡ AUTOFILL";
       }
       setTimeout(() => { btn.innerText = "⚡ AUTOFILL"; }, 3000);
@@ -165,21 +245,4 @@
       setTimeout(() => { btn.innerText = "📌 SAVE"; }, 2500);
     });
   });
-
-  // Auto-detect application confirmation page
-  const bodyText = document.body.innerText.toLowerCase();
-  if (
-    bodyText.includes("thank you for applying") ||
-    bodyText.includes("application submitted") ||
-    bodyText.includes("your application has been received")
-  ) {
-    chrome.runtime.sendMessage({
-      type: "MARK_APPLIED",
-      payload: {
-        url: window.location.href,
-        company: window.location.hostname.replace("www.", "").split(".")[0],
-        title: document.title
-      }
-    });
-  }
 })();
