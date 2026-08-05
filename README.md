@@ -106,7 +106,7 @@ whole console from bundled sample fixtures. Shareable as a live demo with zero d
 - **`email_triage.py`** — Email Triage Agent — self-contained skill module.
 - **`followup_agent.py`** — Follow-up Agent — nudges stale 'applied' cards with a drafted recruiter follow-up.
 - **`gemini_tts.py`** — Gemini text-to-speech — an optional natural voice for JARVIS.
-- **`get_gmail_token.py`** — One-time local script to mint a combined Gmail + Calendar OAuth refresh token.
+- **`get_gmail_token.py`** — get_gmail_token.py — Zero-dependency Google OAuth Refresh Token Generator for JARVIS.
 - **`google_docs_agent.py`** — Google Docs Agent — turns an ATS analysis into a tailored-résumé Google Doc.
 - **`interview_prep.py`** — Interview Prep Dock — surfaces upcoming interviews from Calendar and, on demand, drafts a.
 - **`interview_simulator.py`** — Interactive AI Mock Interviewer & Voice Coach (interview_simulator.py).
@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(script): Update get_gmail_token.py to run with zero external dependencies using Python standard library _(2026-08-05)_
 - feat(believer-ui): Add Entry Selector dropdown to Key Cards and 3 Lenses tabs for direct entry selection _(2026-08-05)_
 - fix(believer): Fix JSON response parsing in key-cards and perspective-lenses to eliminate repetitive template fallback behavior _(2026-08-05)_
 - feat(believer): Upgrade single-entry reflection prompt to deliver cognitive therapist reframing and locus-of-control insights _(2026-08-05)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - fix(db): Migrate profile storage to candidate_profile table with profile_key PRIMARY KEY to fix Turso column mismatch error _(2026-08-04)_
 - fix(cors): Add CORSMiddleware to FastAPI app for Chrome Extension cross-origin requests from docs.google.com and job portals _(2026-08-04)_
 - fix(extension-auth): Exempt /api/extension/ endpoints in _auth_gate middleware and send auth headers in JobsBoard _(2026-08-04)_
-- fix(profile): Fix candidate profile save query for Turso cloud DB compatibility and add safe JSON error handling _(2026-08-04)_
 <!-- /AUTO:changelog -->
 
 ---
