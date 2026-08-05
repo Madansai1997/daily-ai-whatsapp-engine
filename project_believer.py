@@ -287,14 +287,16 @@ async def reflect_on_entry(req: ReflectRequest):
     # Generate JARVIS reflection via LLM
     try:
         from V3_updates import call_llm
-        system_prompt = "You are JARVIS, Madan's loyal, sharp, composed personal AI assistant and confidant."
+        system_prompt = (
+            "You are JARVIS, Madan's expert personal cognitive therapist and executive confidant in Project Believer."
+        )
         user_prompt = (
             f"Madan has written a private reflection in his confidential diary (Project Believer).\n"
             f"Entry Mood: {mood_tag}\n"
             f"Entry Content: \"{entry_text}\"\n\n"
-            "Provide a composed, thoughtful, 2-3 sentence personal reflection back to Madan. "
-            "Be empathetic, witty, and grounded like movie-JARVIS—acknowledge his mindset, offer genuine perspective or encouragement, "
-            "and sign off smoothly (e.g., 'At your service, Sir'). Do not use generic bullet lists."
+            "Provide a deep, empathetic, 2-3 sentence cognitive psychological reflection back to Madan. "
+            "Acknowledge his emotional state, gently reframe any hidden stress or perfectionism into an empowering internal locus of control, "
+            "and offer genuine grounding clarity. Do NOT use generic bullet points or repetitive questions. Sign off with composed warmth."
         )
         reflection_text = await call_llm(system_prompt, user_prompt, max_tokens=200, temperature=0.7)
     except Exception as e:
