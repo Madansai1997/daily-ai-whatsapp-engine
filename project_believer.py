@@ -421,23 +421,67 @@ async def generate_key_cards(req: BelieverKeyCardsRequest):
         f"Journal Entry Content:\n\"{entry_text}\"\n"
     )
 
+def _extract_json_from_llm(raw_res: str) -> dict:
+    """Safely extracts and parses JSON from raw LLM responses (stripping markdown codeblocks if present)."""
+    cleaned = raw_res.strip()
+    if "```json" in cleaned:
+        cleaned = cleaned.split("```json", 1)[1].split("```", 1)[0].strip()
+    elif "```" in cleaned:
+        cleaned = cleaned.split("```", 1)[1].split("```", 1)[0].strip()
+        
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        json_str = cleaned[start:end+1]
+        return json.loads(json_str)
+    return json.loads(cleaned)
+
+
+@router.post("/key-cards")
+async def generate_key_cards(req: BelieverKeyCardsRequest):
+    """Generate structured presentation-ready Key Cards (Mindset Shift, Micro-Steps, Reflection Question, Affirmation)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT encrypted_verifier FROM believer_auth_meta WHERE key_name = 'auth_verifier'") as cursor:
+            row = await cursor.fetchone()
+            if not row or decrypt_text(row[0], req.passphrase) != VERIFY_MAGIC:
+                raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
+        
+        async with db.execute("SELECT encrypted_payload, mood_tag FROM believer_entries WHERE id = ?", (req.entry_id,)) as cursor:
+            entry_row = await cursor.fetchone()
+            if not entry_row:
+                raise HTTPException(status_code=404, detail="Entry not found")
+            entry_text = decrypt_text(entry_row[0], req.passphrase)
+            mood_tag = entry_row[1]
+
+    system_prompt = (
+        "You are Madan's elite personal growth analyst and AI mentor. You MUST analyze his specific journal entry with deep, tailored relevance. "
+        "STRICT RULE: Do NOT output markdown codeblocks. Output ONLY valid JSON matching this exact structure."
+    )
+    user_prompt = (
+        "Analyze Madan's private journal entry and return ONLY a strict JSON object with 4 Key Presentation Cards tailored 100% to his exact text:\n"
+        "{\n"
+        '  "mindset_shift": {"title": "Mindset Realignment", "content": "<deeply tailored perspective shift directly addressing his entry>"},\n'
+        '  "actionable_steps": {"title": "Immediate Micro-Steps", "steps": ["<specific actionable step 1 for his situation>", "<specific step 2>", "<specific step 3>"]},\n'
+        '  "reflection_question": {"title": "Deep Inquiry Today", "question": "<a probing question specifically referencing his entry words>"},\n'
+        '  "affirmation": {"title": "Empowering Grounding Statement", "statement": "<a strong, highly personal grounding statement tailored to his emotion>"}\n'
+        "}\n\n"
+        f"Journal Entry Mood: {mood_tag}\n"
+        f"Journal Entry Content:\n\"{entry_text}\"\n"
+    )
+
     try:
         from V3_updates import call_llm
-        raw_res = await call_llm(system_prompt, user_prompt, max_tokens=400, temperature=0.5)
-        import re
-        match = re.search(r"\{.*\}", raw_res, re.DOTALL)
-        cards_json = json.loads(match.group(0)) if match else {}
+        raw_res = await call_llm(system_prompt, user_prompt, max_tokens=450, temperature=0.5)
+        cards_json = _extract_json_from_llm(raw_res)
         if not cards_json or not isinstance(cards_json, dict) or "mindset_shift" not in cards_json:
             raise ValueError("Failed to parse structured JSON from LLM response")
     except Exception as e:
         print(f"⚠️ Project Believer LLM key-cards error: {e}")
-        # Context-aware fallback using Madan's entry snippet
-        snippet = entry_text[:60].strip()
         cards_json = {
-            "mindset_shift": {"title": "Mindset Realignment", "content": f"Reframe your thought around '{snippet}...': Focus entirely on your immediate sphere of execution today."},
-            "actionable_steps": {"title": "Immediate Micro-Steps", "steps": [f"Break down your thought '{snippet}' into 1 immediate task", "Dedicate 20 minutes of uninterrupted focus to it", "Document your progress before ending the day"]},
-            "reflection_question": {"title": "Deep Inquiry Today", "question": f"Regarding '{snippet}...', what is the single most valuable outcome you can control today?"},
-            "affirmation": {"title": "Empowering Grounding Statement", "statement": f"I own my trajectory. My reflection on '{snippet}' is a stepping stone to mastery."}
+            "mindset_shift": {"title": "Mindset Realignment", "content": f"Acknowledge the shift in your life cleanly. Direct 100% of your current focus toward your immediate sphere of execution and personal growth today."},
+            "actionable_steps": {"title": "Immediate Micro-Steps", "steps": ["Define your #1 priority task for today", "Dedicate 30 minutes of uninterrupted focus to your core goal", "Acknowledge your progress before ending the day"]},
+            "reflection_question": {"title": "Deep Inquiry Today", "question": "What is the single most valuable outcome you have 100% control over today?"},
+            "affirmation": {"title": "Empowering Grounding Statement", "statement": "I own my trajectory and focus my energy on what I build today."}
         }
 
     return {"status": "ok", "key_cards": cards_json}
@@ -460,8 +504,7 @@ async def perspective_shift_simulator(req: BelieverPerspectiveRequest):
 
     system_prompt = (
         "You are Madan's personal wisdom mentor evaluating his journal entry through 3 distinct perspective lenses. "
-        "STRICT RULE: Do NOT output generic textbook definitions. You MUST directly analyze the SPECIFIC situation, words, and feelings Madan wrote. "
-        "Return STRICT JSON only."
+        "STRICT RULE: Do NOT output markdown codeblocks. Output ONLY valid JSON matching this exact structure."
     )
     user_prompt = (
         "Evaluate Madan's entry through 3 highly specific, tailored perspective lenses. Return STRICT JSON:\n"
@@ -476,18 +519,15 @@ async def perspective_shift_simulator(req: BelieverPerspectiveRequest):
     try:
         from V3_updates import call_llm
         raw_res = await call_llm(system_prompt, user_prompt, max_tokens=450, temperature=0.6)
-        import re
-        match = re.search(r"\{.*\}", raw_res, re.DOTALL)
-        lenses = json.loads(match.group(0)) if match else {}
+        lenses = _extract_json_from_llm(raw_res)
         if not lenses or not isinstance(lenses, dict) or "stoic_lens" not in lenses:
             raise ValueError("Failed to parse structured JSON from LLM response")
     except Exception as e:
         print(f"⚠️ Project Believer LLM perspective error: {e}")
-        snippet = entry_text[:60].strip()
         lenses = {
-            "stoic_lens": f"Regarding '{snippet}...': Separate what is strictly in your power from what is external. Focus 100% of your energy on your own choice.",
-            "visionary_lens": f"Deconstruct '{snippet}...': Identify the core input variable causing friction and run a 15-minute experiment to test your hypothesis.",
-            "compassionate_lens": f"Your feelings about '{snippet}' are completely valid. Be patient with yourself—every honest reflection is proof of your growth."
+            "stoic_lens": "Separate what is strictly in your power from what is external. Release second-party behavior and focus 100% of your energy on your own choices.",
+            "visionary_lens": "Identify the core input variable causing friction or emotion, and run a focused experiment to optimize your output today.",
+            "compassionate_lens": "Your feelings are completely valid. Be patient with yourself—every honest reflection is proof of your self-awareness and growth."
         }
 
     return {"status": "ok", "lenses": lenses}

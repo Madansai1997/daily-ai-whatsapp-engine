@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(believer): Fix JSON response parsing in key-cards and perspective-lenses to eliminate repetitive template fallback behavior _(2026-08-05)_
 - feat(believer): Upgrade single-entry reflection prompt to deliver cognitive therapist reframing and locus-of-control insights _(2026-08-05)_
 - feat(believer): Upgrade Project Believer LLM prompt to operate as a world-class cognitive therapist and eliminate repetitive question loops _(2026-08-05)_
 - fix(db): Remove AUTOINCREMENT from claude_code_live_session and pending_claude_code_task for Turso cloud HTTP API compatibility _(2026-08-04)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - fix(extension-auth): Exempt /api/extension/ endpoints in _auth_gate middleware and send auth headers in JobsBoard _(2026-08-04)_
 - fix(profile): Fix candidate profile save query for Turso cloud DB compatibility and add safe JSON error handling _(2026-08-04)_
 - fix(console): Add robust SPA router fallback for /console and sub-routes without 404/307 redirects _(2026-08-04)_
-- feat(profile): Add Candidate Master Profile Studio & DB persistence for Chrome Extension autofill preferences _(2026-08-04)_
 <!-- /AUTO:changelog -->
 
 ---
