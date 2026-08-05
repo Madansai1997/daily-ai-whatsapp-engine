@@ -46,6 +46,7 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
   const [activePrompt, setActivePrompt] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [reflectingId, setReflectingId] = useState<number | null>(null);
+  const [selectedEntryId, setSelectedEntryId] = useState<number | null>(null);
 
   // Active Main Studio Tab
   const [activeTab, setActiveTab] = useState<"journal" | "chat" | "cards" | "lenses" | "capsules">("journal");
@@ -258,6 +259,7 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
   // Generate Key Cards Function
   const handleGenerateKeyCards = async (entryId: number) => {
     if (!activeKey) return;
+    setSelectedEntryId(entryId);
     setCardsLoading(true);
     try {
       const res = await fetch("/api/believer/key-cards", {
@@ -280,6 +282,7 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
   // Generate Perspective Lenses
   const handleGeneratePerspective = async (entryId: number) => {
     if (!activeKey) return;
+    setSelectedEntryId(entryId);
     setPerspectiveLoading(true);
     try {
       const res = await fetch("/api/believer/perspective", {
@@ -644,7 +647,36 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
                 {/* TAB 3: KEY PRESENTATION CARDS */}
                 {activeTab === "cards" && (
                   <div className="space-y-4">
-                    {keyCards ? (
+                    {/* Entry Selector Header */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between p-3.5 bg-zinc-900 border border-zinc-800 rounded-xl gap-3">
+                      <span className="text-xs font-semibold text-amber-400 flex items-center gap-1.5 font-mono">
+                        <Layers className="w-4 h-4" /> Select Entry to Analyze:
+                      </span>
+                      <select
+                        value={selectedEntryId || ""}
+                        onChange={(e) => {
+                          const id = Number(e.target.value);
+                          if (id) {
+                            setSelectedEntryId(id);
+                            handleGenerateKeyCards(id);
+                          }
+                        }}
+                        className="px-3 py-1.5 bg-zinc-950 border border-zinc-700 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-amber-500 cursor-pointer"
+                      >
+                        <option value="">-- Choose Entry from Vault ({entries.length} available) --</option>
+                        {entries.map((entry) => (
+                          <option key={entry.id} value={entry.id}>
+                            {entry.created_at?.slice(0, 10)}: "{entry.content.slice(0, 45)}..." ({entry.mood_tag})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {cardsLoading ? (
+                      <div className="py-12 text-center text-xs text-amber-400 animate-pulse">
+                        Generating Key Cards presentation deck...
+                      </div>
+                    ) : keyCards ? (
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div className="p-4 bg-zinc-900 border border-amber-500/30 rounded-xl space-y-2">
                           <h4 className="text-xs font-bold text-amber-400 uppercase">💡 {keyCards.mindset_shift?.title}</h4>
@@ -666,8 +698,8 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
                         </div>
                       </div>
                     ) : (
-                      <p className="text-xs text-zinc-500 text-center py-12">
-                        Select any entry in the Journal Vault and click "Generate Key Cards" to view your presentation deck.
+                      <p className="text-xs text-zinc-500 text-center py-8">
+                        Use the dropdown above to select any entry from your Journal Vault to generate presentation key cards.
                       </p>
                     )}
                   </div>
@@ -676,7 +708,36 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
                 {/* TAB 4: 3 LENSES PERSPECTIVE */}
                 {activeTab === "lenses" && (
                   <div className="space-y-4">
-                    {perspectiveLenses ? (
+                    {/* Entry Selector Header */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between p-3.5 bg-zinc-900 border border-zinc-800 rounded-xl gap-3">
+                      <span className="text-xs font-semibold text-purple-400 flex items-center gap-1.5 font-mono">
+                        <Compass className="w-4 h-4" /> Select Entry to Analyze:
+                      </span>
+                      <select
+                        value={selectedEntryId || ""}
+                        onChange={(e) => {
+                          const id = Number(e.target.value);
+                          if (id) {
+                            setSelectedEntryId(id);
+                            handleGeneratePerspective(id);
+                          }
+                        }}
+                        className="px-3 py-1.5 bg-zinc-950 border border-zinc-700 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-purple-500 cursor-pointer"
+                      >
+                        <option value="">-- Choose Entry from Vault ({entries.length} available) --</option>
+                        {entries.map((entry) => (
+                          <option key={entry.id} value={entry.id}>
+                            {entry.created_at?.slice(0, 10)}: "{entry.content.slice(0, 45)}..." ({entry.mood_tag})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {perspectiveLoading ? (
+                      <div className="py-12 text-center text-xs text-purple-400 animate-pulse">
+                        Analyzing 3 Perspective Lenses (Stoic, Visionary, Mentor)...
+                      </div>
+                    ) : perspectiveLenses ? (
                       <div className="space-y-3">
                         <div className="p-4 bg-zinc-900 border border-amber-500/30 rounded-xl space-y-1">
                           <h4 className="text-xs font-bold text-amber-400">🏛️ Stoic Wisdom Lens</h4>
@@ -692,8 +753,8 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
                         </div>
                       </div>
                     ) : (
-                      <p className="text-xs text-zinc-500 text-center py-12">
-                        Select an entry and click "3 Lenses Perspective" to view Stoic, Visionary, and Mentor framing.
+                      <p className="text-xs text-zinc-500 text-center py-8">
+                        Use the dropdown above to select any entry from your Journal Vault to view 3-lenses perspective.
                       </p>
                     )}
                   </div>
