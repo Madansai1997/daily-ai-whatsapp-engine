@@ -1811,8 +1811,16 @@ function JobsBoardInner({ activeScreen, onNavigate, intent, onIntentHandled }: J
   const runAutoApply = async (id: number) => {
     try {
       setLoading(true);
-      const res = await fetch(`/api/applications/${id}/auto-apply`, { method: "POST" });
-      const data = await res.json();
+      const tok = getToken();
+      const res = await fetch(`/api/applications/${id}/auto-apply`, {
+        method: "POST",
+        headers: {
+          ...(tok ? { Authorization: `Bearer ${tok}`, "X-Jarvis-Token": tok } : {}),
+        },
+      });
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { throw new Error(text || `HTTP ${res.status}`); }
       if (!res.ok || !data?.ok) throw new Error(data?.error || `HTTP ${res.status}`);
       alert(`🚀 ${data.message}`);
       await loadApplications();
