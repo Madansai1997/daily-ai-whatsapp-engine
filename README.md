@@ -150,6 +150,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(db): Replace all ON CONFLICT queries in resume_ats_agent with atomic DELETE + INSERT for 100% Turso Cloud DB compatibility _(2026-08-05)_
 - fix(auto-apply): Attach auth headers to auto-apply fetch requests and wrap auto-apply handler in try-except returning JSON errors _(2026-08-05)_
 - fix(script): Update get_gmail_token.py to run with zero external dependencies using Python standard library _(2026-08-05)_
 - feat(believer-ui): Add Entry Selector dropdown to Key Cards and 3 Lenses tabs for direct entry selection _(2026-08-05)_
@@ -161,7 +162,6 @@ npm install && npm run build     # served by the engine at /console
 - fix(chrome-extension): Add strict label exclusions (no email/location overlap), radio option auto-clicker, and AI open-ended question auto-answering _(2026-08-04)_
 - fix(chrome-extension): Upgrade form field matching with 6-level ancestor scanning and native React/Google Forms property setter overrides _(2026-08-04)_
 - fix(db): Migrate profile storage to candidate_profile table with profile_key PRIMARY KEY to fix Turso column mismatch error _(2026-08-04)_
-- fix(cors): Add CORSMiddleware to FastAPI app for Chrome Extension cross-origin requests from docs.google.com and job portals _(2026-08-04)_
 <!-- /AUTO:changelog -->
 
 ---

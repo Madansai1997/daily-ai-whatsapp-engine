@@ -172,10 +172,11 @@ def init_resume_ats_tables():
 async def save_resume_template(content: str, domain: str = DEFAULT_DOMAIN):
     now = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM user_resume_templates WHERE domain = ?", (domain,))
         await db.execute(
-            """INSERT INTO user_resume_templates (domain, content, updated_at) VALUES (?, ?, ?)
-               ON CONFLICT(domain) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at""",
-            (domain, content, now))
+            "INSERT INTO user_resume_templates (domain, content, updated_at) VALUES (?, ?, ?)",
+            (domain, content, now)
+        )
         await db.commit()
 
 
@@ -347,19 +348,13 @@ async def analyze(job: dict = None, call_llm_fn = None, domain: str = DEFAULT_DO
     ghost_reasons = ghost_eval.get("reasons", [])
     now = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM ats_analysis_cache WHERE job_ref = ?", (job_ref,))
         await db.execute(
             """INSERT INTO ats_analysis_cache
                (job_ref, job_title, company, location, ats_score, keyword_matrix,
                 star_xyz_breakdown, downloadable_txt_content, viewed, created_at, domain_mismatch,
                 ghost_job_risk, ghost_job_reasons)
-               VALUES (?,?,?,?,?,?,?,?,0,?,?,?,?)
-               ON CONFLICT(job_ref) DO UPDATE SET
-                 job_title=excluded.job_title, company=excluded.company, location=excluded.location,
-                 ats_score=excluded.ats_score, keyword_matrix=excluded.keyword_matrix,
-                 star_xyz_breakdown=excluded.star_xyz_breakdown,
-                 downloadable_txt_content=excluded.downloadable_txt_content, viewed=0,
-                 created_at=excluded.created_at, domain_mismatch=excluded.domain_mismatch,
-                 ghost_job_risk=excluded.ghost_job_risk, ghost_job_reasons=excluded.ghost_job_reasons""",
+               VALUES (?,?,?,?,?,?,?,?,0,?,?,?,?)""",
             (job_ref, job.get("title"), job.get("company"), job.get("location"),
              int(analysis.get("ats_score", 0)), json.dumps(analysis.get("keyword_matrix", {})),
              json.dumps(analysis.get("star_xyz_breakdown", [])), txt, now,
@@ -467,9 +462,9 @@ async def recruiter_review(job: dict, call_llm_fn, domain: str = DEFAULT_DOMAIN)
     now = datetime.now(timezone.utc).isoformat()
     review["created_at"] = now
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM recruiter_review_cache WHERE job_ref = ?", (job_ref,))
         await db.execute(
-            """INSERT INTO recruiter_review_cache (job_ref, data, created_at) VALUES (?,?,?)
-               ON CONFLICT(job_ref) DO UPDATE SET data=excluded.data, created_at=excluded.created_at""",
+            "INSERT INTO recruiter_review_cache (job_ref, data, created_at) VALUES (?,?,?)",
             (job_ref, json.dumps(review), now))
         await db.commit()
     return review
@@ -965,11 +960,11 @@ import base64 as _b64
 async def save_master_docx(filename: str, data: bytes):
     now = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM resume_docx WHERE id = 1")
         await db.execute(
-            """INSERT INTO resume_docx (id, filename, data_b64, updated_at) VALUES (1, ?, ?, ?)
-               ON CONFLICT(id) DO UPDATE SET filename=excluded.filename,
-                 data_b64=excluded.data_b64, updated_at=excluded.updated_at""",
-            (filename, _b64.b64encode(data).decode(), now))
+            "INSERT INTO resume_docx (id, filename, data_b64, updated_at) VALUES (1, ?, ?, ?)",
+            (filename, _b64.b64encode(data).decode(), now)
+        )
         await db.commit()
 
 
@@ -991,12 +986,13 @@ async def has_master_docx() -> bool:
 
 async def save_tailored_docx(job_ref: str, filename: str, data: bytes):
     now = datetime.now(timezone.utc).isoformat()
+    ref_str = str(job_ref)
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM tailored_docx WHERE job_ref = ?", (ref_str,))
         await db.execute(
-            """INSERT INTO tailored_docx (job_ref, filename, data_b64, created_at) VALUES (?, ?, ?, ?)
-               ON CONFLICT(job_ref) DO UPDATE SET filename=excluded.filename,
-                 data_b64=excluded.data_b64, created_at=excluded.created_at""",
-            (str(job_ref), filename, _b64.b64encode(data).decode(), now))
+            "INSERT INTO tailored_docx (job_ref, filename, data_b64, created_at) VALUES (?, ?, ?, ?)",
+            (ref_str, filename, _b64.b64encode(data).decode(), now)
+        )
         await db.commit()
 
 
@@ -1067,14 +1063,10 @@ async def generate_job_prep(job: dict, call_llm_fn, domain: str = DEFAULT_DOMAIN
     star_stories = prep.get("star_stories", [])
 
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM job_prep_cache WHERE job_ref = ?", (job_ref,))
         await db.execute(
             """INSERT INTO job_prep_cache (job_ref, outreach_linkedin, outreach_email, star_stories, created_at)
-               VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(job_ref) DO UPDATE SET
-                 outreach_linkedin=excluded.outreach_linkedin,
-                 outreach_email=excluded.outreach_email,
-                 star_stories=excluded.star_stories,
-                 created_at=excluded.created_at""",
+               VALUES (?, ?, ?, ?, ?)""",
             (job_ref, outreach_linkedin, outreach_email, json.dumps(star_stories), now)
         )
         await db.commit()
