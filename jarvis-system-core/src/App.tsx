@@ -20,10 +20,16 @@ import VoiceDock from "./components/VoiceDock";
 import { useVoiceAgent } from "./lib/voiceAgent";
 import { authStatus, setUnauthHandler, isDemo } from "./lib/auth";
 import ProjectBelieverModal from "./components/ProjectBelieverModal";
+import WealthPortal from "./components/WealthPortal";
 import { AnimatePresence, motion } from "motion/react";
 import { LayoutGrid, Bot, Lock, Briefcase, BarChart3, Wallet, Compass, FileText, Table2 } from "lucide-react";
 
 export default function App() {
+  const isWealthRoute = window.location.pathname.startsWith("/wealth-portal") || window.location.search.includes("portal=wealth");
+  if (isWealthRoute) {
+    return <WealthPortal />;
+  }
+
   const [activeScreen, setActiveScreen] = useState<ScreenId>(ScreenId.Core);
   const [prevScreen, setPrevScreen] = useState<ScreenId>(ScreenId.Core);
   // Navigation intent: lets one screen (e.g. Home cockpit) deep-link into a specific tool/modal

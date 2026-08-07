@@ -133,6 +133,7 @@ whole console from bundled sample fixtures. Shareable as a live demo with zero d
 - **`test_interview_simulator.py`** — Local test suite for interview_simulator.py (SAFE_MODE=1).
 - **`test_modular_routes.py`** — Comprehensive API Route & Mock Interview Test (SAFE_MODE=1).
 - **`trend_lab_agent.py`** — Trend Lab Agent — weekly app-idea discovery from Reddit + YouTube (free-tier only).
+- **`wealth_scout_agent.py`** — wealth_scout_agent.py — Specialized India & Global Wealth Management Job Scout Module.
 - **`weather_agent.py`** — Weather Agent — self-contained skill module.
 - **`workspace_notes.py`** — Workspace Notes — a small DB-backed markdown scratchpad for the console.
 <!-- /AUTO:modules -->
@@ -150,6 +151,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- feat(wealth-portal): Add Client Wealth Management Opportunities Portal with passcode security gate and isolated DB namespace _(2026-08-07)_
 - fix(db): Replace all ON CONFLICT queries in resume_ats_agent with atomic DELETE + INSERT for 100% Turso Cloud DB compatibility _(2026-08-05)_
 - fix(auto-apply): Attach auth headers to auto-apply fetch requests and wrap auto-apply handler in try-except returning JSON errors _(2026-08-05)_
 - fix(script): Update get_gmail_token.py to run with zero external dependencies using Python standard library _(2026-08-05)_
@@ -161,10 +163,9 @@ npm install && npm run build     # served by the engine at /console
 - feat(ai-autofill): Add two-stage AI Form Schema Classifier pipeline for 100% error-free form filling on any web element or portal _(2026-08-04)_
 - fix(chrome-extension): Add strict label exclusions (no email/location overlap), radio option auto-clicker, and AI open-ended question auto-answering _(2026-08-04)_
 - fix(chrome-extension): Upgrade form field matching with 6-level ancestor scanning and native React/Google Forms property setter overrides _(2026-08-04)_
-- fix(db): Migrate profile storage to candidate_profile table with profile_key PRIMARY KEY to fix Turso column mismatch error _(2026-08-04)_
 <!-- /AUTO:changelog -->
 
 ---
 
-_Last updated: 2026-08-05 · this README's inventory and changelog are auto-maintained by
+_Last updated: 2026-08-07 · this README's inventory and changelog are auto-maintained by
 `scripts/gen_readme.py` on every commit._

@@ -1204,6 +1204,7 @@ from routers.influencers_trends import router as influencers_router
 from routers.rag import router as rag_router, init_rag_router_deps
 from routers.chat_voice_bills import router as chat_bills_router
 from routers.extension import router as extension_router, set_extension_deps
+from routers.wealth_management import router as wealth_router
 
 app.include_router(auth_router)
 app.include_router(jobs_router)
@@ -1214,6 +1215,7 @@ app.include_router(influencers_router)
 app.include_router(rag_router)
 app.include_router(chat_bills_router)
 app.include_router(extension_router)
+app.include_router(wealth_router)
 
 # Initialize extension router dependencies
 set_extension_deps(call_llm)
@@ -1268,8 +1270,8 @@ def _verify_token(token: str) -> bool:
 async def _auth_gate(request: Request, call_next):
     if AUTH_REQUIRED:
         path = request.url.path
-        # Allow file download and extension endpoints to be accessible via direct navigation / Chrome Extension
-        if path.endswith("/tailored-docx") or path.endswith("/download") or path.endswith("/gdoc") or path.startswith("/api/extension/"):
+        # Allow file download, extension, and client wealth portal endpoints to be accessible
+        if path.endswith("/tailored-docx") or path.endswith("/download") or path.endswith("/gdoc") or path.startswith("/api/extension/") or path.startswith("/api/wealth/") or path == "/wealth-portal":
             return await call_next(request)
 
         if any(path.startswith(p) for p in _PROTECTED_PREFIXES):
