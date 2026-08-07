@@ -152,6 +152,80 @@ async def delete_wealth_application(app_id: int):
     return JSONResponse({"ok": True, "message": "Card deleted"})
 
 
+@router.post("/applications/{app_id}/jd")
+async def update_wealth_application_jd(app_id: int, req: Request):
+    await init_wealth_db_tables()
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    description = body.get("description", "").strip()
+    if not description:
+        return JSONResponse({"ok": False, "error": "Description is required"}, status_code=400)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE client_wealth_applications SET description = ? WHERE id = ?", (description, app_id))
+        await db.commit()
+
+    return JSONResponse({"ok": True, "message": "Job description updated successfully"})
+
+
+@router.post("/applications/{app_id}/prep")
+async def generate_client_wealth_prep_kit(app_id: int):
+    await init_wealth_db_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM client_wealth_applications WHERE id = ?", (app_id,))
+        app_row = await cur.fetchone()
+        if not app_row:
+            return JSONResponse({"ok": False, "error": "Application not found"}, status_code=404)
+        app_dict = dict(app_row)
+
+        cur = await db.execute("SELECT text_content FROM client_wealth_resumes WHERE id = 1")
+        res_row = await cur.fetchone()
+        resume_text = res_row[0] if res_row else ""
+
+    if not resume_text:
+        return JSONResponse({"ok": False, "error": "Please upload client master .docx resume first!"}, status_code=400)
+
+    from V3_updates import call_llm
+    prompt = f"""You are a master career coach and private banking recruiter in India.
+Candidate Master Resume:
+{resume_text[:3500]}
+
+Target Job: {app_dict.get('title')} @ {app_dict.get('company')} ({app_dict.get('location')})
+Job Description: {app_dict.get('description', '')}
+
+Generate a strict JSON object with:
+1. "outreach_linkedin": A punchy, personalized LinkedIn note (<300 chars) for a Wealth / Private Banking Lead.
+2. "outreach_email": Cold email template (Subject + Body) for hiring managers / wealth heads.
+3. "star_stories": Array of 3 behavioral interview questions & proposed STAR answers (Question, Situation, Task, Action, Result) drawn from candidate's actual background.
+
+Return JSON ONLY.
+"""
+
+    try:
+        raw_res = await call_llm("You return strict JSON for career prep kits.", prompt, max_tokens=1800, temperature=0.3)
+        from project_believer import _extract_json_from_llm
+        prep = _extract_json_from_llm(raw_res)
+    except Exception as e:
+        prep = {
+            "outreach_linkedin": f"Hi, I noticed the {app_dict.get('title')} role at {app_dict.get('company')}. With 5+ yrs in Private Banking & UHNW advisory, I'd love to connect!",
+            "outreach_email": f"Subject: {app_dict.get('title')} — Private Banking Leadership\n\nDear Hiring Manager,\n\nI am writing to express my strong interest in the {app_dict.get('title')} position at {app_dict.get('company')}...",
+            "star_stories": [
+                {
+                    "question": "Tell me about a time you grew AUM in a volatile market.",
+                    "situation": "Market downturn lowered client portfolio values by 12%.",
+                    "task": "Re-assure HNI clients and capture new wallet share.",
+                    "action": "Rebalanced into structured yield notes and conducted 1-on-1 portfolio reviews.",
+                    "result": "Retained 100% clients and brought in ₹35 Cr fresh AUM."
+                }
+            ]
+        }
+
+    return JSONResponse({"ok": True, "prep": prep})
+
+
 @router.post("/scout")
 async def run_wealth_scout_api(req: Request):
     try:
