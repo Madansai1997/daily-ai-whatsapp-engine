@@ -1323,6 +1323,8 @@ if os.path.isdir(_CONSOLE_DIST):
     from fastapi.responses import FileResponse
     @app.get("/console")
     @app.get("/console/{full_path:path}")
+    @app.get("/wealth-portal")
+    @app.get("/wealth-portal/{full_path:path}")
     async def serve_console_spa(full_path: str = ""):
         if full_path:
             asset_path = os.path.join(_CONSOLE_DIST, full_path)
