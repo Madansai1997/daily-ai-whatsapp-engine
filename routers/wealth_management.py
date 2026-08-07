@@ -33,10 +33,15 @@ async def init_wealth_db_tables():
                 description TEXT,
                 status TEXT DEFAULT 'interested',
                 job_key TEXT,
+                url TEXT,
                 created_at TEXT,
                 applied_at TEXT
             )
         """)
+        try:
+            await db.execute("ALTER TABLE client_wealth_applications ADD COLUMN url TEXT")
+        except Exception:
+            pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS client_wealth_resumes (
                 id INTEGER PRIMARY KEY,
@@ -105,10 +110,10 @@ async def add_wealth_application(req: Request):
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("""
             INSERT INTO client_wealth_applications
-            (title, company, location, salary, description, status, job_key, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (title, company, location, salary, description, status, job_key, url, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (title, company, data.get("location", "India"), data.get("salary", "Competitive"),
-              data.get("description", ""), data.get("status", "interested"), job_key, now_iso))
+              data.get("description", ""), data.get("status", "interested"), job_key, data.get("url", ""), now_iso))
         app_id = cur.lastrowid
         await db.commit()
 

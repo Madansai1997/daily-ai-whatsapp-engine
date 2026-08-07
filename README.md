@@ -151,6 +151,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- feat(wealth-portal): Add direct job posting URL links to cards in Client Wealth Management Portal _(2026-08-07)_
 - fix(routing): Add @app.get('/wealth-portal') SPA fallback route in V3_updates.py so direct navigation loads WealthPortal UI _(2026-08-07)_
 - feat(wealth-portal): Add Client Wealth Management Opportunities Portal with passcode security gate and isolated DB namespace _(2026-08-07)_
 - fix(db): Replace all ON CONFLICT queries in resume_ats_agent with atomic DELETE + INSERT for 100% Turso Cloud DB compatibility _(2026-08-05)_
@@ -162,7 +163,6 @@ npm install && npm run build     # served by the engine at /console
 - feat(believer): Upgrade Project Believer LLM prompt to operate as a world-class cognitive therapist and eliminate repetitive question loops _(2026-08-05)_
 - fix(db): Remove AUTOINCREMENT from claude_code_live_session and pending_claude_code_task for Turso cloud HTTP API compatibility _(2026-08-04)_
 - feat(ai-autofill): Add two-stage AI Form Schema Classifier pipeline for 100% error-free form filling on any web element or portal _(2026-08-04)_
-- fix(chrome-extension): Add strict label exclusions (no email/location overlap), radio option auto-clicker, and AI open-ended question auto-answering _(2026-08-04)_
 <!-- /AUTO:changelog -->
 
 ---

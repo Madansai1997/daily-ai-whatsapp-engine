@@ -18,7 +18,8 @@ import {
   X,
   RefreshCw,
   Trash2,
-  ChevronRight
+  ChevronRight,
+  ExternalLink
 } from "lucide-react";
 
 interface ApplicationCard {
@@ -30,6 +31,7 @@ interface ApplicationCard {
   description: string;
   status: "interested" | "applied" | "interviewing" | "offer" | "accepted" | "rejected";
   job_key: string;
+  url?: string;
   created_at: string;
   applied_at?: string;
 }
@@ -165,6 +167,7 @@ export default function WealthPortal() {
               location: j.location,
               salary: j.salary,
               description: j.description,
+              url: j.url,
               status: "interested",
               job_key: j.job_key
             }),
@@ -401,6 +404,19 @@ export default function WealthPortal() {
                       )}
 
                       <p className="text-[11px] text-zinc-400 line-clamp-2 leading-relaxed">{card.description}</p>
+
+                      {card.url && (
+                        <div className="pt-1">
+                          <a
+                            href={card.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-cyan-400 hover:text-cyan-300 hover:underline"
+                          >
+                            <ExternalLink className="w-3 h-3" /> View Job Posting ↗
+                          </a>
+                        </div>
+                      )}
 
                       {/* CARD ACTIONS */}
                       <div className="pt-2 border-t border-zinc-900 flex flex-wrap items-center justify-between gap-1.5">
