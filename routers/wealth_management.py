@@ -13,7 +13,7 @@ from typing import Optional
 from datetime import datetime, timezone
 from fastapi import APIRouter, Request, Response, UploadFile, File, Form
 from fastapi.responses import JSONResponse
-import aiosqlite
+import db_compat as aiosqlite
 
 DB_PATH = os.getenv("DB_PATH", "agent_memory.db")
 WEALTH_PASSCODE = os.getenv("WEALTH_CLIENT_PASSCODE", "WEALTH2026")
@@ -25,7 +25,7 @@ async def init_wealth_db_tables():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS client_wealth_applications (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id INTEGER PRIMARY KEY,
                 title TEXT NOT NULL,
                 company TEXT NOT NULL,
                 location TEXT,

@@ -151,6 +151,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(db): Migrate routers/wealth_management.py and wealth_scout_agent.py to db_compat for permanent Turso cloud DB persistence across page reloads and restarts _(2026-08-09)_
 - fix(wealth-scout): Add strict deduplication against existing board cards and show 'No more new jobs' notice when all opportunities are already added _(2026-08-09)_
 - feat(wealth-portal): Integrate full Kanban feature suite (+Add Job modal, Slide-over Drawer, Outreach & STAR Interview Kit, search filter) into Client Wealth Portal _(2026-08-07)_
 - feat(wealth-portal): Add direct job posting URL links to cards in Client Wealth Management Portal _(2026-08-07)_
@@ -162,7 +163,6 @@ npm install && npm run build     # served by the engine at /console
 - feat(believer-ui): Add Entry Selector dropdown to Key Cards and 3 Lenses tabs for direct entry selection _(2026-08-05)_
 - fix(believer): Fix JSON response parsing in key-cards and perspective-lenses to eliminate repetitive template fallback behavior _(2026-08-05)_
 - feat(believer): Upgrade single-entry reflection prompt to deliver cognitive therapist reframing and locus-of-control insights _(2026-08-05)_
-- feat(believer): Upgrade Project Believer LLM prompt to operate as a world-class cognitive therapist and eliminate repetitive question loops _(2026-08-05)_
 <!-- /AUTO:changelog -->
 
 ---

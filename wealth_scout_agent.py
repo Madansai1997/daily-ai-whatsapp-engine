@@ -11,7 +11,7 @@ import asyncio
 import urllib.request
 import urllib.parse
 from datetime import datetime, timezone
-import aiosqlite
+import db_compat as aiosqlite
 
 DB_PATH = os.getenv("DB_PATH", "agent_memory.db")
 
