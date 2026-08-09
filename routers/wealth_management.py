@@ -42,6 +42,18 @@ async def init_wealth_db_tables():
             await db.execute("ALTER TABLE client_wealth_applications ADD COLUMN url TEXT")
         except Exception:
             pass
+        # Clean up any existing duplicate cards
+        try:
+            await db.execute("""
+                DELETE FROM client_wealth_applications
+                WHERE id NOT IN (
+                    SELECT MIN(id)
+                    FROM client_wealth_applications
+                    GROUP BY LOWER(TRIM(company)), LOWER(TRIM(title))
+                )
+            """)
+        except Exception:
+            pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS client_wealth_resumes (
                 id INTEGER PRIMARY KEY,
@@ -105,15 +117,26 @@ async def add_wealth_application(req: Request):
         return JSONResponse({"ok": False, "error": "Title and company are required"}, status_code=400)
 
     now_iso = datetime.now(timezone.utc).isoformat()
-    job_key = data.get("job_key") or f"wealth:{int(datetime.now(timezone.utc).timestamp())}"
+    job_key = data.get("job_key", "").strip()
 
     async with aiosqlite.connect(DB_PATH) as db:
+        # Check for existing duplicate
+        if job_key:
+            cur = await db.execute("SELECT id FROM client_wealth_applications WHERE job_key = ?", (job_key,))
+            if await cur.fetchone():
+                return JSONResponse({"ok": True, "message": "Job already exists on board", "already_exists": True})
+
+        cur = await db.execute("SELECT id FROM client_wealth_applications WHERE LOWER(TRIM(company)) = ? AND LOWER(TRIM(title)) = ?",
+                               (company.lower(), title.lower()))
+        if await cur.fetchone():
+            return JSONResponse({"ok": True, "message": "Job already exists on board", "already_exists": True})
+
         cur = await db.execute("""
             INSERT INTO client_wealth_applications
             (title, company, location, salary, description, status, job_key, url, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (title, company, data.get("location", "India"), data.get("salary", "Competitive"),
-              data.get("description", ""), data.get("status", "interested"), job_key, data.get("url", ""), now_iso))
+              data.get("description", ""), data.get("status", "interested"), job_key or f"wealth:{int(datetime.now(timezone.utc).timestamp())}", data.get("url", ""), now_iso))
         app_id = cur.lastrowid
         await db.commit()
 
@@ -228,6 +251,7 @@ Return JSON ONLY.
 
 @router.post("/scout")
 async def run_wealth_scout_api(req: Request):
+    await init_wealth_db_tables()
     try:
         body = await req.json()
     except Exception:
@@ -237,7 +261,51 @@ async def run_wealth_scout_api(req: Request):
 
     from wealth_scout_agent import search_wealth_opportunities
     jobs = await search_wealth_opportunities(role, location)
-    return JSONResponse({"ok": True, "jobs": jobs})
+
+    # Atomically check DB and insert only truly new opportunities
+    new_added = 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT job_key, LOWER(TRIM(company)), LOWER(TRIM(title)) FROM client_wealth_applications")
+        existing_rows = await cur.fetchall()
+        existing_keys = {r[0] for r in existing_rows if r[0]}
+        existing_combos = {(r[1], r[2]) for r in existing_rows if r[1] and r[2]}
+
+        for j in jobs:
+            j_key = (j.get("job_key") or "").strip()
+            j_comp = (j.get("company") or "").strip().lower()
+            j_title = (j.get("title") or "").strip().lower()
+
+            is_duplicate = (j_key and j_key in existing_keys) or ((j_comp, j_title) in existing_combos)
+            if not is_duplicate:
+                await db.execute("""
+                    INSERT INTO client_wealth_applications
+                    (title, company, location, salary, description, status, job_key, url, created_at)
+                    VALUES (?, ?, ?, ?, ?, 'interested', ?, ?, ?)
+                """, (
+                    j.get("title", "").strip(),
+                    j.get("company", "").strip(),
+                    j.get("location", "India").strip(),
+                    j.get("salary", "Competitive"),
+                    j.get("description", ""),
+                    j_key or f"wealth:{int(datetime.now(timezone.utc).timestamp())}",
+                    j.get("url", ""),
+                    now_iso
+                ))
+                new_added += 1
+                if j_key:
+                    existing_keys.add(j_key)
+                existing_combos.add((j_comp, j_title))
+
+        await db.commit()
+
+    return JSONResponse({
+        "ok": True,
+        "new_added": new_added,
+        "total_scouted": len(jobs),
+        "message": f"Found and added {new_added} new opportunities." if new_added > 0 else "No new jobs found. All matching opportunities are already on your board!"
+    })
 
 
 @router.post("/resume/upload")

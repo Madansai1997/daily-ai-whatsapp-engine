@@ -174,38 +174,11 @@ export default function WealthPortal() {
         body: JSON.stringify({ role: scoutRole, location: scoutLocation }),
       });
       const data = await res.json();
-      if (data.ok && data.jobs) {
-        let newAdded = 0;
-        for (const j of data.jobs) {
-          const alreadyExists = cards.some(
-            (c) => (c.job_key && c.job_key === j.job_key) ||
-                   (c.company.toLowerCase().trim() === j.company.toLowerCase().trim() &&
-                    c.title.toLowerCase().trim() === j.title.toLowerCase().trim())
-          );
-          if (!alreadyExists) {
-            await fetch("/api/wealth/applications", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                title: j.title,
-                company: j.company,
-                location: j.location,
-                salary: j.salary,
-                description: j.description,
-                url: j.url,
-                status: "interested",
-                job_key: j.job_key
-              }),
-            });
-            newAdded++;
-          }
-        }
+      if (data.ok) {
         await loadPortalData();
-        if (newAdded === 0) {
-          alert("ℹ️ No more new jobs found for this search. All matching opportunities are already on your board!");
-        } else {
-          alert(`✅ Found and added ${newAdded} new opportunities to your board!`);
-        }
+        alert(data.message || (data.new_added > 0 ? `✅ Found and added ${data.new_added} new opportunities to your board!` : "ℹ️ No more new jobs found. All matching opportunities are already on your board!"));
+      } else {
+        alert(data.error || "Error running scout");
       }
     } catch {
       alert("Error finding opportunities.");
