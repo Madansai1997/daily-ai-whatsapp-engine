@@ -151,6 +151,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(wealth-scout): Add strict deduplication against existing board cards and show 'No more new jobs' notice when all opportunities are already added _(2026-08-09)_
 - feat(wealth-portal): Integrate full Kanban feature suite (+Add Job modal, Slide-over Drawer, Outreach & STAR Interview Kit, search filter) into Client Wealth Portal _(2026-08-07)_
 - feat(wealth-portal): Add direct job posting URL links to cards in Client Wealth Management Portal _(2026-08-07)_
 - fix(routing): Add @app.get('/wealth-portal') SPA fallback route in V3_updates.py so direct navigation loads WealthPortal UI _(2026-08-07)_
@@ -162,10 +163,9 @@ npm install && npm run build     # served by the engine at /console
 - fix(believer): Fix JSON response parsing in key-cards and perspective-lenses to eliminate repetitive template fallback behavior _(2026-08-05)_
 - feat(believer): Upgrade single-entry reflection prompt to deliver cognitive therapist reframing and locus-of-control insights _(2026-08-05)_
 - feat(believer): Upgrade Project Believer LLM prompt to operate as a world-class cognitive therapist and eliminate repetitive question loops _(2026-08-05)_
-- fix(db): Remove AUTOINCREMENT from claude_code_live_session and pending_claude_code_task for Turso cloud HTTP API compatibility _(2026-08-04)_
 <!-- /AUTO:changelog -->
 
 ---
 
-_Last updated: 2026-08-07 · this README's inventory and changelog are auto-maintained by
+_Last updated: 2026-08-09 · this README's inventory and changelog are auto-maintained by
 `scripts/gen_readme.py` on every commit._

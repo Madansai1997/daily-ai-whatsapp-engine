@@ -175,27 +175,40 @@ export default function WealthPortal() {
       });
       const data = await res.json();
       if (data.ok && data.jobs) {
-        // Auto-add scouted jobs into 'interested' column
-        for (const j of data.jobs.slice(0, 4)) {
-          await fetch("/api/wealth/applications", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              title: j.title,
-              company: j.company,
-              location: j.location,
-              salary: j.salary,
-              description: j.description,
-              url: j.url,
-              status: "interested",
-              job_key: j.job_key
-            }),
-          });
+        let newAdded = 0;
+        for (const j of data.jobs) {
+          const alreadyExists = cards.some(
+            (c) => (c.job_key && c.job_key === j.job_key) ||
+                   (c.company.toLowerCase().trim() === j.company.toLowerCase().trim() &&
+                    c.title.toLowerCase().trim() === j.title.toLowerCase().trim())
+          );
+          if (!alreadyExists) {
+            await fetch("/api/wealth/applications", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                title: j.title,
+                company: j.company,
+                location: j.location,
+                salary: j.salary,
+                description: j.description,
+                url: j.url,
+                status: "interested",
+                job_key: j.job_key
+              }),
+            });
+            newAdded++;
+          }
         }
         await loadPortalData();
+        if (newAdded === 0) {
+          alert("ℹ️ No more new jobs found for this search. All matching opportunities are already on your board!");
+        } else {
+          alert(`✅ Found and added ${newAdded} new opportunities to your board!`);
+        }
       }
     } catch {
-      /* fallback */
+      alert("Error finding opportunities.");
     } finally {
       setIsScouting(false);
     }
