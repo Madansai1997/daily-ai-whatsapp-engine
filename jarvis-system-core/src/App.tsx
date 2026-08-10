@@ -21,8 +21,9 @@ import { useVoiceAgent } from "./lib/voiceAgent";
 import { authStatus, setUnauthHandler, isDemo } from "./lib/auth";
 import ProjectBelieverModal from "./components/ProjectBelieverModal";
 import WealthPortal from "./components/WealthPortal";
+import Protocol from "./components/Protocol";
 import { AnimatePresence, motion } from "motion/react";
-import { LayoutGrid, Bot, Lock, Briefcase, BarChart3, Wallet, Compass, FileText, Table2 } from "lucide-react";
+import { LayoutGrid, Bot, Lock, Briefcase, BarChart3, Wallet, Compass, FileText, Table2, Shield } from "lucide-react";
 
 export default function App() {
   const isWealthRoute = window.location.pathname.startsWith("/wealth-portal") || window.location.search.includes("portal=wealth");
@@ -197,6 +198,9 @@ export default function App() {
             {activeScreen === ScreenId.Bills && (
               <Bills />
             )}
+            {activeScreen === ScreenId.Protocol && (
+              <Protocol />
+            )}
             {(activeScreen === ScreenId.Discover || activeScreen === ScreenId.Trends || activeScreen === ScreenId.Daily) && (
               <Discover initial={activeScreen === ScreenId.Trends ? "trends" : navIntent === "influencers" ? "influencers" : "daily"} />
             )}
@@ -211,6 +215,7 @@ export default function App() {
       <nav className="fixed bottom-0 left-0 w-full md:hidden bg-[#0f131f]/90 backdrop-blur-md border-t border-white/10 z-40 flex justify-around items-center h-16 pb-safe">
         {[
           { screen: ScreenId.Core, label: "HOME", Icon: LayoutGrid, active: activeScreen === ScreenId.Core },
+          { screen: ScreenId.Protocol, label: "PROTOCOL", Icon: Shield, active: activeScreen === ScreenId.Protocol },
           { screen: ScreenId.Jobs, label: "JOBS", Icon: Briefcase, active: activeScreen === ScreenId.Jobs || activeScreen === ScreenId.AtsAnalysis },
           { screen: ScreenId.Insights, label: "STATS", Icon: BarChart3, active: activeScreen === ScreenId.Insights },
           { screen: ScreenId.Docs, label: "DOCS", Icon: FileText, active: activeScreen === ScreenId.Docs },

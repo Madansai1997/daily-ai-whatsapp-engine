@@ -151,6 +151,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- feat(protocol): Ship Protocol Sovereign (Life OS & Self-Mastery Suite) with Mind Shield, Anti-Apology converter, The Mirror power debrief, Monk streaks, Grooming matrix & 90-Day Obsession hub _(2026-08-10)_
 - fix(dedup): Move job scout deduplication to atomic database layer and clean up existing duplicate board cards _(2026-08-09)_
 - fix(db): Migrate routers/wealth_management.py and wealth_scout_agent.py to db_compat for permanent Turso cloud DB persistence across page reloads and restarts _(2026-08-09)_
 - fix(wealth-scout): Add strict deduplication against existing board cards and show 'No more new jobs' notice when all opportunities are already added _(2026-08-09)_
@@ -162,10 +163,9 @@ npm install && npm run build     # served by the engine at /console
 - fix(auto-apply): Attach auth headers to auto-apply fetch requests and wrap auto-apply handler in try-except returning JSON errors _(2026-08-05)_
 - fix(script): Update get_gmail_token.py to run with zero external dependencies using Python standard library _(2026-08-05)_
 - feat(believer-ui): Add Entry Selector dropdown to Key Cards and 3 Lenses tabs for direct entry selection _(2026-08-05)_
-- fix(believer): Fix JSON response parsing in key-cards and perspective-lenses to eliminate repetitive template fallback behavior _(2026-08-05)_
 <!-- /AUTO:changelog -->
 
 ---
 
-_Last updated: 2026-08-09 · this README's inventory and changelog are auto-maintained by
+_Last updated: 2026-08-10 · this README's inventory and changelog are auto-maintained by
 `scripts/gen_readme.py` on every commit._

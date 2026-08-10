@@ -1205,6 +1205,7 @@ from routers.rag import router as rag_router, init_rag_router_deps
 from routers.chat_voice_bills import router as chat_bills_router
 from routers.extension import router as extension_router, set_extension_deps
 from routers.wealth_management import router as wealth_router
+from routers.protocol_sovereign import router as protocol_router
 
 app.include_router(auth_router)
 app.include_router(jobs_router)
@@ -1216,6 +1217,7 @@ app.include_router(rag_router)
 app.include_router(chat_bills_router)
 app.include_router(extension_router)
 app.include_router(wealth_router)
+app.include_router(protocol_router)
 
 # Initialize extension router dependencies
 set_extension_deps(call_llm)

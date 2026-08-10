@@ -136,6 +136,7 @@ export default function Header({
           <nav className="hidden md:flex items-center gap-5 lg:gap-6">
             {[
               { screen: ScreenId.Core, label: "HOME", active: activeScreen === ScreenId.Core },
+              { screen: ScreenId.Protocol, label: "PROTOCOL", active: activeScreen === ScreenId.Protocol },
               { screen: ScreenId.Jobs, label: "JOBS", active: activeScreen === ScreenId.Jobs || activeScreen === ScreenId.AtsAnalysis },
               { screen: ScreenId.Insights, label: "INSIGHTS", active: activeScreen === ScreenId.Insights },
               { screen: ScreenId.Docs, label: "DOCS", active: activeScreen === ScreenId.Docs },

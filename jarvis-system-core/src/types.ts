@@ -15,6 +15,7 @@ export enum ScreenId {
   Trends = "trends",
   Daily = "daily",
   Discover = "discover",
+  Protocol = "protocol",
   Help = "help"
 }
 
