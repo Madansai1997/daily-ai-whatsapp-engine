@@ -3,7 +3,8 @@ import { motion, AnimatePresence } from "motion/react";
 import {
   Lock, KeyRound, ShieldAlert, Plus, Trash2, Search, X, Sparkles, Heart, Zap, Target,
   BookOpen, Clock, Bot, Mic, MicOff, MessageSquare, Compass, RefreshCw, Send, Layers,
-  ChevronLeft, ChevronRight, Maximize2, ShieldCheck, Award, Eye, Calendar, Smile
+  ChevronLeft, ChevronRight, Maximize2, ShieldCheck, Award, Eye, Calendar, Smile,
+  Edit3, Save, Check
 } from "lucide-react";
 
 interface ProjectBelieverModalProps {
@@ -47,6 +48,14 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
   const [isListening, setIsListening] = useState(false);
   const [reflectingId, setReflectingId] = useState<number | null>(null);
   const [selectedEntryId, setSelectedEntryId] = useState<number | null>(null);
+
+  // Edit State for Existing Entries & Reflections
+  const [editingEntryId, setEditingEntryId] = useState<number | null>(null);
+  const [editContent, setEditContent] = useState("");
+  const [editReflection, setEditReflection] = useState("");
+  const [editMood, setEditMood] = useState("Reflective");
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [activeVoiceField, setActiveVoiceField] = useState<"new" | "edit-content" | "edit-reflection" | null>(null);
 
   // Active Main Studio Tab
   const [activeTab, setActiveTab] = useState<"journal" | "chat" | "cards" | "lenses" | "capsules">("journal");
@@ -343,17 +352,111 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
     } catch {}
   };
 
-  const toggleVoiceInput = () => {
+  // Edit & Reflection Handlers
+  const handleStartEdit = (entry: Entry) => {
+    setEditingEntryId(entry.id);
+    setEditContent(entry.content);
+    setEditReflection(entry.reflection || "");
+    setEditMood(entry.mood_tag || "Reflective");
+    setShowAddForm(false);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingEntryId(null);
+    setEditContent("");
+    setEditReflection("");
+    if (isListening) {
+      try { recognitionRef.current?.stop(); } catch {}
+      setIsListening(false);
+      setActiveVoiceField(null);
+    }
+  };
+
+  const handleSaveEdit = async (entryId: number) => {
+    if (!editContent.trim() || !activeKey) return;
+    setIsSavingEdit(true);
+    setError("");
+    try {
+      const res = await fetch(`/api/believer/entries/${entryId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          passphrase: activeKey,
+          content: editContent,
+          reflection: editReflection,
+          mood_tag: editMood,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setEditingEntryId(null);
+        await loadEntries(activeKey);
+      } else {
+        setError(data.detail || "Failed to update entry");
+      }
+    } catch {
+      setError("Network error while updating entry");
+    } finally {
+      setIsSavingEdit(false);
+    }
+  };
+
+  const handleGenerateReflection = async (entryId: number) => {
+    if (!activeKey) return;
+    setReflectingId(entryId);
+    try {
+      const res = await fetch("/api/believer/reflect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ passphrase: activeKey, entry_id: entryId }),
+      });
+      const data = await res.json();
+      if (res.ok && data.reflection) {
+        if (editingEntryId === entryId) {
+          setEditReflection(data.reflection);
+        }
+        await loadEntries(activeKey);
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setReflectingId(null);
+    }
+  };
+
+  const handleDeleteEntry = async (entryId: number) => {
+    if (!activeKey) return;
+    if (!window.confirm("Are you sure you want to delete this reflection entry from your private vault?")) return;
+    try {
+      const res = await fetch(`/api/believer/entries/${entryId}`, {
+        method: "DELETE",
+        headers: { "X-Passphrase": activeKey },
+      });
+      if (res.ok) {
+        if (editingEntryId === entryId) setEditingEntryId(null);
+        await loadEntries(activeKey);
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const toggleVoiceInput = (target: "new" | "edit-content" | "edit-reflection" = "new") => {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SR) {
       alert("Speech recognition is not supported in this browser.");
       return;
     }
 
-    if (isListening) {
+    if (isListening && activeVoiceField === target) {
       try { recognitionRef.current?.stop(); } catch {}
       setIsListening(false);
+      setActiveVoiceField(null);
       return;
+    }
+
+    if (isListening) {
+      try { recognitionRef.current?.stop(); } catch {}
     }
 
     const recog = new SR();
@@ -362,22 +465,55 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
     recog.interimResults = true;
 
     recog.onresult = (e: any) => {
-      let transcript = "";
+      let finalChunk = "";
+      let interimChunk = "";
       for (let i = e.resultIndex; i < e.results.length; i++) {
-        transcript += e.results[i][0].transcript;
+        if (e.results[i].isFinal) {
+          finalChunk += e.results[i][0].transcript;
+        } else {
+          interimChunk += e.results[i][0].transcript;
+        }
       }
-      setNewContent((prev) => (prev ? `${prev} ${transcript}` : transcript));
+
+      const textChunk = (finalChunk || interimChunk).trim();
+
+      // Check if user says closing phrase: "it's over", "that's all", "done", "stop dictation", "over"
+      const closingMatch = textChunk.match(/\b(it'?s over|that'?s over|it is over|done|that'?s all|thats all|stop dictation|finished)\b[.]?$/i) ||
+        textChunk.match(/\b(over)\b[.]?$/i);
+
+      let cleanChunk = textChunk;
+      if (closingMatch) {
+        cleanChunk = textChunk.slice(0, closingMatch.index).trim();
+      }
+
+      if (cleanChunk) {
+        if (target === "new") {
+          setNewContent((prev) => (prev ? `${prev} ${cleanChunk}` : cleanChunk));
+        } else if (target === "edit-content") {
+          setEditContent((prev) => (prev ? `${prev} ${cleanChunk}` : cleanChunk));
+        } else if (target === "edit-reflection") {
+          setEditReflection((prev) => (prev ? `${prev} ${cleanChunk}` : cleanChunk));
+        }
+      }
+
+      if (closingMatch) {
+        try { recog.stop(); } catch {}
+        setIsListening(false);
+        setActiveVoiceField(null);
+      }
     };
 
-    recog.onerror = () => setIsListening(false);
-    recog.onend = () => setIsListening(false);
+    recog.onerror = () => { setIsListening(false); setActiveVoiceField(null); };
+    recog.onend = () => { setIsListening(false); setActiveVoiceField(null); };
 
     recognitionRef.current = recog;
     try {
       recog.start();
       setIsListening(true);
+      setActiveVoiceField(target);
     } catch {
       setIsListening(false);
+      setActiveVoiceField(null);
     }
   };
 
@@ -563,34 +699,234 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
 
                     {/* Entries List */}
                     <div className="space-y-4">
-                      {filteredEntries.map((entry) => (
-                        <div key={entry.id} className="p-4 bg-zinc-900/40 border border-zinc-800 rounded-xl space-y-3">
-                          <p className="text-sm text-zinc-100 whitespace-pre-wrap">{entry.content}</p>
-                          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-zinc-800/60">
-                            <button
-                              onClick={() => {
-                                setChatMessages([{ role: "assistant", content: `I am listening closely regarding: "${entry.content.slice(0, 60)}...". How are you feeling about this right now?` }]);
-                                setActiveTab("chat");
-                              }}
-                              className="px-3 py-1 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded-lg text-xs font-semibold flex items-center gap-1"
-                            >
-                              <MessageSquare className="w-3.5 h-3.5" /> Conversational Sounding Board
-                            </button>
-                            <button
-                              onClick={() => handleGenerateKeyCards(entry.id)}
-                              className="px-3 py-1 bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 rounded-lg text-xs font-semibold flex items-center gap-1"
-                            >
-                              <Layers className="w-3.5 h-3.5" /> Generate Key Cards
-                            </button>
-                            <button
-                              onClick={() => handleGeneratePerspective(entry.id)}
-                              className="px-3 py-1 bg-purple-500/10 text-purple-400 border border-purple-500/30 rounded-lg text-xs font-semibold flex items-center gap-1"
-                            >
-                              <Compass className="w-3.5 h-3.5" /> 3 Lenses Perspective
-                            </button>
-                          </div>
+                      {filteredEntries.length === 0 ? (
+                        <div className="py-10 text-center text-xs text-zinc-500 font-mono">
+                          No reflections found. Click "+ New Reflection" above to begin.
                         </div>
-                      ))}
+                      ) : (
+                        filteredEntries.map((entry) => {
+                          const isEditing = editingEntryId === entry.id;
+                          const moodObj = MOODS.find((m) => m.id === entry.mood_tag) || MOODS[0];
+                          const MoodIcon = moodObj.icon;
+
+                          if (isEditing) {
+                            return (
+                              <div key={entry.id} className="p-5 bg-zinc-900/90 border border-amber-500/50 rounded-xl space-y-4 shadow-xl">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-xs font-bold text-amber-400 flex items-center gap-1.5 font-mono">
+                                    <Edit3 className="w-4 h-4" /> Editing Entry #{entry.id} (Saved {entry.created_at?.slice(0, 10)})
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={handleCancelEdit}
+                                    className="text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer"
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+
+                                {/* Mood Selector */}
+                                <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                                  <span className="text-xs text-zinc-400 font-mono">Mood:</span>
+                                  {MOODS.map((m) => {
+                                    const Icon = m.icon;
+                                    const isSelected = editMood === m.id;
+                                    return (
+                                      <button
+                                        key={m.id}
+                                        type="button"
+                                        onClick={() => setEditMood(m.id)}
+                                        className={`px-2.5 py-1 rounded-lg text-xs flex items-center gap-1.5 border transition-all cursor-pointer ${
+                                          isSelected ? `${m.color} font-bold shadow-sm` : "bg-zinc-950/60 border-zinc-800 text-zinc-400 hover:text-zinc-200"
+                                        }`}
+                                      >
+                                        <Icon className="w-3.5 h-3.5" />
+                                        <span>{m.id}</span>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+
+                                {/* Content Field */}
+                                <div className="space-y-1.5">
+                                  <div className="flex items-center justify-between">
+                                    <label className="text-xs font-mono text-zinc-300">Journal Content / Thoughts:</label>
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleVoiceInput("edit-content")}
+                                      className={`px-2.5 py-1 rounded text-[11px] font-mono flex items-center gap-1 border transition-all cursor-pointer ${
+                                        isListening && activeVoiceField === "edit-content"
+                                          ? "bg-rose-500/20 border-rose-500/40 text-rose-400 animate-pulse"
+                                          : "bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700"
+                                      }`}
+                                      title="Dictate content (say 'it's over' when done)"
+                                    >
+                                      {isListening && activeVoiceField === "edit-content" ? <MicOff className="w-3 h-3 text-rose-400" /> : <Mic className="w-3 h-3 text-amber-400" />}
+                                      <span>{isListening && activeVoiceField === "edit-content" ? "Listening (Say 'it's over')..." : "Voice Dictate"}</span>
+                                    </button>
+                                  </div>
+                                  <textarea
+                                    value={editContent}
+                                    onChange={(e) => setEditContent(e.target.value)}
+                                    rows={5}
+                                    placeholder="Edit or extend your entry..."
+                                    className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-sm text-zinc-100 focus:border-amber-500/60 focus:outline-none leading-relaxed resize-y"
+                                  />
+                                </div>
+
+                                {/* Reflection Field */}
+                                <div className="space-y-1.5 pt-2 border-t border-zinc-800/60">
+                                  <div className="flex items-center justify-between">
+                                    <label className="text-xs font-mono text-amber-400/90 flex items-center gap-1">
+                                      <Sparkles className="w-3.5 h-3.5" /> Personal / JARVIS Reflection:
+                                    </label>
+                                    <div className="flex items-center gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleGenerateReflection(entry.id)}
+                                        disabled={reflectingId === entry.id}
+                                        className="px-2.5 py-1 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded text-[11px] font-mono flex items-center gap-1 transition-all disabled:opacity-50 cursor-pointer"
+                                      >
+                                        <Sparkles className="w-3 h-3" />
+                                        <span>{reflectingId === entry.id ? "Reflecting..." : "Ask JARVIS to Reflect"}</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => toggleVoiceInput("edit-reflection")}
+                                        className={`px-2.5 py-1 rounded text-[11px] font-mono flex items-center gap-1 border transition-all cursor-pointer ${
+                                          isListening && activeVoiceField === "edit-reflection"
+                                            ? "bg-rose-500/20 border-rose-500/40 text-rose-400 animate-pulse"
+                                            : "bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700"
+                                        }`}
+                                        title="Dictate reflection (say 'it's over' when done)"
+                                      >
+                                        {isListening && activeVoiceField === "edit-reflection" ? <MicOff className="w-3 h-3 text-rose-400" /> : <Mic className="w-3 h-3 text-amber-400" />}
+                                        <span>{isListening && activeVoiceField === "edit-reflection" ? "Listening..." : "Dictate"}</span>
+                                      </button>
+                                    </div>
+                                  </div>
+                                  <textarea
+                                    value={editReflection}
+                                    onChange={(e) => setEditReflection(e.target.value)}
+                                    rows={3}
+                                    placeholder="Write, edit, or extend your personal reflection..."
+                                    className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-xs text-zinc-200 focus:border-amber-500/60 focus:outline-none italic resize-y"
+                                  />
+                                </div>
+
+                                {/* Buttons */}
+                                <div className="flex items-center justify-end gap-2 pt-2">
+                                  <button
+                                    type="button"
+                                    onClick={handleCancelEdit}
+                                    className="px-3.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold rounded-lg cursor-pointer"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleSaveEdit(entry.id)}
+                                    disabled={isSavingEdit || !editContent.trim()}
+                                    className="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold text-xs rounded-lg flex items-center gap-1.5 shadow-md disabled:opacity-50 cursor-pointer"
+                                  >
+                                    <Save className="w-3.5 h-3.5" />
+                                    <span>{isSavingEdit ? "Saving..." : "Save Changes"}</span>
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          }
+
+                          return (
+                            <div key={entry.id} className="p-4 bg-zinc-900/50 border border-zinc-800 hover:border-zinc-700/80 rounded-xl space-y-3 transition-all group">
+                              {/* Top Header of Card */}
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border flex items-center gap-1 ${moodObj.color}`}>
+                                    <MoodIcon className="w-3 h-3" />
+                                    {entry.mood_tag}
+                                  </span>
+                                  <span className="text-[11px] font-mono text-zinc-500 flex items-center gap-1">
+                                    <Clock className="w-3 h-3" /> {entry.created_at?.slice(0, 16)}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    onClick={() => handleStartEdit(entry)}
+                                    className="px-2.5 py-1 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-lg text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer"
+                                    title="Edit this reflection or extend your journal content"
+                                  >
+                                    <Edit3 className="w-3.5 h-3.5" /> Edit
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeleteEntry(entry.id)}
+                                    className="p-1 text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors cursor-pointer"
+                                    title="Delete entry"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* Main Journal Content */}
+                              <p className="text-sm text-zinc-100 whitespace-pre-wrap leading-relaxed">{entry.content}</p>
+
+                              {/* Reflection block (if present) */}
+                              {entry.reflection ? (
+                                <div className="p-3 bg-amber-500/5 border-l-2 border-amber-500/70 rounded-r-lg space-y-1">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-[10px] font-mono uppercase tracking-wider text-amber-400 flex items-center gap-1">
+                                      <Sparkles className="w-3 h-3" /> Confidential Reflection:
+                                    </span>
+                                    <button
+                                      onClick={() => handleStartEdit(entry)}
+                                      className="text-[10px] text-amber-400/80 hover:text-amber-300 underline font-mono cursor-pointer"
+                                    >
+                                      Edit Reflection
+                                    </button>
+                                  </div>
+                                  <p className="text-xs text-zinc-300 italic whitespace-pre-wrap leading-relaxed">{entry.reflection}</p>
+                                </div>
+                              ) : (
+                                <div className="pt-1">
+                                  <button
+                                    onClick={() => handleGenerateReflection(entry.id)}
+                                    disabled={reflectingId === entry.id}
+                                    className="text-xs text-amber-400/70 hover:text-amber-400 flex items-center gap-1 font-mono hover:underline disabled:opacity-50 cursor-pointer"
+                                  >
+                                    <Sparkles className="w-3 h-3" /> {reflectingId === entry.id ? "Reflecting with JARVIS..." : "+ Generate JARVIS Reflection"}
+                                  </button>
+                                </div>
+                              )}
+
+                              {/* Bottom Action Ribbons */}
+                              <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-zinc-800/60">
+                                <button
+                                  onClick={() => {
+                                    setChatMessages([{ role: "assistant", content: `I am listening closely regarding: "${entry.content.slice(0, 60)}...". How are you feeling about this right now?` }]);
+                                    setActiveTab("chat");
+                                  }}
+                                  className="px-3 py-1 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded-lg text-xs font-semibold flex items-center gap-1 hover:bg-amber-500/20 transition-all cursor-pointer"
+                                >
+                                  <MessageSquare className="w-3.5 h-3.5" /> Conversational Sounding Board
+                                </button>
+                                <button
+                                  onClick={() => handleGenerateKeyCards(entry.id)}
+                                  className="px-3 py-1 bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 rounded-lg text-xs font-semibold flex items-center gap-1 hover:bg-cyan-500/20 transition-all cursor-pointer"
+                                >
+                                  <Layers className="w-3.5 h-3.5" /> Generate Key Cards
+                                </button>
+                                <button
+                                  onClick={() => handleGeneratePerspective(entry.id)}
+                                  className="px-3 py-1 bg-purple-500/10 text-purple-400 border border-purple-500/30 rounded-lg text-xs font-semibold flex items-center gap-1 hover:bg-purple-500/20 transition-all cursor-pointer"
+                                >
+                                  <Compass className="w-3.5 h-3.5" /> 3 Lenses Perspective
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
                     </div>
                   </div>
                 )}

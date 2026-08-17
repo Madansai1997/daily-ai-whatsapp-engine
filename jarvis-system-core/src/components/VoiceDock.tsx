@@ -1,6 +1,6 @@
 import React, { useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { Mic, Square, Loader2, Volume2, X } from "lucide-react";
+import { Mic, Square, Loader2, Volume2, X, Send } from "lucide-react";
 import type { VoiceAgent } from "../lib/voiceAgent";
 
 /* Always-on, app-wide voice control. Collapsed = a mic button; active = a live dock
@@ -54,6 +54,22 @@ export default function VoiceDock({ agent }: { agent: VoiceAgent }) {
                 <button onClick={stopSpeaking} className="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-bold font-mono bg-[#ffb4ab]/15 border border-[#ffb4ab]/30 text-[#ffb4ab] hover:bg-[#ffb4ab]/25 cursor-pointer">
                   <Square className="w-3.5 h-3.5" /> STOP <span className="opacity-50 font-normal">(space)</span>
                 </button>
+              ) : state === "listening" ? (
+                <div className="flex items-center gap-2 w-full">
+                  <button
+                    onClick={agent.sendCurrentUtterance}
+                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold font-mono bg-[#8aebff]/20 border border-[#8aebff]/40 text-[#8aebff] hover:bg-[#8aebff]/30 cursor-pointer shadow-sm transition-all"
+                  >
+                    <Send className="w-3.5 h-3.5" /> SEND <span className="text-[10px] opacity-70 font-normal">(Say “it's over”)</span>
+                  </button>
+                  <button
+                    onClick={stopAll}
+                    title="Cancel"
+                    className="px-3 py-2 rounded-lg text-xs font-mono bg-zinc-800/80 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 border border-zinc-700/60 cursor-pointer transition-all"
+                  >
+                    CANCEL
+                  </button>
+                </div>
               ) : (
                 <div className="flex-1 flex items-center gap-2 text-[10px] font-mono text-[#859397]">
                   <Mic className="w-3.5 h-3.5" /> Say “open jobs”, ask a question, or say “stop”.

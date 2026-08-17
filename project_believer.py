@@ -123,6 +123,12 @@ class EntryCreateRequest(BaseModel):
     content: str
     mood_tag: Optional[str] = "Reflective"
 
+class EntryUpdateRequest(BaseModel):
+    passphrase: str
+    content: Optional[str] = None
+    reflection: Optional[str] = None
+    mood_tag: Optional[str] = None
+
 class ReflectRequest(BaseModel):
     passphrase: str
     entry_id: int
@@ -266,6 +272,46 @@ async def create_entry(req: EntryCreateRequest):
         )
         await db.commit()
         return {"status": "ok", "id": cursor.lastrowid}
+
+@router.put("/entries/{entry_id}")
+async def update_entry(entry_id: int, req: EntryUpdateRequest):
+    """Update an existing encrypted entry and/or reflection anytime."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Verify passphrase
+        async with db.execute("SELECT encrypted_verifier FROM believer_auth_meta WHERE key_name = 'auth_verifier'") as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Not initialized")
+            try:
+                if decrypt_text(row[0], req.passphrase) != VERIFY_MAGIC:
+                    raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
+            except Exception:
+                raise HTTPException(status_code=403, detail="Invalid Master Passphrase")
+
+        async with db.execute(
+            "SELECT encrypted_payload, COALESCE(encrypted_reflection, ''), mood_tag FROM believer_entries WHERE id = ?",
+            (entry_id,)
+        ) as cursor:
+            existing = await cursor.fetchone()
+            if not existing:
+                raise HTTPException(status_code=404, detail="Entry not found")
+
+        enc_payload = existing[0]
+        if req.content is not None and req.content.strip():
+            enc_payload = encrypt_text(req.content.strip(), req.passphrase)
+
+        enc_reflection = existing[1] or ""
+        if req.reflection is not None:
+            enc_reflection = encrypt_text(req.reflection.strip(), req.passphrase) if req.reflection.strip() else ""
+
+        mood_tag = req.mood_tag if req.mood_tag else existing[2]
+
+        await db.execute(
+            "UPDATE believer_entries SET encrypted_payload = ?, encrypted_reflection = ?, mood_tag = ? WHERE id = ?",
+            (enc_payload, enc_reflection, mood_tag, entry_id)
+        )
+        await db.commit()
+        return {"status": "ok", "message": "Entry updated successfully"}
 
 @router.post("/reflect")
 async def reflect_on_entry(req: ReflectRequest):

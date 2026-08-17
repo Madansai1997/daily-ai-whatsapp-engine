@@ -64,6 +64,7 @@ export interface VoiceAgent {
   toggle: () => void;              // start / stop the conversation
   stopSpeaking: () => void;        // cut the current utterance only
   stopAll: () => void;             // stop speech + end the conversation
+  sendCurrentUtterance: () => void;// manually send accumulated speech
   speak: (text: string) => Promise<void>;
   notifyManualNavigate: () => void; // call when the user navigates by hand → hush speech
 }
@@ -81,12 +82,16 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
   const levelRafRef = useRef(0);
   const restartTimer = useRef<number | null>(null);
 
+  // Accumulated speech buffer for continuous walkie-talkie style holding
+  const accumulatedTextRef = useRef("");
+  const interimTextRef = useRef("");
+
   const supported = typeof window !== "undefined" &&
     !!((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
 
   const setBoth = (s: VoiceState) => { stateRef.current = s; setState(s); };
 
-  // ── recognition (one turn at a time) ──────────────────────────────────────
+  // ── recognition (continuous hold until 'it's over' or stop) ────────────────
   const stopRecognition = useCallback(() => {
     if (restartTimer.current) { clearTimeout(restartTimer.current); restartTimer.current = null; }
     try { recogRef.current?.abort(); } catch { /* */ }
@@ -101,17 +106,70 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
     const recog = new SR();
     recogRef.current = recog;
     recog.lang = "en-US";
-    recog.interimResults = false;
+    recog.interimResults = true;
     recog.maxAlternatives = 1;
-    recog.continuous = false;
+    recog.continuous = true;
 
-    recog.onstart = () => { if (activeRef.current) setBoth("listening"); };
-    recog.onresult = (e: any) => {
-      const said = e.results?.[e.results.length - 1]?.[0]?.transcript?.trim();
-      if (said) handleUtteranceRef.current(said);
+    recog.onstart = () => {
+      if (activeRef.current) setBoth("listening");
     };
+
+    recog.onresult = (e: any) => {
+      let finalChunk = "";
+      let interimChunk = "";
+      for (let i = e.resultIndex; i < e.results.length; ++i) {
+        if (e.results[i].isFinal) {
+          finalChunk += e.results[i][0].transcript;
+        } else {
+          interimChunk += e.results[i][0].transcript;
+        }
+      }
+
+      if (finalChunk.trim()) {
+        accumulatedTextRef.current = (accumulatedTextRef.current ? accumulatedTextRef.current + " " : "") + finalChunk.trim();
+      }
+      interimTextRef.current = interimChunk.trim();
+
+      const fullLiveText = ((accumulatedTextRef.current ? accumulatedTextRef.current + " " : "") + interimTextRef.current).trim();
+
+      if (fullLiveText) {
+        setCaption(`“${fullLiveText}”`);
+      }
+
+      // Check for explicit cancellation phrases:
+      const cancellationMatch = fullLiveText.match(/\b(cancel command|never mind|nevermind|abort command|close it out)\b[.]?$/i);
+      if (cancellationMatch) {
+        stopRecognition();
+        accumulatedTextRef.current = "";
+        interimTextRef.current = "";
+        setCaption("Voice command cancelled.");
+        stopAllRef.current();
+        return;
+      }
+
+      // Check for explicit completion / closing phrases:
+      // "it's over", "that's over", "it is over", "i'm done", "im done", "that's all", "thats all", "send it", "send message", "transmit", "execute", "over and out", "all done", or trailing "over"
+      const completionMatch =
+        fullLiveText.match(/\b(it'?s over|that'?s over|it is over|over and out|i'?m done|im done|that'?s all|thats all|that is all|send it|send message|transmit|execute|all done)\b[.]?$/i) ||
+        fullLiveText.match(/\b(over)\b[.]?$/i);
+
+      if (completionMatch) {
+        let cleanText = fullLiveText.slice(0, completionMatch.index).trim();
+        cleanText = cleanText.replace(/[,;.\s]+$/, "").trim();
+        stopRecognition();
+        accumulatedTextRef.current = "";
+        interimTextRef.current = "";
+        if (cleanText) {
+          handleUtteranceRef.current(cleanText);
+        } else {
+          setCaption("No command detected.");
+          scheduleRelisten(400);
+        }
+      }
+    };
+
     recog.onerror = (e: any) => {
-      // no-speech / aborted are normal; just re-open the mic if we're still conversing.
+      // no-speech / aborted are normal in continuous mode; keep holding unless permission denied
       if (activeRef.current && stateRef.current === "listening" && e?.error !== "not-allowed") {
         scheduleRelisten(400);
       } else if (e?.error === "not-allowed") {
@@ -119,10 +177,14 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
         stopAllRef.current();
       }
     };
+
     recog.onend = () => {
-      // if the turn ended with no result and we're still listening, reopen the mic
-      if (activeRef.current && stateRef.current === "listening") scheduleRelisten(300);
+      // If still active & listening, immediately reopen to keep holding seamlessly
+      if (activeRef.current && stateRef.current === "listening") {
+        scheduleRelisten(200);
+      }
     };
+
     try { recog.start(); } catch { scheduleRelisten(500); }
   }, [stopRecognition]);
 
@@ -162,6 +224,8 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
   const afterSpeech = useCallback(() => {
     try { cancelAnimationFrame(levelRafRef.current); } catch { /* */ }
     levelRef.current = -1;
+    accumulatedTextRef.current = "";
+    interimTextRef.current = "";
     if (activeRef.current) { setBoth("listening"); startRecognition(); }
     else setBoth("idle");
   }, [startRecognition]);
@@ -201,6 +265,8 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
   const stopSpeaking = useCallback(() => {
     try { cancelAnimationFrame(levelRafRef.current); } catch { /* */ }
     levelRef.current = -1;
+    accumulatedTextRef.current = "";
+    interimTextRef.current = "";
     try { audioRef.current?.pause(); audioRef.current = null; } catch { /* */ }
     try { window.speechSynthesis?.cancel(); } catch { /* */ }
     if (activeRef.current) { setBoth("listening"); setCaption("Okay."); startRecognition(); }
@@ -243,9 +309,23 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
   const handleUtteranceRef = useRef(handleUtterance);
   useEffect(() => { handleUtteranceRef.current = handleUtterance; }, [handleUtterance]);
 
+  const sendCurrentUtterance = useCallback(() => {
+    const fullLiveText = ((accumulatedTextRef.current ? accumulatedTextRef.current + " " : "") + interimTextRef.current).trim();
+    stopRecognition();
+    accumulatedTextRef.current = "";
+    interimTextRef.current = "";
+    if (fullLiveText) {
+      handleUtterance(fullLiveText);
+    } else {
+      stopAll();
+    }
+  }, [stopRecognition, handleUtterance]);
+
   const stopAll = useCallback(() => {
     activeRef.current = false;
     stopRecognition();
+    accumulatedTextRef.current = "";
+    interimTextRef.current = "";
     try { audioRef.current?.pause(); audioRef.current = null; } catch { /* */ }
     try { window.speechSynthesis?.cancel(); } catch { /* */ }
     try { cancelAnimationFrame(levelRafRef.current); } catch { /* */ }
@@ -257,13 +337,25 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
   useEffect(() => { stopAllRef.current = stopAll; }, [stopAll]);
 
   const toggle = useCallback(() => {
-    if (activeRef.current) { stopAll(); return; }
+    if (activeRef.current) {
+      if (stateRef.current === "listening") {
+        const fullLiveText = ((accumulatedTextRef.current ? accumulatedTextRef.current + " " : "") + interimTextRef.current).trim();
+        if (fullLiveText) {
+          sendCurrentUtterance();
+          return;
+        }
+      }
+      stopAll();
+      return;
+    }
     if (!supported) { setCaption("Voice input needs Chrome or Edge."); return; }
     activeRef.current = true;
-    setCaption("Listening…");
+    accumulatedTextRef.current = "";
+    interimTextRef.current = "";
+    setCaption("Holding mic… speak freely. Say “it's over” to send.");
     setBoth("listening");
     startRecognition();
-  }, [supported, stopAll, startRecognition]);
+  }, [supported, stopAll, startRecognition, sendCurrentUtterance]);
 
   // User navigated by hand → hush any speech but keep the conversation alive.
   const notifyManualNavigate = useCallback(() => {
@@ -275,6 +367,6 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
 
   return {
     state, active: state !== "off", speaking: state === "speaking", caption, supported,
-    level: levelRef, toggle, stopSpeaking, stopAll, speak, notifyManualNavigate,
+    level: levelRef, toggle, stopSpeaking, stopAll, sendCurrentUtterance, speak, notifyManualNavigate,
   };
 }

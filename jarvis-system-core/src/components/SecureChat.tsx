@@ -197,6 +197,7 @@ export default function SecureChat() {
 
     if (isListening) {
       recognitionRef.current?.stop();
+      setIsListening(false);
       return;
     }
 
@@ -205,13 +206,52 @@ export default function SecureChat() {
       (window as any).webkitSpeechRecognition;
     const recognition: SpeechRecognitionInstance = new SR();
     recognition.lang = "en-US";
-    recognition.continuous = false;
-    recognition.interimResults = false;
+    recognition.continuous = true;
+    recognition.interimResults = true;
 
     recognition.onresult = (event: any) => {
-      const transcript = event.results?.[0]?.[0]?.transcript ?? "";
-      if (transcript) {
-        setInputVal((prev) => (prev ? `${prev} ${transcript}` : transcript));
+      let finalChunk = "";
+      let interimChunk = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) {
+          finalChunk += event.results[i][0].transcript;
+        } else {
+          interimChunk += event.results[i][0].transcript;
+        }
+      }
+
+      const spokenChunk = (finalChunk || interimChunk).trim();
+      if (!spokenChunk) return;
+
+      // Check for completion phrase
+      const closingMatch = spokenChunk.match(/\b(it'?s over|that'?s over|it is over|i'?m done|im done|that'?s all|thats all|send it|send message|transmit|finished|all done)\b[.]?$/i) ||
+        spokenChunk.match(/\b(over)\b[.]?$/i);
+
+      let cleanChunk = spokenChunk;
+      if (closingMatch) {
+        cleanChunk = spokenChunk.slice(0, closingMatch.index).trim();
+      }
+
+      if (cleanChunk) {
+        setInputVal((prev) => {
+          if (!prev) return cleanChunk;
+          return prev.endsWith(" ") ? `${prev}${cleanChunk}` : `${prev} ${cleanChunk}`;
+        });
+      }
+
+      if (closingMatch) {
+        try { recognition.stop(); } catch {}
+        setIsListening(false);
+        // Automatically send the message when user says "it's over"
+        setTimeout(() => {
+          setInputVal((current) => {
+            const finalToSend = current.trim();
+            if (finalToSend) {
+              sendMessage(finalToSend);
+            }
+            return "";
+          });
+        }, 100);
       }
     };
     recognition.onerror = () => setIsListening(false);
