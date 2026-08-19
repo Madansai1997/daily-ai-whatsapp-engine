@@ -81,10 +81,12 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
   const levelRef = useRef(-1);
   const levelRafRef = useRef(0);
   const restartTimer = useRef<number | null>(null);
+  const silenceTimerRef = useRef<number | null>(null);
 
-  // Accumulated speech buffer for continuous walkie-talkie style holding
-  const accumulatedTextRef = useRef("");
-  const interimTextRef = useRef("");
+  // Accumulated speech buffers across reconnects
+  const sessionFinalTranscriptRef = useRef("");
+  const currentSessionFinalRef = useRef("");
+  const currentInterimRef = useRef("");
 
   const supported = typeof window !== "undefined" &&
     !!((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
@@ -94,6 +96,7 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
   // ── recognition (continuous hold until 'it's over' or stop) ────────────────
   const stopRecognition = useCallback(() => {
     if (restartTimer.current) { clearTimeout(restartTimer.current); restartTimer.current = null; }
+    if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
     try { recogRef.current?.abort(); } catch { /* */ }
     recogRef.current = null;
   }, []);
@@ -115,56 +118,80 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
     };
 
     recog.onresult = (e: any) => {
-      let finalChunk = "";
-      let interimChunk = "";
-      for (let i = e.resultIndex; i < e.results.length; ++i) {
+      let sessionFinal = "";
+      let sessionInterim = "";
+      for (let i = 0; i < e.results.length; ++i) {
         if (e.results[i].isFinal) {
-          finalChunk += e.results[i][0].transcript;
+          sessionFinal += e.results[i][0].transcript + " ";
         } else {
-          interimChunk += e.results[i][0].transcript;
+          sessionInterim += e.results[i][0].transcript;
         }
       }
 
-      if (finalChunk.trim()) {
-        accumulatedTextRef.current = (accumulatedTextRef.current ? accumulatedTextRef.current + " " : "") + finalChunk.trim();
-      }
-      interimTextRef.current = interimChunk.trim();
+      currentSessionFinalRef.current = sessionFinal.trim();
+      currentInterimRef.current = sessionInterim.trim();
 
-      const fullLiveText = ((accumulatedTextRef.current ? accumulatedTextRef.current + " " : "") + interimTextRef.current).trim();
+      const fullLiveText = [
+        sessionFinalTranscriptRef.current,
+        currentSessionFinalRef.current,
+        currentInterimRef.current
+      ].filter(Boolean).join(" ").trim();
 
       if (fullLiveText) {
         setCaption(`“${fullLiveText}”`);
       }
 
       // Check for explicit cancellation phrases:
-      const cancellationMatch = fullLiveText.match(/\b(cancel command|never mind|nevermind|abort command|close it out)\b[.]?$/i);
+      const cancellationMatch = fullLiveText.match(/\b(cancel command|never mind|nevermind|abort command|abort|dismiss|close it out)\b[.!?, \t\n\r"'\)]*$/i);
       if (cancellationMatch) {
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
         stopRecognition();
-        accumulatedTextRef.current = "";
-        interimTextRef.current = "";
+        sessionFinalTranscriptRef.current = "";
+        currentSessionFinalRef.current = "";
+        currentInterimRef.current = "";
         setCaption("Voice command cancelled.");
         stopAllRef.current();
         return;
       }
 
       // Check for explicit completion / closing phrases:
-      // "it's over", "that's over", "it is over", "i'm done", "im done", "that's all", "thats all", "send it", "send message", "transmit", "execute", "over and out", "all done", or trailing "over"
-      const completionMatch =
-        fullLiveText.match(/\b(it'?s over|that'?s over|it is over|over and out|i'?m done|im done|that'?s all|thats all|that is all|send it|send message|transmit|execute|all done)\b[.]?$/i) ||
-        fullLiveText.match(/\b(over)\b[.]?$/i);
+      const completionMatch = fullLiveText.match(/\b(it'?s over|that'?s over|it is over|that'?s it|thats it|that is it|that is all|that'?s all|thats all|i'?m done|im done|i am done|it'?s done|its done|all done|done|finished|over and out|send it|send this|send message|send|over)\b[.!?, \t\n\r"'\)]*$/i);
 
       if (completionMatch) {
-        let cleanText = fullLiveText.slice(0, completionMatch.index).trim();
-        cleanText = cleanText.replace(/[,;.\s]+$/, "").trim();
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+        let cleanText = fullLiveText.slice(0, completionMatch.index).trim().replace(/[,;.\s]+$/, "").trim();
         stopRecognition();
-        accumulatedTextRef.current = "";
-        interimTextRef.current = "";
+        sessionFinalTranscriptRef.current = "";
+        currentSessionFinalRef.current = "";
+        currentInterimRef.current = "";
         if (cleanText) {
           handleUtteranceRef.current(cleanText);
         } else {
           setCaption("No command detected.");
           scheduleRelisten(400);
         }
+        return;
+      }
+
+      // Auto-finalize on comfortable pause (3.5s pause after speech has arrived)
+      if (fullLiveText.length > 2) {
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = window.setTimeout(() => {
+          if (activeRef.current && stateRef.current === "listening") {
+            const finalCandidate = [
+              sessionFinalTranscriptRef.current,
+              currentSessionFinalRef.current,
+              currentInterimRef.current
+            ].filter(Boolean).join(" ").trim();
+            if (finalCandidate) {
+              stopRecognition();
+              sessionFinalTranscriptRef.current = "";
+              currentSessionFinalRef.current = "";
+              currentInterimRef.current = "";
+              handleUtteranceRef.current(finalCandidate);
+            }
+          }
+        }, 3500);
       }
     };
 
@@ -179,9 +206,15 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
     };
 
     recog.onend = () => {
+      // Save any final text before reopening
+      if (currentSessionFinalRef.current) {
+        sessionFinalTranscriptRef.current = [sessionFinalTranscriptRef.current, currentSessionFinalRef.current].filter(Boolean).join(" ").trim();
+        currentSessionFinalRef.current = "";
+        currentInterimRef.current = "";
+      }
       // If still active & listening, immediately reopen to keep holding seamlessly
       if (activeRef.current && stateRef.current === "listening") {
-        scheduleRelisten(200);
+        scheduleRelisten(150);
       }
     };
 
@@ -224,8 +257,9 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
   const afterSpeech = useCallback(() => {
     try { cancelAnimationFrame(levelRafRef.current); } catch { /* */ }
     levelRef.current = -1;
-    accumulatedTextRef.current = "";
-    interimTextRef.current = "";
+    sessionFinalTranscriptRef.current = "";
+    currentSessionFinalRef.current = "";
+    currentInterimRef.current = "";
     if (activeRef.current) { setBoth("listening"); startRecognition(); }
     else setBoth("idle");
   }, [startRecognition]);
@@ -265,8 +299,9 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
   const stopSpeaking = useCallback(() => {
     try { cancelAnimationFrame(levelRafRef.current); } catch { /* */ }
     levelRef.current = -1;
-    accumulatedTextRef.current = "";
-    interimTextRef.current = "";
+    sessionFinalTranscriptRef.current = "";
+    currentSessionFinalRef.current = "";
+    currentInterimRef.current = "";
     try { audioRef.current?.pause(); audioRef.current = null; } catch { /* */ }
     try { window.speechSynthesis?.cancel(); } catch { /* */ }
     if (activeRef.current) { setBoth("listening"); setCaption("Okay."); startRecognition(); }
@@ -310,10 +345,16 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
   useEffect(() => { handleUtteranceRef.current = handleUtterance; }, [handleUtterance]);
 
   const sendCurrentUtterance = useCallback(() => {
-    const fullLiveText = ((accumulatedTextRef.current ? accumulatedTextRef.current + " " : "") + interimTextRef.current).trim();
+    const fullLiveText = [
+      sessionFinalTranscriptRef.current,
+      currentSessionFinalRef.current,
+      currentInterimRef.current
+    ].filter(Boolean).join(" ").trim();
+
     stopRecognition();
-    accumulatedTextRef.current = "";
-    interimTextRef.current = "";
+    sessionFinalTranscriptRef.current = "";
+    currentSessionFinalRef.current = "";
+    currentInterimRef.current = "";
     if (fullLiveText) {
       handleUtterance(fullLiveText);
     } else {
@@ -324,8 +365,9 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
   const stopAll = useCallback(() => {
     activeRef.current = false;
     stopRecognition();
-    accumulatedTextRef.current = "";
-    interimTextRef.current = "";
+    sessionFinalTranscriptRef.current = "";
+    currentSessionFinalRef.current = "";
+    currentInterimRef.current = "";
     try { audioRef.current?.pause(); audioRef.current = null; } catch { /* */ }
     try { window.speechSynthesis?.cancel(); } catch { /* */ }
     try { cancelAnimationFrame(levelRafRef.current); } catch { /* */ }
@@ -339,7 +381,11 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
   const toggle = useCallback(() => {
     if (activeRef.current) {
       if (stateRef.current === "listening") {
-        const fullLiveText = ((accumulatedTextRef.current ? accumulatedTextRef.current + " " : "") + interimTextRef.current).trim();
+        const fullLiveText = [
+          sessionFinalTranscriptRef.current,
+          currentSessionFinalRef.current,
+          currentInterimRef.current
+        ].filter(Boolean).join(" ").trim();
         if (fullLiveText) {
           sendCurrentUtterance();
           return;
@@ -350,8 +396,9 @@ export function useVoiceAgent({ onNavigate }: Options): VoiceAgent {
     }
     if (!supported) { setCaption("Voice input needs Chrome or Edge."); return; }
     activeRef.current = true;
-    accumulatedTextRef.current = "";
-    interimTextRef.current = "";
+    sessionFinalTranscriptRef.current = "";
+    currentSessionFinalRef.current = "";
+    currentInterimRef.current = "";
     setCaption("Holding mic… speak freely. Say “it's over” to send.");
     setBoth("listening");
     startRecognition();

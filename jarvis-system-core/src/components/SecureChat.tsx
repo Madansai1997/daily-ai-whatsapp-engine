@@ -191,15 +191,21 @@ export default function SecureChat() {
     sendMessage(inputVal);
   };
 
+  const initialInputRef = useRef("");
+  const chatSilenceTimerRef = useRef<number | null>(null);
+
   // --- Voice input (Web Speech API) ---
   const toggleListening = () => {
     if (!speechRecognitionSupported) return;
 
     if (isListening) {
+      if (chatSilenceTimerRef.current) clearTimeout(chatSilenceTimerRef.current);
       recognitionRef.current?.stop();
       setIsListening(false);
       return;
     }
+
+    initialInputRef.current = inputVal.trim();
 
     const SR =
       (window as any).SpeechRecognition ||
@@ -210,52 +216,64 @@ export default function SecureChat() {
     recognition.interimResults = true;
 
     recognition.onresult = (event: any) => {
-      let finalChunk = "";
-      let interimChunk = "";
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        if (event.results[i].isFinal) {
-          finalChunk += event.results[i][0].transcript;
-        } else {
-          interimChunk += event.results[i][0].transcript;
-        }
+      let sessionText = "";
+      for (let i = 0; i < event.results.length; ++i) {
+        sessionText += event.results[i][0].transcript;
       }
+      sessionText = sessionText.trim();
+      if (!sessionText) return;
 
-      const spokenChunk = (finalChunk || interimChunk).trim();
-      if (!spokenChunk) return;
+      const fullLive = [initialInputRef.current, sessionText].filter(Boolean).join(" ").trim();
 
-      // Check for completion phrase
-      const closingMatch = spokenChunk.match(/\b(it'?s over|that'?s over|it is over|i'?m done|im done|that'?s all|thats all|send it|send message|transmit|finished|all done)\b[.]?$/i) ||
-        spokenChunk.match(/\b(over)\b[.]?$/i);
-
-      let cleanChunk = spokenChunk;
-      if (closingMatch) {
-        cleanChunk = spokenChunk.slice(0, closingMatch.index).trim();
-      }
-
-      if (cleanChunk) {
-        setInputVal((prev) => {
-          if (!prev) return cleanChunk;
-          return prev.endsWith(" ") ? `${prev}${cleanChunk}` : `${prev} ${cleanChunk}`;
-        });
-      }
-
-      if (closingMatch) {
+      // Check for explicit cancellation:
+      const cancellationMatch = fullLive.match(/\b(cancel command|never mind|nevermind|abort command|abort|dismiss|close it out)\b[.!?, \t\n\r"'\)]*$/i);
+      if (cancellationMatch) {
+        if (chatSilenceTimerRef.current) clearTimeout(chatSilenceTimerRef.current);
         try { recognition.stop(); } catch {}
         setIsListening(false);
-        // Automatically send the message when user says "it's over"
-        setTimeout(() => {
-          setInputVal((current) => {
-            const finalToSend = current.trim();
-            if (finalToSend) {
-              sendMessage(finalToSend);
-            }
-            return "";
-          });
-        }, 100);
+        setInputVal(initialInputRef.current);
+        return;
       }
+
+      // Check for completion phrase:
+      const closingMatch = fullLive.match(/\b(it'?s over|that'?s over|it is over|that'?s it|thats it|that is it|that is all|that'?s all|thats all|i'?m done|im done|i am done|it'?s done|its done|all done|done|finished|over and out|send it|send this|send message|send|over)\b[.!?, \t\n\r"'\)]*$/i);
+
+      if (closingMatch) {
+        if (chatSilenceTimerRef.current) clearTimeout(chatSilenceTimerRef.current);
+        let cleanText = fullLive.slice(0, closingMatch.index).trim().replace(/[,;.\s]+$/, "").trim();
+        try { recognition.stop(); } catch {}
+        setIsListening(false);
+        if (cleanText) {
+          setInputVal("");
+          sendMessage(cleanText);
+        } else {
+          setInputVal(initialInputRef.current);
+        }
+        return;
+      }
+
+      // Live update input field smoothly:
+      setInputVal(fullLive);
+
+      // Auto-submit after 3.5s pause of silence:
+      if (chatSilenceTimerRef.current) clearTimeout(chatSilenceTimerRef.current);
+      chatSilenceTimerRef.current = window.setTimeout(() => {
+        try { recognition.stop(); } catch {}
+        setIsListening(false);
+        if (fullLive) {
+          setInputVal("");
+          sendMessage(fullLive);
+        }
+      }, 3500);
     };
-    recognition.onerror = () => setIsListening(false);
-    recognition.onend = () => setIsListening(false);
+
+    recognition.onerror = () => {
+      if (chatSilenceTimerRef.current) clearTimeout(chatSilenceTimerRef.current);
+      setIsListening(false);
+    };
+    recognition.onend = () => {
+      // do not auto-close unless user stopped it
+    };
 
     recognitionRef.current = recognition;
     try {

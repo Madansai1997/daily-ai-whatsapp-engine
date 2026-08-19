@@ -151,6 +151,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- fix(voice): overhaul speech recognition with robust transcript reconstruction, natural closing triggers, and silence fallback _(2026-08-19)_
 - feat: add Project Believer entry editing & continuous voice hold-and-finish controls _(2026-08-17)_
 - feat(bills): Add debt tracking for money owed to people, USD ($) multi-currency support, and live USD to INR conversion _(2026-08-13)_
 - feat(protocol): Ship Protocol Sovereign (Life OS & Self-Mastery Suite) with Mind Shield, Anti-Apology converter, The Mirror power debrief, Monk streaks, Grooming matrix & 90-Day Obsession hub _(2026-08-10)_
@@ -162,10 +163,9 @@ npm install && npm run build     # served by the engine at /console
 - fix(routing): Add @app.get('/wealth-portal') SPA fallback route in V3_updates.py so direct navigation loads WealthPortal UI _(2026-08-07)_
 - feat(wealth-portal): Add Client Wealth Management Opportunities Portal with passcode security gate and isolated DB namespace _(2026-08-07)_
 - fix(db): Replace all ON CONFLICT queries in resume_ats_agent with atomic DELETE + INSERT for 100% Turso Cloud DB compatibility _(2026-08-05)_
-- fix(auto-apply): Attach auth headers to auto-apply fetch requests and wrap auto-apply handler in try-except returning JSON errors _(2026-08-05)_
 <!-- /AUTO:changelog -->
 
 ---
 
-_Last updated: 2026-08-17 · this README's inventory and changelog are auto-maintained by
+_Last updated: 2026-08-19 · this README's inventory and changelog are auto-maintained by
 `scripts/gen_readme.py` on every commit._

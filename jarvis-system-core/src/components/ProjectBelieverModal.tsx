@@ -441,6 +441,8 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
     }
   };
 
+  const initialTargetTextRef = useRef("");
+
   const toggleVoiceInput = (target: "new" | "edit-content" | "edit-reflection" = "new") => {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SR) {
@@ -459,41 +461,41 @@ export default function ProjectBelieverModal({ isOpen, onClose }: ProjectBelieve
       try { recognitionRef.current?.stop(); } catch {}
     }
 
+    const initialText =
+      target === "new" ? newContent :
+      target === "edit-content" ? editContent :
+      editReflection;
+    initialTargetTextRef.current = (initialText || "").trim();
+
     const recog = new SR();
     recog.lang = "en-US";
     recog.continuous = true;
     recog.interimResults = true;
 
     recog.onresult = (e: any) => {
-      let finalChunk = "";
-      let interimChunk = "";
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) {
-          finalChunk += e.results[i][0].transcript;
-        } else {
-          interimChunk += e.results[i][0].transcript;
-        }
+      let sessionText = "";
+      for (let i = 0; i < e.results.length; ++i) {
+        sessionText += e.results[i][0].transcript;
       }
+      sessionText = sessionText.trim();
+      if (!sessionText) return;
 
-      const textChunk = (finalChunk || interimChunk).trim();
+      const fullLive = [initialTargetTextRef.current, sessionText].filter(Boolean).join(" ").trim();
 
       // Check if user says closing phrase: "it's over", "that's all", "done", "stop dictation", "over"
-      const closingMatch = textChunk.match(/\b(it'?s over|that'?s over|it is over|done|that'?s all|thats all|stop dictation|finished)\b[.]?$/i) ||
-        textChunk.match(/\b(over)\b[.]?$/i);
+      const closingMatch = fullLive.match(/\b(it'?s over|that'?s over|it is over|that'?s it|thats it|that is all|that'?s all|thats all|i'?m done|im done|i am done|it'?s done|its done|all done|done|finished|over and out|send it|send this|send|stop dictation|over)\b[.!?, \t\n\r"'\)]*$/i);
 
-      let cleanChunk = textChunk;
+      let cleanText = fullLive;
       if (closingMatch) {
-        cleanChunk = textChunk.slice(0, closingMatch.index).trim();
+        cleanText = fullLive.slice(0, closingMatch.index).trim().replace(/[,;.\s]+$/, "").trim();
       }
 
-      if (cleanChunk) {
-        if (target === "new") {
-          setNewContent((prev) => (prev ? `${prev} ${cleanChunk}` : cleanChunk));
-        } else if (target === "edit-content") {
-          setEditContent((prev) => (prev ? `${prev} ${cleanChunk}` : cleanChunk));
-        } else if (target === "edit-reflection") {
-          setEditReflection((prev) => (prev ? `${prev} ${cleanChunk}` : cleanChunk));
-        }
+      if (target === "new") {
+        setNewContent(cleanText);
+      } else if (target === "edit-content") {
+        setEditContent(cleanText);
+      } else if (target === "edit-reflection") {
+        setEditReflection(cleanText);
       }
 
       if (closingMatch) {
