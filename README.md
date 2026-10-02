@@ -106,12 +106,14 @@ whole console from bundled sample fixtures. Shareable as a live demo with zero d
 - **`email_triage.py`** — Email Triage Agent — self-contained skill module.
 - **`followup_agent.py`** — Follow-up Agent — nudges stale 'applied' cards with a drafted recruiter follow-up.
 - **`gemini_tts.py`** — Gemini text-to-speech — an optional natural voice for JARVIS.
+- **`generate_haven_qr.py`** — Generates high-resolution QR code and printable gift cards for Shalini's Haven Birthday App.
 - **`get_gmail_token.py`** — get_gmail_token.py — Zero-dependency Google OAuth Refresh Token Generator for JARVIS.
 - **`google_docs_agent.py`** — Google Docs Agent — turns an ATS analysis into a tailored-résumé Google Doc.
 - **`interview_prep.py`** — Interview Prep Dock — surfaces upcoming interviews from Calendar and, on demand, drafts a.
 - **`interview_simulator.py`** — Interactive AI Mock Interviewer & Voice Coach (interview_simulator.py).
 - **`job_apply_agent.py`** — Job Apply Agent — apply-prep + (approval-gated) auto-apply for the Job Scout pipeline.
 - **`job_scout_agent.py`** — Job Scout Agent — self-contained skill module (Phase 4).
+- **`learning_engine.py`** — Unified AI Learning Engine for JARVIS.
 - **`llm_gateway.py`** — In-process reliability layer around the multi-provider LLM chain.
 - **`local_bridge.py`** — JARVIS Local Bridge.
 - **`mcp_sqlite_server.py`** — SQLite MCP Server.
@@ -128,6 +130,7 @@ whole console from bundled sample fixtures. Shareable as a live demo with zero d
 - **`resume_ats_agent.py`** — Resume ATS Alignment Agent — self-contained skill module (Phase 4).
 - **`resume_editor.py`** — Résumé Editor — in-place .docx editing that PRESERVES formatting.
 - **`run_evals.py`** — Golden-eval harness for JARVIS — 100% free-tier, CI-safe.
+- **`sanctuary_agent.py`** — Sanctuary Agent — Two-Way Ambient Glow & Silent Connection Pulse.
 - **`shared_memory.py`** — Shared memory bridge for Claude Code ⇄ Antigravity.
 - **`study_tracks.py`** — Study tracks — ordered curricula for the Daily AI Update.
 - **`test_interview_simulator.py`** — Local test suite for interview_simulator.py (SAFE_MODE=1).
@@ -151,6 +154,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- feat: Haven 28th birthday experience, QR generator, and two-way Ambient Glow pulse router _(2026-10-02)_
 - fix(voice): overhaul speech recognition with robust transcript reconstruction, natural closing triggers, and silence fallback _(2026-08-19)_
 - feat: add Project Believer entry editing & continuous voice hold-and-finish controls _(2026-08-17)_
 - feat(bills): Add debt tracking for money owed to people, USD ($) multi-currency support, and live USD to INR conversion _(2026-08-13)_
@@ -162,10 +166,9 @@ npm install && npm run build     # served by the engine at /console
 - feat(wealth-portal): Add direct job posting URL links to cards in Client Wealth Management Portal _(2026-08-07)_
 - fix(routing): Add @app.get('/wealth-portal') SPA fallback route in V3_updates.py so direct navigation loads WealthPortal UI _(2026-08-07)_
 - feat(wealth-portal): Add Client Wealth Management Opportunities Portal with passcode security gate and isolated DB namespace _(2026-08-07)_
-- fix(db): Replace all ON CONFLICT queries in resume_ats_agent with atomic DELETE + INSERT for 100% Turso Cloud DB compatibility _(2026-08-05)_
 <!-- /AUTO:changelog -->
 
 ---
 
-_Last updated: 2026-08-19 · this README's inventory and changelog are auto-maintained by
+_Last updated: 2026-10-02 · this README's inventory and changelog are auto-maintained by
 `scripts/gen_readme.py` on every commit._

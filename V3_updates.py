@@ -1147,6 +1147,9 @@ async def lifespan(app: FastAPI):
 
     init_jobs_router_deps(call_llm, send_whatsapp_chunked)
     init_rag_router_deps(call_llm, _parse_json_object)
+    from sanctuary_agent import init_sanctuary_db, init_sanctuary_deps
+    await init_sanctuary_db()
+    init_sanctuary_deps(notify_fn=send_whatsapp_chunked)
 
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
     app.state.scheduler = scheduler
@@ -1206,6 +1209,8 @@ from routers.chat_voice_bills import router as chat_bills_router
 from routers.extension import router as extension_router, set_extension_deps
 from routers.wealth_management import router as wealth_router
 from routers.protocol_sovereign import router as protocol_router
+from routers.learning import router as learning_router
+from routers.sanctuary import router as sanctuary_router
 
 app.include_router(auth_router)
 app.include_router(jobs_router)
@@ -1218,6 +1223,14 @@ app.include_router(chat_bills_router)
 app.include_router(extension_router)
 app.include_router(wealth_router)
 app.include_router(protocol_router)
+app.include_router(learning_router)
+app.include_router(sanctuary_router)
+
+# Mount Haven PWA static portal
+from fastapi.staticfiles import StaticFiles
+_haven_dist_path = os.path.join(os.path.dirname(__file__), "sanctuary-app", "dist")
+if os.path.isdir(_haven_dist_path):
+    app.mount("/haven", StaticFiles(directory=_haven_dist_path, html=True), name="haven")
 
 # Initialize extension router dependencies
 set_extension_deps(call_llm)
