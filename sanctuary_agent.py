@@ -81,9 +81,9 @@ async def send_pulse_from_shalini(base_url: str = "") -> dict:
     magic_url = f"{clean_base}/api/sanctuary/send-warmth?token={secret_token}"
     
     msg = (
-        "✨ *Sanctuary Ambient Alert* ✨\n\n"
-        "Shalini just held her Ambient Glow orb on Sanctuary. 💛\n"
-        "She's taking a quiet moment right now.\n\n"
+        "✨ *Haven Ambient Alert* ✨\n\n"
+        "Shalini just tapped her Glow on Haven. 💛\n"
+        "She’s taking a quiet breath right now.\n\n"
         f"👉 *Tap to send warmth back:* \n{magic_url}"
     )
 

@@ -152,9 +152,9 @@ async def send_warmth_from_link(
           <div class="card">
             <div class="glow-icon">💛</div>
             <h1>Warmth Delivered</h1>
-            <p>Shalini's Ambient Glow in Sanctuary is now softly pulsing with your signal. She knows you're in her corner.</p>
+            <p>Shalini's Ambient Glow in Haven is now softly pulsing with your signal. She knows you're in her corner.</p>
             <div class="signal-pill">"{msg}"</div>
-            <div class="footer">Sanctuary Two-Way Sync • Live</div>
+            <div class="footer">Haven Two-Way Sync • Live</div>
           </div>
         </body>
         </html>

@@ -154,6 +154,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- chore: customize Haven Ambient Glow alert message _(2026-10-02)_
 - feat: Haven 28th birthday experience, QR generator, and two-way Ambient Glow pulse router _(2026-10-02)_
 - fix(voice): overhaul speech recognition with robust transcript reconstruction, natural closing triggers, and silence fallback _(2026-08-19)_
 - feat: add Project Believer entry editing & continuous voice hold-and-finish controls _(2026-08-17)_
@@ -165,7 +166,6 @@ npm install && npm run build     # served by the engine at /console
 - feat(wealth-portal): Integrate full Kanban feature suite (+Add Job modal, Slide-over Drawer, Outreach & STAR Interview Kit, search filter) into Client Wealth Portal _(2026-08-07)_
 - feat(wealth-portal): Add direct job posting URL links to cards in Client Wealth Management Portal _(2026-08-07)_
 - fix(routing): Add @app.get('/wealth-portal') SPA fallback route in V3_updates.py so direct navigation loads WealthPortal UI _(2026-08-07)_
-- feat(wealth-portal): Add Client Wealth Management Opportunities Portal with passcode security gate and isolated DB namespace _(2026-08-07)_
 <!-- /AUTO:changelog -->
 
 ---
