@@ -106,6 +106,7 @@ whole console from bundled sample fixtures. Shareable as a live demo with zero d
 - **`email_triage.py`** — Email Triage Agent — self-contained skill module.
 - **`followup_agent.py`** — Follow-up Agent — nudges stale 'applied' cards with a drafted recruiter follow-up.
 - **`gemini_tts.py`** — Gemini text-to-speech — an optional natural voice for JARVIS.
+- **`generate_card_pdf.py`** — Compiles card.html into a high-quality printable PDF using headless Chrome with base64 embedded QR code.
 - **`generate_haven_qr.py`** — Generates high-resolution QR code and printable gift cards for Shalini's Haven Birthday App.
 - **`get_gmail_token.py`** — get_gmail_token.py — Zero-dependency Google OAuth Refresh Token Generator for JARVIS.
 - **`google_docs_agent.py`** — Google Docs Agent — turns an ATS analysis into a tailored-résumé Google Doc.
@@ -154,6 +155,7 @@ npm install && npm run build     # served by the engine at /console
 ## Recent changes
 
 <!-- AUTO:changelog -->
+- feat: finalize Version 1 birthday letter with unconditional companionship promise _(2026-10-03)_
 - chore: customize Haven Ambient Glow alert message _(2026-10-02)_
 - feat: Haven 28th birthday experience, QR generator, and two-way Ambient Glow pulse router _(2026-10-02)_
 - fix(voice): overhaul speech recognition with robust transcript reconstruction, natural closing triggers, and silence fallback _(2026-08-19)_
@@ -165,10 +167,9 @@ npm install && npm run build     # served by the engine at /console
 - fix(wealth-scout): Add strict deduplication against existing board cards and show 'No more new jobs' notice when all opportunities are already added _(2026-08-09)_
 - feat(wealth-portal): Integrate full Kanban feature suite (+Add Job modal, Slide-over Drawer, Outreach & STAR Interview Kit, search filter) into Client Wealth Portal _(2026-08-07)_
 - feat(wealth-portal): Add direct job posting URL links to cards in Client Wealth Management Portal _(2026-08-07)_
-- fix(routing): Add @app.get('/wealth-portal') SPA fallback route in V3_updates.py so direct navigation loads WealthPortal UI _(2026-08-07)_
 <!-- /AUTO:changelog -->
 
 ---
 
-_Last updated: 2026-10-02 · this README's inventory and changelog are auto-maintained by
+_Last updated: 2026-10-03 · this README's inventory and changelog are auto-maintained by
 `scripts/gen_readme.py` on every commit._

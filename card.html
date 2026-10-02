@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Happy 28th</title>
+    <style>
+        @page {
+            size: A4;
+            margin: 0;
+        }
+
+        body {
+            font-family: 'Georgia', serif;
+            background-color: #fcfbfa;
+            color: #2c2c2c;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+
+        .card-container {
+            width: 450px;
+            padding: 60px 40px;
+            text-align: center;
+            border: 2px solid #d4af37;
+            /* Elegant subtle gold/bronze border */
+            outline: 6px double #fcfbfa;
+            outline-offset: -10px;
+            background: #ffffff;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
+            border-radius: 4px;
+        }
+
+        .ornament {
+            color: #d4af37;
+            font-size: 20px;
+            letter-spacing: 4px;
+            margin-bottom: 25px;
+        }
+
+        h1 {
+            font-size: 26px;
+            font-weight: normal;
+            letter-spacing: 1px;
+            margin-bottom: 25px;
+            color: #1a1a1a;
+        }
+
+        p {
+            font-size: 15px;
+            line-height: 1.8;
+            color: #4a4a4a;
+            margin-bottom: 20px;
+        }
+
+        .qr-section {
+            margin-top: 35px;
+        }
+
+        .qr-code {
+            width: 160px;
+            height: 160px;
+            border: 1px solid #eaeaea;
+            padding: 10px;
+            background: #fff;
+            border-radius: 8px;
+        }
+
+        .scan-text {
+            font-size: 13px;
+            color: #777;
+            margin-top: 12px;
+            font-style: italic;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="card-container">
+        <div class="ornament">✧ &nbsp; ✦ &nbsp; ✧</div>
+
+        <h1>Happy 28th.</h1>
+
+        <p>
+            Today is your official reminder that the world can wait. You spend so much of your life showing up with
+            strength and grace, but today is simply about you catching your breath, doing things at your own pace, and
+            feeling celebrated.
+        </p>
+
+        <p>
+            Down below is a small, quiet corner created just for your day. Scan it whenever you find a comfortable spot
+            and a few minutes to yourself—no rules, no rush, just a little place to unwind.
+        </p>
+
+        <div class="qr-section">
+            <!-- Uses your uploaded QR code image -->
+            <img src="haven_qr_code.png" alt="Scan QR Code" class="qr-code">
+            <div class="scan-text">(Scan whenever you have a quiet minute)</div>
+        </div>
+
+        <div class="ornament" style="margin-top: 35px; margin-bottom: 0;">✧ &nbsp; ✦ &nbsp; ✧</div>
+    </div>
+
+</body>
+
+</html>
